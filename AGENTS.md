@@ -7,7 +7,7 @@
 - Assets and docs: see `selfdrive/assets/` and `docs/` (mkdocs).
 
 ## Build, Test, and Development Commands
-- Environment: `pip install -e .[dev,testing]` (or `uv sync`) to install dependencies.
+- Environment: execute `source .venv/bin/activate` to enter the environment
 - Build native/Cython artifacts: `scons -j$(nproc)` (uses `SConstruct`).
 - Run tests: `pytest -q` or target a path, e.g., `pytest selfdrive/ -m "not slow"`.
 - Lint/format: `ruff check .` and `ruff format .`; spell check with `codespell`.
@@ -34,5 +34,6 @@
 - Do not commit secrets, logs, or large binaries outside LFS-managed paths. Respect `.gitignore` and `.gitattributes`.
 - Changes to symlinked/vendor repos should be proposed upstream or mirrored in their respective subrepos.
 
-## Chat Languate
+## Chat Language
 - When you talk to the user, you should always use Chinese.
+- When you write documents, please use Chinese also.
