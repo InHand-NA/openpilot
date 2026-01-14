@@ -297,7 +297,7 @@ class ModelRenderer(Widget):
           np.interp(abs(torque), [0.6, 0.8], [0.0, 1.0])
         )
     else:
-      color = rl.Color(255, 255, 255, int(alpha * 255))
+      color = rl.Color(0, 255, 64, int(alpha * 255))
 
     if ui_state.status == UIStatus.DISENGAGED:
       color = rl.Color(0, 0, 0, int(alpha * 255))

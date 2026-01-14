@@ -262,7 +262,7 @@ class ModelRenderer(Widget):
         continue
 
       alpha = np.clip(self._lane_line_probs[i], 0.0, 0.7)
-      color = rl.Color(255, 255, 255, int(alpha * 255))
+      color = rl.Color(0, 255, 64, int(alpha * 255))
       draw_polygon(self._rect, lane_line.projected_points, color)
 
     for i, road_edge in enumerate(self._road_edges):
