@@ -6,6 +6,8 @@ GREEN='\033[0;32m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+OPENPILOT_ROOT="$(pwd)/openpilot"
+
 if [ -z "$OPENPILOT_ROOT" ]; then
   # default to current directory for installation
   OPENPILOT_ROOT="$(pwd)/openpilot"
