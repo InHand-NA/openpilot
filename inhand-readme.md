@@ -7,3 +7,6 @@
 
 - Refer to `https://docs.comma.ai/how-to/turn-the-speed-blue/`
 - Start big screen mode ui: `BIG=1 ./selfdrive/ui/ui.py`
+
+## 回放时过滤数据
+- ‘--allow=roadEncodeIdx,roadCameraState,modelV2,liveCalibration，’
