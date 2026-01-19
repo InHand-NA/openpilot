@@ -33,3 +33,6 @@
 
 ## Agent-Specific Notes
 - These guidelines apply repo-wide. When modifying code, keep changes minimal, respect existing structure, and update tests alongside code.
+
+## Chat Language and Doc Language
+- When you chat with the user or write a document, you should always use Chinese language.
