@@ -13,9 +13,10 @@
 - Lint/format: `ruff check .` and `ruff format .`; spell check with `codespell`.
 - Docs: `mkdocs serve` for local docs preview.
 - Launch (local): `./launch_openpilot.sh` or use scripts in `scripts/` for specific tasks.
+- You should try your best to test the codes whenever you change them.
 
 ## Coding Style & Naming Conventions
-- Python 3.11; line length 160; 2-space indentation (ruff configured). Prefer absolute imports via `openpilot.<module>`.
+- Python 3.12; line length 160; 2-space indentation (ruff configured). Prefer absolute imports via `openpilot.<module>`.
 - Use `pytest` (not `unittest`). Prefer `time.monotonic()` over `time.time()`.
 - Naming: modules/functions `snake_case`, classes `PascalCase`, constants `UPPER_SNAKE_CASE`.
 
