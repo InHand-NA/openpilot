@@ -182,5 +182,5 @@ NOTE: 本文基于Openpilot v0.9.5代码实现进行分析，carla版本为0.9.1
 `launch_openpilot.sh (line 1)`
 - 启动桥接
 `run_bridge.py` (line 1)
-示例：`run_bridge.py --host 127.0.0.1 --port 2000 --town Town03 --spawn_point 0 --dual_camera`
+示例：`python tools/carla-sim-new/run_bridge.py --host 127.0.0.1 --port 2000 --town Town03 --spawn_point 0 --dual_camera`
 键盘控制见 keyboard_ctrl.py (line 1)（1/2/3巡航，wasd手动，r重置，i点火，q退出）
