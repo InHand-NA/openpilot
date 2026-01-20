@@ -93,15 +93,26 @@ class Parser:
     return True
 
   def parse_vision_outputs(self, outs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    # 相机位姿向量（6 自由度），用于相机里程计/短期运动估计（通常包含平移 xyz 与欧拉角 rpy）。
     self.parse_mdn('pose', outs, in_N=0, out_N=0, out_shape=(ModelConstants.POSE_WIDTH,))
+    # 设备坐标系到广角相机的欧拉角关系（rpy），用于多相机几何对齐。
     self.parse_mdn('wide_from_device_euler', outs, in_N=0, out_N=0, out_shape=(ModelConstants.WIDE_FROM_DEVICE_WIDTH,))
+    # 路面坐标变换相关的 6 维参数（可理解为与路面几何/姿态估计相关的位姿量）。
     self.parse_mdn('road_transform', outs, in_N=0, out_N=0, out_shape=(ModelConstants.POSE_WIDTH,))
+    # 4 条车道线（如左/右可见与虚/实分类由其他分支给出），沿前方距离序列的几何量。
     self.parse_mdn('lane_lines', outs, in_N=0, out_N=0, out_shape=(ModelConstants.NUM_LANE_LINES,ModelConstants.IDX_N,ModelConstants.LANE_LINES_WIDTH))
+    # 左右路缘线的几何序列。
     self.parse_mdn('road_edges', outs, in_N=0, out_N=0, out_shape=(ModelConstants.NUM_ROAD_EDGES,ModelConstants.IDX_N,ModelConstants.LANE_LINES_WIDTH))
+    # 每条车道线存在/可见性的概率。
     self.parse_binary_crossentropy('lane_lines_prob', outs)
+    # 未来时域的驾驶意图分布（如直行、变道左/右、变道准备等）。
     self.parse_categorical_crossentropy('desire_pred', outs, out_shape=(ModelConstants.DESIRE_PRED_LEN,ModelConstants.DESIRE_PRED_WIDTH))
+    # 一组“元事件”在未来各时间片发生的概率，如“油门/制动导致脱离”“方向盘接管”“不同等级急刹”等，以及灯光/踏板操作等。
     self.parse_binary_crossentropy('meta', outs)
+    # 前车（领航车）存在的概率。
     self.parse_binary_crossentropy('lead_prob', outs)
+    # 前车轨迹及状态的时间序列预测。维度含义（每个时间点的 4 维量，训练中常用约定）：
+    # 典型为前向距离 x、横向偏移 y、相对速度 vx、相对加速度 ax（单位米/米每秒/米每二次方秒），具体以训练配置为准。
     lead_mhp = self.is_mhp(outs, 'lead', ModelConstants.LEAD_MHP_SELECTION * ModelConstants.LEAD_TRAJ_LEN * ModelConstants.LEAD_WIDTH)
     lead_in_N, lead_out_N = (ModelConstants.LEAD_MHP_N, ModelConstants.LEAD_MHP_SELECTION) if lead_mhp else (0, 0)
     lead_out_shape = (ModelConstants.LEAD_TRAJ_LEN, ModelConstants.LEAD_WIDTH) if lead_mhp else \

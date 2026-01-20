@@ -260,14 +260,17 @@ class ModelState:
     new_desire = np.where(inputs['desire_pulse'] - self.prev_desire > .99, inputs['desire_pulse'], 0)
     self.prev_desire[:] = inputs['desire_pulse']
 
+    # 每个输入名调用 DrivingModelFrame.prepare(buf, transform) 完成几何变换，得到 OpenCL 缓冲句柄.
     imgs_cl = {name: self.frames[name].prepare(bufs[name], transforms[name].flatten()) for name in self.vision_input_names}
 
     if TICI and not USBGPU:
+      # 在 TICI 且非 USBGPU：用 qcom_tensor_from_opencl_address 将 OpenCL 显存直接映射为 tinygrad 张量，仅首次创建
       # The imgs tensors are backed by opencl memory, only need init once
       for key in imgs_cl:
         if key not in self.vision_inputs:
           self.vision_inputs[key] = qcom_tensor_from_opencl_address(imgs_cl[key].mem_address, self.vision_input_shapes[key], dtype=dtypes.uint8)
     else:
+      # 从 CL 读出到 CPU，再构造 uint8 张量
       for key in imgs_cl:
         frame_input = self.frames[key].buffer_from_cl(imgs_cl[key]).reshape(self.vision_input_shapes[key])
         self.vision_inputs[key] = Tensor(frame_input, dtype=dtypes.uint8).realize()
@@ -276,6 +279,7 @@ class ModelState:
       # 丢帧时跳过一次前向，但保持输入缓冲更新节奏
       return None
 
+    # 视觉网络前向与解析
     self.vision_output = self.vision_run(**self.vision_inputs).contiguous().realize().uop.base.buffer.numpy()
     vision_outputs_dict = self.parser.parse_vision_outputs(self.slice_outputs(self.vision_output, self.vision_output_slices))
 
@@ -322,6 +326,7 @@ def main(demo=False):
     if available_streams:
       # 在新款硬件上可能具备 ROAD（狭 FOV）与 WIDE_ROAD（广 FOV）两路流
       use_extra_client = VisionStreamType.VISION_STREAM_WIDE_ROAD in available_streams and VisionStreamType.VISION_STREAM_ROAD in available_streams
+      # 如果没有ROAD（狭 FOV）则使用WIDE_ROAD（广 FOV）作为主流。
       main_wide_camera = VisionStreamType.VISION_STREAM_ROAD not in available_streams
       break
     time.sleep(.1)
@@ -403,20 +408,25 @@ def main(demo=False):
                          extra: {meta_extra.frame_id} ({meta_extra.timestamp_sof / 1e9:.5f})")
 
     else:
+      # 当只有WIDE_ROAD（广 FOV）时，main和extra都是广角相机流。
       # Use single camera
       buf_extra = buf_main
       meta_extra = meta_main
 
     sm.update(0)
+    # desire的作用是什么？
     desire = DH.desire
     is_rhd = sm["driverMonitoringState"].isRHD
     frame_id = sm["roadCameraState"].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
     lat_delay = sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
     if sm.updated["liveCalibration"] and sm.seen['roadCameraState'] and sm.seen['deviceState']:
+      # 实时标定的欧拉角，假定两个相机使用相同姿态欧拉角。
       device_from_calib_euler = np.array(sm["liveCalibration"].rpyCalib, dtype=np.float32)
       dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
+      # 主流像素变换矩阵，用于将图像变换到标定坐标系，对应MEDModel
       model_transform_main = get_warp_matrix(device_from_calib_euler, dc.ecam.intrinsics if main_wide_camera else dc.fcam.intrinsics, False).astype(np.float32)
+      # extra流像素变换矩阵，对应SBIGModel
       model_transform_extra = get_warp_matrix(device_from_calib_euler, dc.ecam.intrinsics, True).astype(np.float32)
       live_calib_seen = True
 
@@ -440,6 +450,7 @@ def main(demo=False):
     if prepare_only:
       cloudlog.error(f"skipping model eval. Dropped {vipc_dropped_frames} frames")
 
+    # 输入给model的image buf；
     bufs = {name: buf_extra if 'big' in name else buf_main for name in model.vision_input_names}
     transforms = {name: model_transform_extra if 'big' in name else model_transform_main for name in model.vision_input_names}
     inputs:dict[str, np.ndarray] = {
@@ -448,6 +459,7 @@ def main(demo=False):
     }
 
     mt1 = time.perf_counter()
+    # 运行模型
     model_output = model.run(bufs, transforms, inputs, prepare_only)
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
