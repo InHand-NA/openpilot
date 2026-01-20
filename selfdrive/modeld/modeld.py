@@ -1,9 +1,32 @@
 #!/usr/bin/env python3
+"""
+modeld 模块（Python 版本）
+
+本文件负责在设备上拉取摄像头图像、做几何变换并通过 tinygrad 驱动的视觉/策略模型进行推理，
+随后将解析后的结果（轨迹、速度、曲率、意图等）封装并通过 cereal/messaging 发布给系统其他
+进程使用（如控制、UI 等）。整体数据流如下：
+
+- 摄像头输入：通过 VisionIPC 从 camerad 订阅主/副相机帧，同时根据在线标定计算图像到模型坐标
+  的单应矩阵（warp matrix）。
+- 视觉网络：接入帧经 OpenCL 预处理后送入视觉网络，得到隐藏状态/中间表征等输出。
+- 策略网络：以视觉网络隐藏状态、驾驶意图脉冲等为输入，输出计划与动作相关的各类分布/量化值。
+- 解析发布：将视觉+策略输出解析为结构化字段，计算 desiredCurvature/desiredAcceleration，发布
+  modelV2、drivingModelData 与 cameraOdometry。
+
+实现要点与注意事项：
+- QCOM 芯片（TICI）上尽可能复用 OpenCL 内存，避免在 CPU 上来回拷贝，降低延迟与占用。
+- 当检测到相机帧丢失时，仅做准备（prepare）而跳过一次前向，以保持内部状态同步并避免卡顿。
+- 基于车机实测的执行/平滑延迟估计，对经模型输出的动作做时间对齐与滤波，提升控制稳定性。
+
+本文内所有注释均为中文，用于帮助理解核心逻辑，不影响运行时行为。
+"""
 import os
 from openpilot.system.hardware import TICI
+# 根据硬件类型选择推理设备：TICI 上默认使用 QCOM（OpenCL），其它平台使用 CPU
 os.environ['DEV'] = 'QCOM' if TICI else 'CPU'
-USBGPU = "USBGPU" in os.environ
+USBGPU = "USBGPU" in os.environ  # 环境变量开关：通过 USB 外接 GPU（AMD）
 if USBGPU:
+  # 当使用 USB GPU 时，切换到 AMD 后端，并指定接口为 USB
   os.environ['DEV'] = 'AMD'
   os.environ['AMD_IFACE'] = 'USB'
 from tinygrad.tensor import Tensor
@@ -33,6 +56,7 @@ from openpilot.selfdrive.modeld.runners.tinygrad_helpers import qcom_tensor_from
 
 
 PROCESS_NAME = "selfdrive.modeld.modeld"
+# 调试用途：若设置该环境变量，则在消息中额外带上未解析的原始预测向量
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 
 VISION_PKL_PATH = Path(__file__).parent / 'models/driving_vision_tinygrad.pkl'
@@ -40,13 +64,22 @@ POLICY_PKL_PATH = Path(__file__).parent / 'models/driving_policy_tinygrad.pkl'
 VISION_METADATA_PATH = Path(__file__).parent / 'models/driving_vision_metadata.pkl'
 POLICY_METADATA_PATH = Path(__file__).parent / 'models/driving_policy_metadata.pkl'
 
-LAT_SMOOTH_SECONDS = 0.0
-LONG_SMOOTH_SECONDS = 0.3
-MIN_LAT_CONTROL_SPEED = 0.3
+LAT_SMOOTH_SECONDS = 0.0      # 横向动作平滑时间常数（秒）
+LONG_SMOOTH_SECONDS = 0.3     # 纵向动作平滑时间常数（秒）
+MIN_LAT_CONTROL_SPEED = 0.3   # 低于该车速（m/s）时保持既有曲率，避免低速抖动
 
 
 def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.ModelDataV2.Action,
                           lat_action_t: float, long_action_t: float, v_ego: float) -> log.ModelDataV2.Action:
+    """从模型解析规划，生成控制动作（期望加速度/曲率）
+
+    参数说明：
+    - model_output: 解析后的模型输出字典，内含 plan、orientation 等关键数组
+    - prev_action: 上一时刻输出的动作，用于平滑
+    - lat_action_t: 横向动作时间前视（考虑计算/执行/平滑延迟）
+    - long_action_t: 纵向动作时间前视（考虑计算/执行/平滑延迟）
+    - v_ego: 车速（m/s），用于曲率计算与低速保护
+    """
     plan = model_output['plan'][0]
     desired_accel, should_stop = get_accel_from_plan(plan[:,Plan.VELOCITY][:,0],
                                                      plan[:,Plan.ACCELERATION][:,0],
@@ -69,6 +102,11 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
                                   shouldStop=bool(should_stop))
 
 class FrameMeta:
+  """封装 VisionIPC 返回的帧元信息（帧号与时间戳）
+
+  - frame_id: 帧序号（来自 camerad）
+  - timestamp_sof/eof: 帧起始/结束时间戳（ns）
+  """
   frame_id: int = 0
   timestamp_sof: int = 0
   timestamp_eof: int = 0
@@ -78,6 +116,11 @@ class FrameMeta:
       self.frame_id, self.timestamp_sof, self.timestamp_eof = vipc.frame_id, vipc.timestamp_sof, vipc.timestamp_eof
 
 class InputQueues:
+  """输入队列/滑动窗口管理
+
+  作用：当环境帧率 env_fps 高于模型帧率 model_fps 时，维护一个按时间推进的输入缓存窗口，
+  以便模型每次取样到正确数量与间隔的帧/特征（图像、脉冲、隐藏状态等）。
+  """
   def __init__ (self, model_fps, env_fps, n_frames_input):
     assert env_fps % model_fps == 0
     assert env_fps >= model_fps
@@ -90,6 +133,7 @@ class InputQueues:
     self.q = {}
 
   def update_dtypes_and_shapes(self, input_dtypes, input_shapes) -> None:
+    """注册输入的 dtype/shape；当 env_fps 高于 model_fps 时调整通道/时间维布局"""
     self.dtypes.update(input_dtypes)
     if self.env_fps == self.model_fps:
       self.shapes.update(input_shapes)
@@ -97,16 +141,20 @@ class InputQueues:
       for k in input_shapes:
         shape = list(input_shapes[k])
         if 'img' in k:
+          # 图像输入：通道维包含多帧拼接，这里按采样率重排
           n_channels = shape[1] // self.n_frames_input
           shape[1] = (self.env_fps // self.model_fps + (self.n_frames_input - 1)) * n_channels
         else:
+          # 其它时间序列输入：按采样率聚合
           shape[1] = (self.env_fps // self.model_fps) * shape[1]
         self.shapes[k] = tuple(shape)
 
   def reset(self) -> None:
+    """将内部缓冲区清零重置"""
     self.q = {k: np.zeros(self.shapes[k], dtype=self.dtypes[k]) for k in self.dtypes.keys()}
 
   def enqueue(self, inputs:dict[str, np.ndarray]) -> None:
+    """将一次新到达的输入（可包含多种键）推入滑动窗口末尾"""
     for k in inputs.keys():
       if inputs[k].dtype != self.dtypes[k]:
         raise ValueError(f'supplied input <{k}({inputs[k].dtype})> has wrong dtype, expected {self.dtypes[k]}')
@@ -114,10 +162,17 @@ class InputQueues:
       input_shape[1] = -1
       single_input = inputs[k].reshape(tuple(input_shape))
       sz = single_input.shape[1]
+      # 窗口左移，腾出新数据的空间
       self.q[k][:,:-sz] = self.q[k][:,sz:]
       self.q[k][:,-sz:] = single_input
 
   def get(self, *names) -> dict[str, np.ndarray]:
+    """按模型帧率取样输出窗口末尾的一组输入
+
+    - 图像：在窗口内按等间隔抽取 n_frames_input 帧并按通道拼接
+    - 脉冲：在对应时间区间内取最大值（只要有脉冲即为 1）
+    - 其它：按采样率等间隔索引
+    """
     if self.env_fps == self.model_fps:
       return {k: self.q[k] for k in names}
     else:
@@ -136,6 +191,12 @@ class InputQueues:
       return out
 
 class ModelState:
+  """模型状态与推理执行封装
+
+  - 负责加载视觉/策略网络及其元数据（输入形状、输出切片等）
+  - 管理 OpenCL/Tinygrad 张量与输入队列，复用显存/缓冲以降低开销
+  - 提供 run() 完成一次视觉+策略前向、并输出解析后的字典
+  """
   frames: dict[str, DrivingModelFrame]
   inputs: dict[str, np.ndarray]
   output: np.ndarray
@@ -179,11 +240,21 @@ class ModelState:
       self.policy_run = pickle.load(f)
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
+    """按元数据提供的切片将扁平输出拆分为命名的子向量"""
     parsed_model_outputs = {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
     return parsed_model_outputs
 
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
                 inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
+    """执行一次模型推理
+
+    流程：
+    1) desire 转换为脉冲（只在上升沿产生 1），避免模型内部状态错误累积
+    2) 用 OpenCL 将相机帧做几何变换并写入模型输入缓冲（TICI 上可直接映射显存）
+    3) 若 prepare_only（发生丢帧），仅准备输入不做前向，以保持节拍
+    4) 视觉前向 -> 解析 -> 写入全量输入队列（隐藏状态/脉冲）
+    5) 策略前向 -> 解析 -> 合并输出，必要时附加 raw_pred
+    """
     # Model decides when action is completed, so desire input is just a pulse triggered on rising edge
     inputs['desire_pulse'][0] = 0
     new_desire = np.where(inputs['desire_pulse'] - self.prev_desire > .99, inputs['desire_pulse'], 0)
@@ -202,6 +273,7 @@ class ModelState:
         self.vision_inputs[key] = Tensor(frame_input, dtype=dtypes.uint8).realize()
 
     if prepare_only:
+      # 丢帧时跳过一次前向，但保持输入缓冲更新节奏
       return None
 
     self.vision_output = self.vision_run(**self.vision_inputs).contiguous().realize().uop.base.buffer.numpy()
@@ -223,6 +295,13 @@ class ModelState:
 
 
 def main(demo=False):
+  """modeld 主循环
+
+  - 初始化实时优先级、CL 上下文、模型与 VisionIPC 客户端
+  - 订阅/对齐主副路相机帧，追踪丢帧情况
+  - 维护 DesireHelper 与车辆状态，在线计算几何变换矩阵
+  - 驱动模型推理，封装并发布消息
+  """
   cloudlog.warning("modeld init")
 
   if not USBGPU:
@@ -241,6 +320,7 @@ def main(demo=False):
   while True:
     available_streams = VisionIpcClient.available_streams("camerad", block=False)
     if available_streams:
+      # 在新款硬件上可能具备 ROAD（狭 FOV）与 WIDE_ROAD（广 FOV）两路流
       use_extra_client = VisionStreamType.VISION_STREAM_WIDE_ROAD in available_streams and VisionStreamType.VISION_STREAM_ROAD in available_streams
       main_wide_camera = VisionStreamType.VISION_STREAM_ROAD not in available_streams
       break
