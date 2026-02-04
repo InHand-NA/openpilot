@@ -45,20 +45,36 @@ def main():
 
   if actor is not None:
     print("Spawned vehicle:", actor)
-    # 开启自动驾驶（Traffic Manager 若存在将自动接管）
-    with contextlib.suppress(Exception):
-      actor.set_autopilot(True)
+    # 切换到同步模式，并配置固定步长
+    original_settings = world.get_settings()
+    new_settings = carla.WorldSettings(
+      no_rendering_mode=original_settings.no_rendering_mode,
+      synchronous_mode=True,
+      fixed_delta_seconds=0.05,
+      substepping=original_settings.substepping,
+      max_substep_delta_time=original_settings.max_substep_delta_time,
+      max_substeps=original_settings.max_substeps,
+    )
 
-    # 持续在每个tick将观众放在车辆上方，方便观察
+    tm = None
+    with contextlib.suppress(Exception):
+      tm = client.get_trafficmanager()
+      tm.set_synchronous_mode(True)
+
+    world.apply_settings(new_settings)
+
+    # 开启自动驾驶（绑定到 Traffic Manager 端口以确保同步控制）
+    with contextlib.suppress(Exception):
+      if tm is not None:
+        actor.set_autopilot(True, tm.get_port())
+      else:
+        actor.set_autopilot(True)
+
+    # 使用 tick 驱动同步仿真，每步更新观众视角
     try:
       while True:
-        snapshot = world.wait_for_tick(1.0)
-        if snapshot is None:
-          # 异步模式下也尽量保持刷新
-          t = actor.get_transform()
-        else:
-          t = actor.get_transform()
-
+        world.tick()
+        t = actor.get_transform()
         loc = t.location
         spectator.set_transform(carla.Transform(
           carla.Location(x=loc.x, y=loc.y, z=loc.z + 25.0),
@@ -69,6 +85,11 @@ def main():
     finally:
       with contextlib.suppress(Exception):
         actor.destroy()
+      with contextlib.suppress(Exception):
+        if tm is not None:
+          tm.set_synchronous_mode(False)
+      with contextlib.suppress(Exception):
+        world.apply_settings(original_settings)
   else:
     print("Failed to spawn a vehicle at a random road point")
 
