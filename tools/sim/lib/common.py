@@ -65,7 +65,9 @@ class World(ABC):
   def __init__(self, dual_camera):
     self.dual_camera = dual_camera
 
-    self.image_lock = multiprocessing.Semaphore(value=0)
+    # 互斥锁：用于摄像头回调与发送线程之间的读写保护
+    # 原先使用 Semaphore(0) 会导致回调和读取双方都阻塞，进而卡住同步 tick
+    self.image_lock = multiprocessing.Lock()
     self.road_image = np.zeros((H, W, 3), dtype=np.uint8)
     self.wide_road_image = np.zeros((H, W, 3), dtype=np.uint8)
 

@@ -100,12 +100,16 @@ class SimulatedSensors:
     self.pm.send('driverMonitoringState', dat)
 
   def send_camera_images(self, world: 'World'):
-    world.image_lock.acquire()
-    yuv = self.camerad.rgb_to_yuv(world.road_image)
+    # 仅在锁内做快速拷贝，避免长时间持锁导致回调阻塞
+    with world.image_lock:
+      road_rgb = world.road_image.copy()
+      wide_rgb = world.wide_road_image.copy() if world.dual_camera else None
+
+    yuv = self.camerad.rgb_to_yuv(road_rgb)
     self.camerad.cam_send_yuv_road(yuv)
 
-    if world.dual_camera:
-      yuv = self.camerad.rgb_to_yuv(world.wide_road_image)
+    if world.dual_camera and wide_rgb is not None:
+      yuv = self.camerad.rgb_to_yuv(wide_rgb)
       self.camerad.cam_send_yuv_wide_road(yuv)
 
   def update(self, simulator_state: 'SimulatorState', world: 'World'):

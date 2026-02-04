@@ -27,4 +27,4 @@ docker run ${EXTRA_ARGS} \
   --env=NVIDIA_VISIBLE_DEVICES=all \
   --env=NVIDIA_DRIVER_CAPABILITIES=all \
   --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
-  "${CARLA_IMAGE}" bash CarlaUE4.sh  -nosound
+  "${CARLA_IMAGE}" bash CarlaUE4.sh  -nosound -RenderOffScreen
