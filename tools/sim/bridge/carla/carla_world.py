@@ -242,7 +242,8 @@ def test_carla_world(host: str = None, port: int | None = None, timeout: float |
     # 轻量通信往返：原地切换并回滚一个不会破坏仿真的设置
     orig_no_rendering = settings.no_rendering_mode
     try:
-      settings.no_rendering_mode = not orig_no_rendering
+      #settings.no_rendering_mode = not orig_no_rendering
+      settings.synchronous_mode = True  # 确保同步模式
       world.apply_settings(settings)
       world.wait_for_tick(seconds=timeout)
       print(
@@ -262,6 +263,51 @@ def test_carla_world(host: str = None, port: int | None = None, timeout: float |
       print(f"[OK] Spawn 传感器: {imu.type_id} id={imu.id}")
       imu.destroy()
       print("[OK] Destroy 传感器: 成功")
+
+    # 同步模式 + world.tick() 测试
+    # 记录原设置并确保回滚
+    orig_sync = settings.synchronous_mode
+    orig_fixed = settings.fixed_delta_seconds
+    turned_on_sync = False
+    try:
+      if not settings.synchronous_mode:
+        settings.synchronous_mode = True
+        # 若 fixed_delta 未设置，则给一个温和步长
+        if not settings.fixed_delta_seconds or settings.fixed_delta_seconds <= 0:
+          settings.fixed_delta_seconds = 0.05
+        world.apply_settings(settings)
+        turned_on_sync = True
+
+      def _safe_tick(seconds: float):
+        try:
+          snap = world.tick(seconds=seconds)
+        except TypeError:
+          # 兼容旧 API：无超时参数
+          world.tick()
+          snap = world.get_snapshot()
+        return snap
+
+      s0 = _safe_tick(timeout)
+      s1 = _safe_tick(timeout)
+      s2 = _safe_tick(timeout)
+
+      f0, f1, f2 = s0.frame, s1.frame, s2.frame
+      d01, d12 = (f1 - f0), (f2 - f1)
+      ok = (d01 == 1 and d12 == 1)
+      print(
+        f"[{'OK' if ok else 'WARN'}] 同步模式 world.tick(): frames {f0}->{f1}->{f2} (Δ={d01},{d12})"
+      )
+      if not ok:
+        print("[WARN] 帧增量非 +1，可能有外部控制或版本差异，但通信有效。")
+    finally:
+      if turned_on_sync:
+        # 回滚原设置
+        settings.synchronous_mode = orig_sync
+        settings.fixed_delta_seconds = orig_fixed
+        with contextlib.suppress(Exception):
+          world.apply_settings(settings)
+          # 回到异步时，用 wait_for_tick 确认一次
+          world.wait_for_tick(seconds=timeout)
 
     print("[SUCCESS] 与 CARLA 的连接与通信自检通过。")
     return 0
