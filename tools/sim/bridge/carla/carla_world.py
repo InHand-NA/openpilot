@@ -239,27 +239,20 @@ def test_carla_world(host: str = None, port: int | None = None, timeout: float |
         f"[OK] Spectator: loc=({tf.location.x:.1f},{tf.location.y:.1f},{tf.location.z:.1f}) yaw={tf.rotation.yaw:.1f}"
       )
 
-    # 轻量通信往返：修改并回滚一个不会破坏仿真的设置
-    old_settings = settings
+    # 轻量通信往返：原地切换并回滚一个不会破坏仿真的设置
+    orig_no_rendering = settings.no_rendering_mode
     try:
-      new_settings = carla.WorldSettings(
-        no_rendering_mode=old_settings.no_rendering_mode,
-        synchronous_mode=old_settings.synchronous_mode,
-        fixed_delta_seconds=old_settings.fixed_delta_seconds,
-        max_substep_delta_time=old_settings.max_substep_delta_time,
-        max_substeps=old_settings.max_substeps,
-      )
-      # 反转 no_rendering_mode 做一次 RPC 往返
-      new_settings.no_rendering_mode = not old_settings.no_rendering_mode
-      world.apply_settings(new_settings)
+      settings.no_rendering_mode = not orig_no_rendering
+      world.apply_settings(settings)
       world.wait_for_tick(seconds=timeout)
       print(
-        f"[OK] apply_settings 往返: no_rendering {old_settings.no_rendering_mode} -> {new_settings.no_rendering_mode}"
+        f"[OK] apply_settings 往返: no_rendering {orig_no_rendering} -> {settings.no_rendering_mode}"
       )
     finally:
       # 回滚
       with contextlib.suppress(Exception):
-        world.apply_settings(old_settings)
+        settings.no_rendering_mode = orig_no_rendering
+        world.apply_settings(settings)
 
     # 可选：创建一个临时 IMU 传感器验证 Spawn/Destroy
     if spawn_test:
