@@ -1,5 +1,6 @@
 import carla
 import random
+import contextlib
 
 def main():
   client = carla.Client('localhost', 2000)
@@ -44,13 +45,30 @@ def main():
 
   if actor is not None:
     print("Spawned vehicle:", actor)
-    # 将观众移动到车辆上方以便查看
-    t = actor.get_transform()
-    loc = t.location
-    spectator.set_transform(carla.Transform(
-      carla.Location(x=loc.x, y=loc.y, z=loc.z + 25.0),
-      carla.Rotation(pitch=-90.0)
-    ))
+    # 开启自动驾驶（Traffic Manager 若存在将自动接管）
+    with contextlib.suppress(Exception):
+      actor.set_autopilot(True)
+
+    # 持续在每个tick将观众放在车辆上方，方便观察
+    try:
+      while True:
+        snapshot = world.wait_for_tick(1.0)
+        if snapshot is None:
+          # 异步模式下也尽量保持刷新
+          t = actor.get_transform()
+        else:
+          t = actor.get_transform()
+
+        loc = t.location
+        spectator.set_transform(carla.Transform(
+          carla.Location(x=loc.x, y=loc.y, z=loc.z + 25.0),
+          carla.Rotation(pitch=-90.0)
+        ))
+    except KeyboardInterrupt:
+      pass
+    finally:
+      with contextlib.suppress(Exception):
+        actor.destroy()
   else:
     print("Failed to spawn a vehicle at a random road point")
 
