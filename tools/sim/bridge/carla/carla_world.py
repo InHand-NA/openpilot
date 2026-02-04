@@ -164,7 +164,7 @@ class CarlaWorld(World):
     self.vehicle.set_target_velocity(carla.Vector3D())
 
 
-def test_carla_world(host: str = None, port: int | None = None, timeout: float | None = None, spawn_test: bool = False) -> int:
+def test_carla_world(host: str = None, port: int | None = None, timeout: float | None = None, spawn_test: bool = False, town: str | None = None) -> int:
   """
   连接并自检 CARLA Server 的核心通信能力，不依赖 openpilot 运行时。
 
@@ -191,7 +191,8 @@ def test_carla_world(host: str = None, port: int | None = None, timeout: float |
 
   host = host or os.environ.get("CARLA_HOST", "127.0.0.1")
   port = int(port if port is not None else os.environ.get("CARLA_PORT", 2000))
-  timeout = float(timeout if timeout is not None else os.environ.get("CARLA_TIMEOUT", 5.0))
+  timeout = float(timeout if timeout is not None else os.environ.get("CARLA_TIMEOUT", 60.0))
+  desired_town = (town or os.environ.get("CARLA_TOWN") or "Town04_Opt")
 
   print(f"[INFO] 尝试连接 CARLA Server {host}:{port}，超时 {timeout:.1f}s …")
 
@@ -211,6 +212,19 @@ def test_carla_world(host: str = None, port: int | None = None, timeout: float |
     if world is None:
       print("[ERROR] 获取 World 失败: 返回 None")
       return 4
+
+    # 若当前地图不是期望地图，则尝试加载
+    try:
+      current_map_name = getattr(world.get_map(), "name", "") or ""
+    except Exception:
+      current_map_name = ""
+    if desired_town and (desired_town not in current_map_name):
+      print(f"[INFO] 加载地图: {desired_town} …")
+      try:
+        world = client.load_world(desired_town)
+      except Exception as e:
+        print(f"[ERROR] 加载地图 {desired_town} 失败: {e}")
+        return 7
 
     world_map = world.get_map()
     map_name = getattr(world_map, "name", "<unknown>")
@@ -274,22 +288,59 @@ def test_carla_world(host: str = None, port: int | None = None, timeout: float |
         settings.synchronous_mode = True
         # 若 fixed_delta 未设置，则给一个温和步长
         if not settings.fixed_delta_seconds or settings.fixed_delta_seconds <= 0:
-          settings.fixed_delta_seconds = 0.05
+          settings.fixed_delta_seconds = 0.1
         world.apply_settings(settings)
         turned_on_sync = True
 
-      def _safe_tick(seconds: float):
-        try:
-          snap = world.tick(seconds=seconds)
-        except TypeError:
-          # 兼容旧 API：无超时参数
-          world.tick()
-          snap = world.get_snapshot()
-        return snap
+        # 再次读取确认是否生效；若未生效，使用默认 WorldSettings 回退设置
+        applied = world.get_settings()
+        if (not applied.synchronous_mode) or (applied.fixed_delta_seconds is None) or (applied.fixed_delta_seconds <= 0):
+          with contextlib.suppress(Exception):
+            ws = carla.WorldSettings()
+            ws.synchronous_mode = True
+            ws.fixed_delta_seconds = 0.1
+            world.apply_settings(ws)
+          applied = world.get_settings()
+        print(
+          f"[OK] 同步设置: synchronous={applied.synchronous_mode}, fixed_delta={applied.fixed_delta_seconds}"
+        )
 
-      s0 = _safe_tick(timeout)
-      s1 = _safe_tick(timeout)
-      s2 = _safe_tick(timeout)
+      # tick 超时策略：读取 CARLA_SYNC_TIMEOUT 环境变量，默认较长一些
+      import os as _os
+      sync_timeout = float(_os.environ.get("CARLA_SYNC_TIMEOUT", max(timeout, 10.0)))
+
+      # 临时放宽 client 超时，避免旧 API 下 world.tick() 受 5s 限制
+      prev_client_timeout = timeout
+      try:
+        client.set_timeout(sync_timeout)
+      except Exception:
+        pass
+
+      def _tick_with_retry(seconds: float):
+        tries = [seconds, max(seconds * 2.0, 10.0), max(seconds * 4.0, 15.0)]
+        last_exc = None
+        for i, sec in enumerate(tries, 1):
+          try:
+            try:
+              return world.tick(seconds=sec)
+            except TypeError:
+              # 兼容旧 API：无超时参数
+              world.tick()
+              return world.get_snapshot()
+          except RuntimeError as e:
+            last_exc = e
+            msg = str(e)
+            if "time-out" in msg and i < len(tries):
+              print(f"[WARN] world.tick() 超时，重试第 {i} 次，超时={sec:.1f}s …")
+              continue
+            raise
+        # 理论上不会到达此处
+        if last_exc:
+          raise last_exc
+
+      s0 = _tick_with_retry(sync_timeout)
+      s1 = _tick_with_retry(sync_timeout)
+      s2 = _tick_with_retry(sync_timeout)
 
       f0, f1, f2 = s0.frame, s1.frame, s2.frame
       d01, d12 = (f1 - f0), (f2 - f1)
@@ -300,6 +351,10 @@ def test_carla_world(host: str = None, port: int | None = None, timeout: float |
       if not ok:
         print("[WARN] 帧增量非 +1，可能有外部控制或版本差异，但通信有效。")
     finally:
+      # 回滚 client 超时
+      with contextlib.suppress(Exception):
+        client.set_timeout(timeout)
+
       if turned_on_sync:
         # 回滚原设置
         settings.synchronous_mode = orig_sync
@@ -330,7 +385,8 @@ if __name__ == '__main__':
   parser.add_argument("--port", type=int, default=None, help="CARLA server 端口，默认读取 CARLA_PORT 或 2000")
   parser.add_argument("--timeout", type=float, default=None, help="超时时间（秒），默认读取 CARLA_TIMEOUT 或 5.0")
   parser.add_argument("--spawn-test", action="store_true", help="额外进行一次传感器 Spawn/Destroy 测试")
+  parser.add_argument("--town", default=None, help="加载并测试指定地图（默认 Town04_Opt，可用 CARLA_TOWN 覆盖）")
 
   args = parser.parse_args()
-  code = test_carla_world(args.host, args.port, args.timeout, args.spawn_test)
+  code = test_carla_world(args.host, args.port, args.timeout, args.spawn_test, args.town)
   sys.exit(code)
