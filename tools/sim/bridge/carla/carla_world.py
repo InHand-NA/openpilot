@@ -11,11 +11,12 @@ class CarlaWorld(World):
     super().__init__(dual_camera)
     import carla
 
-    #low_quality_layers = carla.MapLayer(carla.MapLayer.Ground | carla.MapLayer.Walls | carla.MapLayer.Decals)
-    #layers = carla.MapLayer.All if high_quality else low_quality_layers
-    #world = client.load_world(town, map_layers=layers)
+    high_quality = False
+    low_quality_layers = carla.MapLayer(carla.MapLayer.Ground | carla.MapLayer.Walls | carla.MapLayer.Decals)
+    layers = carla.MapLayer.All if high_quality else low_quality_layers
+    world = client.load_world(town, map_layers=layers)
     # Get the world
-    world = client.get_world()
+    #world = client.get_world()
     print("World:", world)
 
     # Get the map
@@ -24,7 +25,7 @@ class CarlaWorld(World):
 
     settings = world.get_settings()
     settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 0.05 #0.01
+    settings.fixed_delta_seconds = 0.01 #0.01
     world.apply_settings(settings)
 
     world.set_weather(carla.WeatherParameters.ClearSunset)
