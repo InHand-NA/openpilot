@@ -9,12 +9,13 @@ from openpilot.tools.sim.bridge.carla.carla_world import CarlaWorld
 class CarlaBridge(SimulatorBridge):
   TICKS_PER_FRAME = 5
 
-  def __init__(self, dual_camera, high_quality, test_duration=math.inf, test_run=False):
+  def __init__(self, dual_camera, high_quality, test_duration=math.inf, test_run=False, carla_autopilot=False):
     super().__init__(dual_camera, high_quality)
     self.host = '127.0.0.1' # arguments.host
     self.port = 2000 # arguments.port
     self.town = 'Town04_Opt' # arguments.town
     self.num_selected_spawn_point = 16 # arguments.num_selected_spawn_point
+    self.carla_autopilot = carla_autopilot
 
   def spawn_world(self, q: Queue):
     import carla
@@ -30,4 +31,5 @@ class CarlaBridge(SimulatorBridge):
     client.set_timeout(10.0)
 
     return CarlaWorld(client, high_quality=self.high_quality, dual_camera=self.dual_camera,
-                      num_selected_spawn_point=self.num_selected_spawn_point, town=self.town)
+                      num_selected_spawn_point=self.num_selected_spawn_point, town=self.town,
+                      carla_autopilot=self.carla_autopilot)

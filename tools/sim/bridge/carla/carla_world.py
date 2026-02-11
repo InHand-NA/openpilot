@@ -7,7 +7,7 @@ from openpilot.tools.sim.lib.camerad import W, H
 
 
 class CarlaWorld(World):
-  def __init__(self, client, high_quality, dual_camera, num_selected_spawn_point, town):
+  def __init__(self, client, high_quality, dual_camera, num_selected_spawn_point, town, carla_autopilot=False):
     super().__init__(dual_camera)
     import carla
 
@@ -87,9 +87,21 @@ class CarlaWorld(World):
     self.params.put_bool("UbloxAvailable", True)
 
     self.carla_objects = [self.imu, self.gps, self.road_camera, self.road_wide_camera, self.vehicle]
+    self.carla_autopilot = carla_autopilot
+    if carla_autopilot:
+      self.tm = client.get_trafficmanager()
+      self.tm.set_synchronous_mode(True)
+      self.vehicle.set_autopilot(True, self.tm.get_port())
+      print("Carla autopilot enabled")
 
   def close(self, reason: str):
     print("Closing CarlaWorld:", reason)
+    if self.carla_autopilot:
+      try:
+        self.vehicle.set_autopilot(False)
+        self.tm.set_synchronous_mode(False)
+      except Exception:
+        pass
     for s in self.carla_objects:
       if s is not None:
         try:
@@ -111,6 +123,11 @@ class CarlaWorld(World):
       self.wide_road_image = self.carla_image_to_rgb(image)
 
   def apply_controls(self, steer_angle, throttle_out, brake_out):
+    if self.carla_autopilot:
+      # autopilot 模式：只读取 Carla 的实际控制状态，不下发指令
+      self.vc = self.vehicle.get_control()
+      return
+
     self.vc.throttle = throttle_out
 
     steer_carla = steer_angle * -1 / (self.max_steer_angle * self.steer_ratio)
