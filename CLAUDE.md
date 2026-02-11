@@ -78,3 +78,7 @@ Concise subject prefixed by subsystem in imperative mood: `camerad: fix FPS drop
 ## Safety
 
 The safety model is enforced in `panda/` (C code, MISRA C guidelines). Changes to safety-critical code require extra scrutiny per ISO26262.
+
+## Chat Language
+- When you talk to the user, you should always use Chinese.
+- When you write documents, please use Chinese also.
