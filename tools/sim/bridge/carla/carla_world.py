@@ -11,7 +11,7 @@ class CarlaWorld(World):
     super().__init__(dual_camera)
     import carla
 
-    high_quality = False
+    #high_quality = False
     low_quality_layers = carla.MapLayer(carla.MapLayer.Ground | carla.MapLayer.Walls | carla.MapLayer.Decals)
     layers = carla.MapLayer.All if high_quality else low_quality_layers
     world = client.load_world(town, map_layers=layers)
@@ -88,7 +88,8 @@ class CarlaWorld(World):
 
     self.carla_objects = [self.imu, self.gps, self.road_camera, self.road_wide_camera, self.vehicle]
 
-  def close(self):
+  def close(self, reason: str):
+    print("Closing CarlaWorld:", reason)
     for s in self.carla_objects:
       if s is not None:
         try:
