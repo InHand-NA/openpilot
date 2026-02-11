@@ -7,7 +7,7 @@ from openpilot.tools.sim.lib.camerad import W, H
 
 
 class CarlaWorld(World):
-  def __init__(self, client, high_quality, dual_camera, num_selected_spawn_point, town, carla_autopilot=False):
+  def __init__(self, client, high_quality, dual_camera, num_selected_spawn_point, town, carla_autopilot=False, carla_autopilot_speed=35.0):
     super().__init__(dual_camera)
     import carla
 
@@ -92,7 +92,9 @@ class CarlaWorld(World):
       self.tm = client.get_trafficmanager()
       self.tm.set_synchronous_mode(True)
       self.vehicle.set_autopilot(True, self.tm.get_port())
-      print("Carla autopilot enabled")
+      speed_kmh = carla_autopilot_speed * 1.60934
+      self.tm.set_desired_speed(self.vehicle, speed_kmh)
+      print(f"Carla autopilot enabled, target speed: {carla_autopilot_speed:.0f} MPH ({speed_kmh:.1f} km/h)")
 
   def close(self, reason: str):
     print("Closing CarlaWorld:", reason)

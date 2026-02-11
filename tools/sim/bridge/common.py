@@ -37,10 +37,11 @@ def rk_loop(function, hz, exit_event: threading.Event):
 class SimulatorBridge(ABC):
   TICKS_PER_FRAME = 5
 
-  def __init__(self, dual_camera, high_quality):
+  def __init__(self, dual_camera, high_quality, disable_manual_control=False):
     set_params_enabled()
     self.params = Params()
     self.params.put_bool("AlphaLongitudinalEnabled", True)
+    self.disable_manual_control = disable_manual_control
 
     self.rk = Ratekeeper(100, None)
 
@@ -129,7 +130,7 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
       throttle_manual = steer_manual = brake_manual = 0.
 
       # Read manual controls
-      if not q.empty():
+      if not self.disable_manual_control and not q.empty():
         message = q.get()
         if message.type == QueueMessageType.CONTROL_COMMAND:
           m = message.info.split('_')

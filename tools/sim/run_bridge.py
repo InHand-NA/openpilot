@@ -8,14 +8,15 @@ from openpilot.tools.sim.bridge.common import SimulatorBridge
 from openpilot.tools.sim.bridge.metadrive.metadrive_bridge import MetaDriveBridge
 from openpilot.tools.sim.bridge.carla.carla_bridge import CarlaBridge
 
-def create_bridge(simulator_type, dual_camera, high_quality, carla_autopilot=False):
+def create_bridge(simulator_type, dual_camera, high_quality, carla_autopilot=False, carla_autopilot_speed=35.0):
   queue: Any = Queue()
 
   simulator_bridge: SimulatorBridge
   if simulator_type == 'metadrive':
     simulator_bridge = MetaDriveBridge(dual_camera, high_quality)
   elif simulator_type == 'carla':
-    simulator_bridge = CarlaBridge(dual_camera, high_quality, carla_autopilot=carla_autopilot)
+    simulator_bridge = CarlaBridge(dual_camera, high_quality, carla_autopilot=carla_autopilot,
+                                   carla_autopilot_speed=carla_autopilot_speed)
   else:
     raise ValueError(f"Unknown simulator type: {simulator_type}")
 
@@ -34,6 +35,7 @@ def parse_args(add_args=None):
   parser.add_argument('--dual_camera', action='store_true')
   parser.add_argument('--simulator', dest='simulator', type=str, default='carla')
   parser.add_argument('--carla_autopilot', action='store_true', help='Use Carla autopilot instead of openpilot control')
+  parser.add_argument('--carla_autopilot_speed', type=float, default=35.0, help='Carla autopilot target speed in MPH (default: 35)')
 
   return parser.parse_args(add_args)
 
@@ -42,7 +44,8 @@ if __name__ == "__main__":
 
   queue, simulator_process, simulator_bridge = create_bridge(args.simulator,
                                                              args.dual_camera, args.high_quality,
-                                                             carla_autopilot=args.carla_autopilot)
+                                                             carla_autopilot=args.carla_autopilot,
+                                                             carla_autopilot_speed=args.carla_autopilot_speed)
 
   if args.joystick:
     # start input poll for joystick
