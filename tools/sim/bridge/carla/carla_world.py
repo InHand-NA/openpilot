@@ -89,12 +89,31 @@ class CarlaWorld(World):
     self.carla_objects = [self.imu, self.gps, self.road_camera, self.road_wide_camera, self.vehicle]
     self.carla_autopilot = carla_autopilot
     if carla_autopilot:
-      self.tm = client.get_trafficmanager()
-      self.tm.set_synchronous_mode(True)
-      self.vehicle.set_autopilot(True, self.tm.get_port())
       speed_kmh = carla_autopilot_speed * 1.60934
-      self.tm.set_desired_speed(self.vehicle, speed_kmh)
-      print(f"Carla autopilot enabled, target speed: {carla_autopilot_speed:.0f} MPH ({speed_kmh:.1f} km/h)")
+
+      # TM setup with retry: load_world() resets server-side TM state,
+      # and get_trafficmanager() may return a handle before TM is fully ready.
+      max_retries = 3
+      for attempt in range(max_retries):
+        self.tm = client.get_trafficmanager()
+        self.tm.set_synchronous_mode(True)
+        self.vehicle.set_autopilot(True, self.tm.get_port())
+        self.tm.set_desired_speed(self.vehicle, speed_kmh)
+
+        # Tick a few times and verify TM is actually sending controls
+        for _ in range(30):
+          world.tick()
+        ctl = self.vehicle.get_control()
+        if ctl.throttle > 0.01:
+          print(f"Carla autopilot enabled (attempt {attempt+1}), target speed: {carla_autopilot_speed:.0f} MPH ({speed_kmh:.1f} km/h)")
+          break
+        else:
+          print(f"[WARN] TM autopilot not active after attempt {attempt+1} (throttle={ctl.throttle:.3f}), retrying...")
+          self.vehicle.set_autopilot(False)
+          self.tm.set_synchronous_mode(False)
+      else:
+        # All retries exhausted, proceed anyway — TM may activate later
+        print(f"[WARN] TM autopilot may not be active after {max_retries} attempts, proceeding anyway")
 
   def close(self, reason: str):
     print("Closing CarlaWorld:", reason)
