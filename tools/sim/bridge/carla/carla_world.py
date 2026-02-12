@@ -61,7 +61,7 @@ class CarlaWorld(World):
 
     self.carla_objects = []
 
-    transform = carla.Transform(carla.Location(x=0.8, z=1.13), carla.Rotation(pitch=5.0, yaw=5.0))
+    transform = carla.Transform(carla.Location(x=0.8, z=1.13), carla.Rotation(pitch=5.0, yaw=3.0))
 
     def create_camera(fov, callback):
       blueprint = blueprint_library.find('sensor.camera.rgb')

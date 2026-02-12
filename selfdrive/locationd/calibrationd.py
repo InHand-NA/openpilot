@@ -226,8 +226,11 @@ class Calibrator:
     """
     self.old_rpy_weight = max(0.0, self.old_rpy_weight - 1/SMOOTH_CYCLES)
 
-    # 仅在“速度高且偏航角速度小”的场景更新，减少噪声影响
-    straight_and_fast = ((self.v_ego > MIN_SPEED_FILTER) and (trans[0] > MIN_SPEED_FILTER) and (abs(rot[2]) < MAX_YAW_RATE_FILTER))
+    # 仅在"速度高且偏航角速度小"的场景更新，减少噪声影响
+    # In simulation, visual odometry underestimates speed due to repeated frames (low realtime ratio),
+    # so we relax the trans[0] threshold to allow calibration to proceed.
+    min_speed = MIN_SPEED_FILTER * 0.2 if os.environ.get("SIMULATION") else MIN_SPEED_FILTER
+    straight_and_fast = ((self.v_ego > MIN_SPEED_FILTER) and (trans[0] > min_speed) and (abs(rot[2]) < MAX_YAW_RATE_FILTER))
     angle_std_threshold = MAX_VEL_ANGLE_STD
     height_std_threshold = MAX_HEIGHT_STD
     # 置信条件：基于模型给出的 std 评估姿态/高度可靠性

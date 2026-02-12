@@ -41,6 +41,8 @@ class SimulatorBridge(ABC):
     set_params_enabled()
     self.params = Params()
     self.params.put_bool("AlphaLongitudinalEnabled", True)
+    # Remove pre-set perfect calibration so calibrationd can calibrate from scratch
+    self.params.remove("CalibrationParams")
     self.disable_manual_control = disable_manual_control
 
     self.rk = Ratekeeper(100, None)
