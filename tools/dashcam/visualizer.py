@@ -4,7 +4,8 @@ import math
 import cv2
 import numpy as np
 
-from openpilot.common.transformations.camera import get_view_frame_from_road_frame
+from openpilot.common.transformations.camera import view_frame_from_device_frame
+from openpilot.common.transformations.orientation import rot_from_euler
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.tools.dashcam.calibrator import INPUTS_NEEDED
 
@@ -15,20 +16,22 @@ DISPLAY_W = int(W * DISPLAY_SCALE)
 DISPLAY_H = int(H * DISPLAY_SCALE)
 
 
-def project_points_to_image(xs, ys, zs, intrinsics_3x3, rpyCalib, height):
-  """Project road-frame 3D points to image pixel coordinates.
+def project_points_to_image(xs, ys, zs, intrinsics_3x3, rpyCalib):
+  """Project calibration-frame 3D points to image pixel coordinates.
 
-  Road frame: x=forward, y=left, z=up.
+  Calibration frame: x=forward, y=right, z=down.
+  Model outputs lane_lines/road_edges with z ≈ camera_height (road surface).
+  Projection: intrinsic @ view_frame_from_device_frame @ device_from_calib.
   Returns Nx2 array of (u, v) pixel coords. Invalid points have NaN.
   """
-  view_from_road = get_view_frame_from_road_frame(0, rpyCalib[1], rpyCalib[2], height)
-  C = intrinsics_3x3 @ view_from_road  # 3x4 projection matrix
-  pts = np.stack([xs, ys, zs, np.ones_like(xs)], axis=0)  # 4xN
-  uvw = C @ pts  # 3xN
-  # Filter out points behind camera
-  behind = uvw[2] <= 0
-  uvw[2, behind] = np.nan
-  uv = uvw[:2] / uvw[2:3]
+  device_from_calib = rot_from_euler(rpyCalib)
+  transform = intrinsics_3x3 @ view_frame_from_device_frame @ device_from_calib  # 3x3
+  pts = np.stack([xs, ys, zs], axis=0)  # 3xN
+  proj = transform @ pts  # 3xN
+  # Filter out points behind camera (proj[2] is depth in view frame)
+  behind = proj[2] <= 0
+  proj[2, behind] = np.nan
+  uv = proj[:2] / proj[2:3]
   return uv.T  # Nx2
 
 
@@ -111,7 +114,7 @@ class Visualizer:
         continue
       ys = lane_lines[i, :, 0]  # lateral offset
       zs = lane_lines[i, :, 1]  # height offset
-      pixels = project_points_to_image(self.x_idxs, ys, zs, K, rpyCalib, height)
+      pixels = project_points_to_image(self.x_idxs, ys, zs, K, rpyCalib)
 
       # Adjust alpha based on probability
       alpha = np.clip(prob, 0.3, 1.0)
@@ -126,7 +129,7 @@ class Visualizer:
     for i in range(2):
       ys = road_edges[i, :, 0]
       zs = road_edges[i, :, 1]
-      pixels = project_points_to_image(self.x_idxs, ys, zs, K, rpyCalib, height)
+      pixels = project_points_to_image(self.x_idxs, ys, zs, K, rpyCalib)
       draw_path(img, pixels, color, thickness=2)
 
   def _draw_lead(self, img, out, K, rpyCalib, height):
@@ -154,10 +157,10 @@ class Visualizer:
       return
 
     # Project lead position to image
-    z_road = 0.0  # lead car at road level
+    # In calibration frame z=down, so road level is z=camera_height
     pts = project_points_to_image(
-      np.array([x_dist]), np.array([y_offset]), np.array([z_road]),
-      K, rpyCalib, height)
+      np.array([x_dist]), np.array([y_offset]), np.array([height]),
+      K, rpyCalib)
 
     if np.isnan(pts[0]).any():
       return
