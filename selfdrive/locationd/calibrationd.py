@@ -320,6 +320,9 @@ def main() -> NoReturn:
   calibrator = Calibrator(param_put=True)  # 打开持久化写入，便于重启沿用校准
   calibrator.not_car = CP.notCar
 
+  import time, math
+  last_print_time = time.monotonic()
+
   while 1:
     timeout = 0 if sm.frame == -1 else 100
     sm.update(timeout)
@@ -339,6 +342,16 @@ def main() -> NoReturn:
     # 4Hz driven by cameraOdometry
     if sm.frame % 5 == 0:  # 4Hz（模型 20Hz）节拍发布
       calibrator.send_data(pm, sm.all_checks())
+
+    now = time.monotonic()
+    if now - last_print_time >= 10.0:
+      last_print_time = now
+      rpy = calibrator.get_smooth_rpy()
+      status_names = {0: 'uncalibrated', 1: 'calibrated', 2: 'invalid', 3: 'recalibrating'}
+      print(f'[CALIB] status={status_names.get(calibrator.cal_status, calibrator.cal_status)} '
+            f'blocks={calibrator.valid_blocks} '
+            f'pitch={math.degrees(rpy[1]):.2f}° yaw={math.degrees(rpy[2]):.2f}° '
+            f'height={calibrator.height[0]:.3f}m')
 
 
 if __name__ == "__main__":
