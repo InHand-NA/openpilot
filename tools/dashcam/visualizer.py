@@ -11,9 +11,9 @@ from openpilot.tools.dashcam.calibrator import INPUTS_NEEDED
 
 from openpilot.tools.dashcam.carla_world import W, H
 
-DISPLAY_SCALE = 0.5
-DISPLAY_W = int(W * DISPLAY_SCALE)
-DISPLAY_H = int(H * DISPLAY_SCALE)
+# Match openpilot UI: 2160x1080, camera zoomed to fill then center-cropped
+UI_W, UI_H = 2160, 1080
+ZOOM = max(UI_W / W, UI_H / H)  # ~1.12, fill width then crop height
 
 
 def project_points_to_image(xs, ys, zs, intrinsics_3x3, rpyCalib):
@@ -91,12 +91,12 @@ class Visualizer:
     self.writer = None
     if save_video_path:
       fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-      self.writer = cv2.VideoWriter(save_video_path, fourcc, source_fps, (DISPLAY_W, DISPLAY_H))
-      print(f"Video recording to {save_video_path} at {source_fps} FPS, {DISPLAY_W}x{DISPLAY_H}")
+      self.writer = cv2.VideoWriter(save_video_path, fourcc, source_fps, (UI_W, UI_H))
+      print(f"Video recording to {save_video_path} at {source_fps} FPS, {UI_W}x{UI_H}")
 
     if not no_display:
       cv2.namedWindow('dashcam', cv2.WINDOW_NORMAL)
-      cv2.resizeWindow('dashcam', DISPLAY_W, DISPLAY_H)
+      cv2.resizeWindow('dashcam', UI_W, UI_H)
 
     self.x_idxs = np.array(ModelConstants.X_IDXS)
 
@@ -116,8 +116,12 @@ class Visualizer:
     self._draw_info_panel(img, vision_output, vehicle_speed, rpyCalib,
                           calibrator_status, valid_blocks, camera_height, fps)
 
-    # Scale to display size
-    display = cv2.resize(img, (DISPLAY_W, DISPLAY_H), interpolation=cv2.INTER_AREA)
+    # Zoom 1.1x then center-crop to UI size (matching openpilot UI)
+    zoomed_w, zoomed_h = int(W * ZOOM), int(H * ZOOM)
+    zoomed = cv2.resize(img, (zoomed_w, zoomed_h), interpolation=cv2.INTER_LINEAR)
+    x0 = (zoomed_w - UI_W) // 2
+    y0 = (zoomed_h - UI_H) // 2
+    display = zoomed[y0:y0 + UI_H, x0:x0 + UI_W]
 
     if self.writer is not None:
       self.writer.write(display)
