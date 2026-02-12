@@ -71,7 +71,16 @@ class World(ABC):
     self.road_image = np.zeros((H, W, 3), dtype=np.uint8)
     self.wide_road_image = np.zeros((H, W, 3), dtype=np.uint8)
 
+    self._new_frame = False  # Set by subclass when new camera image arrives
+
     self.exit_event = multiprocessing.Event()
+
+  def has_new_frame(self) -> bool:
+    """Check and consume new frame flag. Returns True if a new camera frame is available."""
+    if self._new_frame:
+      self._new_frame = False
+      return True
+    return False
 
   @abstractmethod
   def apply_controls(self, steer_sim, throttle_out, brake_out):

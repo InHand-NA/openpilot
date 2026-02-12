@@ -142,6 +142,7 @@ class CarlaWorld(World):
   def cam_callback_road(self, image):
     with self.image_lock:
       self.road_image = self.carla_image_to_rgb(image)
+      self._new_frame = True
 
   def cam_callback_wide_road(self, image):
     with self.image_lock:

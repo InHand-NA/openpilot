@@ -113,13 +113,22 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
                                                                         100, self._exit_event))
     self.simulated_car_thread.start()
 
-    self.simulated_camera_thread = threading.Thread(target=rk_loop, args=(functools.partial(self.simulated_sensors.send_camera_images, self.world),
-                                                                        20, self._exit_event))
-    self.simulated_camera_thread.start()
-
     # Simulation tends to be slow in the initial steps. This prevents lagging later
     for _ in range(20):
       self.world.tick()
+
+    # Auto-detect sync frame signaling: Carla sets _new_frame in camera callbacks,
+    # MetaDrive does not. Use sync mode if frames are signaled, otherwise fall back to camera thread.
+    if self.world.has_new_frame():
+      use_sync_camera = True
+      self.simulated_sensors.send_camera_images(self.world)
+      print("[Bridge] Using sync camera mode (frames synchronized with world.tick())")
+    else:
+      use_sync_camera = False
+      self.simulated_camera_thread = threading.Thread(target=rk_loop, args=(functools.partial(self.simulated_sensors.send_camera_images, self.world),
+                                                                          20, self._exit_event))
+      self.simulated_camera_thread.start()
+      print("[Bridge] Using async camera thread (20Hz wall clock)")
 
     while self._keep_alive:
       throttle_out = steer_out = brake_out = 0.0
@@ -199,6 +208,8 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
       if self.rk.frame % self.TICKS_PER_FRAME == 0:
         self.world.tick()
         self.world.read_cameras()
+        if use_sync_camera and self.world.has_new_frame():
+          self.simulated_sensors.send_camera_images(self.world)
 
       # don't print during test, so no print/IO Block between OP and metadrive processes
       if not self.test_run and self.rk.frame % 25 == 0:
