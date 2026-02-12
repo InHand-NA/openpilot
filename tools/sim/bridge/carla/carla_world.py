@@ -1,3 +1,4 @@
+import random
 import time
 import numpy as np
 
@@ -8,7 +9,8 @@ from openpilot.tools.sim.lib.camerad import W, H
 
 
 class CarlaWorld(World):
-  def __init__(self, client, high_quality, dual_camera, num_selected_spawn_point, town, carla_autopilot=False, carla_autopilot_speed=35.0):
+  def __init__(self, client, high_quality, dual_camera, num_selected_spawn_point, town,
+               carla_autopilot=False, carla_autopilot_speed=35.0, perfect_cam=False):
     super().__init__(dual_camera)
     import carla
 
@@ -27,6 +29,7 @@ class CarlaWorld(World):
     settings = world.get_settings()
     settings.synchronous_mode = True
     settings.fixed_delta_seconds = 0.01 #0.01
+    settings.actor_active_distance = 150.0  # NPC 超过此距离进入休眠
     world.apply_settings(settings)
 
     world.set_weather(carla.WeatherParameters.ClearSunset)
@@ -61,7 +64,10 @@ class CarlaWorld(World):
 
     self.carla_objects = []
 
-    transform = carla.Transform(carla.Location(x=0.8, z=1.13), carla.Rotation(pitch=5.0, yaw=3.0))
+    if perfect_cam:
+      transform = carla.Transform(carla.Location(x=0.8, z=1.13))
+    else:
+      transform = carla.Transform(carla.Location(x=0.8, z=1.13), carla.Rotation(pitch=5.0, yaw=3.0))
 
     def create_camera(fov, callback):
       blueprint = blueprint_library.find('sensor.camera.rgb')
@@ -91,6 +97,14 @@ class CarlaWorld(World):
     self.params.put_bool("UbloxAvailable", True)
 
     self.carla_objects = [self.imu, self.gps, self.road_camera, self.road_wide_camera, self.vehicle]
+
+    # Traffic manager — needed for both ego autopilot and NPC vehicles
+    self.tm = client.get_trafficmanager()
+    self.tm.set_synchronous_mode(True)
+    # 休眠的 NPC 自动 respawn 到主车附近（25~100m），由 TM 原生管理
+    self.tm.set_respawn_dormant_vehicles(True)
+    self.tm.set_boundaries_respawn_dormant_vehicles(25.0, 100.0)
+
     self.carla_autopilot = carla_autopilot
     if carla_autopilot:
       speed_kmh = carla_autopilot_speed * 1.60934
@@ -99,8 +113,6 @@ class CarlaWorld(World):
       # and get_trafficmanager() may return a handle before TM is fully ready.
       max_retries = 3
       for attempt in range(max_retries):
-        self.tm = client.get_trafficmanager()
-        self.tm.set_synchronous_mode(True)
         self.vehicle.set_autopilot(True, self.tm.get_port())
         self.tm.set_desired_speed(self.vehicle, speed_kmh)
 
@@ -114,19 +126,39 @@ class CarlaWorld(World):
         else:
           print(f"[WARN] TM autopilot not active after attempt {attempt+1} (throttle={ctl.throttle:.3f}), retrying...")
           self.vehicle.set_autopilot(False)
-          self.tm.set_synchronous_mode(False)
       else:
         # All retries exhausted, proceed anyway — TM may activate later
         print(f"[WARN] TM autopilot may not be active after {max_retries} attempts, proceeding anyway")
+
+    # Spawn NPC traffic vehicles
+    self.npc_vehicles = []
+    npc_bps = [bp for bp in blueprint_library.filter('vehicle.*')
+               if int(bp.get_attribute('number_of_wheels')) >= 4]
+    available_points = [sp for sp in spawn_points
+                        if sp.location.distance(self.spawn_point.location) > 2.0]
+    random.shuffle(available_points)
+    for sp in available_points[:20]:
+      bp = random.choice(npc_bps)
+      if bp.has_attribute('color'):
+        bp.set_attribute('color', random.choice(bp.get_attribute('color').recommended_values))
+      npc = world.try_spawn_actor(bp, sp)
+      if npc is not None:
+        npc.set_autopilot(True, self.tm.get_port())
+        self.npc_vehicles.append(npc)
+    self.carla_objects.extend(self.npc_vehicles)
+    print(f"Spawned {len(self.npc_vehicles)} NPC vehicles")
 
   def close(self, reason: str):
     print("Closing CarlaWorld:", reason)
     if self.carla_autopilot:
       try:
         self.vehicle.set_autopilot(False)
-        self.tm.set_synchronous_mode(False)
       except Exception:
         pass
+    try:
+      self.tm.set_synchronous_mode(False)
+    except Exception:
+      pass
     for s in self.carla_objects:
       if s is not None:
         try:

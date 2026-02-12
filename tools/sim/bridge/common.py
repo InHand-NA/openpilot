@@ -37,12 +37,13 @@ def rk_loop(function, hz, exit_event: threading.Event):
 class SimulatorBridge(ABC):
   TICKS_PER_FRAME = 5
 
-  def __init__(self, dual_camera, high_quality, disable_manual_control=False):
+  def __init__(self, dual_camera, high_quality, disable_manual_control=False, perfect_cam=False):
     set_params_enabled()
     self.params = Params()
     self.params.put_bool("AlphaLongitudinalEnabled", True)
-    # Remove pre-set perfect calibration so calibrationd can calibrate from scratch
-    self.params.remove("CalibrationParams")
+    if not perfect_cam:
+      # Remove pre-set perfect calibration so calibrationd can calibrate from scratch
+      self.params.remove("CalibrationParams")
     self.disable_manual_control = disable_manual_control
 
     self.rk = Ratekeeper(100, None)
