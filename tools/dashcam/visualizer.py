@@ -35,17 +35,52 @@ def project_points_to_image(xs, ys, zs, intrinsics_3x3, rpyCalib):
   return uv.T  # Nx2
 
 
-def draw_path(img, points, color, thickness=2):
-  """Draw a polyline on image from Nx2 pixel coordinates."""
+def _filter_points(points):
+  """Filter Nx2 pixel points: remove NaN and out-of-bounds."""
   valid = ~np.isnan(points).any(axis=1)
   pts = points[valid].astype(np.int32)
-  # Filter points within image bounds (with margin)
   margin = 200
   in_bounds = ((pts[:, 0] > -margin) & (pts[:, 0] < W + margin) &
                (pts[:, 1] > -margin) & (pts[:, 1] < H + margin))
-  pts = pts[in_bounds]
+  return pts[in_bounds]
+
+
+def draw_path(img, points, color, thickness=2):
+  """Draw a solid polyline on image from Nx2 pixel coordinates."""
+  pts = _filter_points(points)
   if len(pts) >= 2:
     cv2.polylines(img, [pts], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+
+def draw_dashed_path(img, points, color, thickness=2, dash_px=20, gap_px=15):
+  """Draw a dashed polyline on image from Nx2 pixel coordinates."""
+  pts = _filter_points(points)
+  if len(pts) < 2:
+    return
+  # Walk along the polyline, alternating dash/gap
+  drawing = True
+  remaining = dash_px
+  seg_start = 0
+  for i in range(1, len(pts)):
+    dx = float(pts[i, 0] - pts[i - 1, 0])
+    dy = float(pts[i, 1] - pts[i - 1, 1])
+    seg_len = math.hypot(dx, dy)
+    if seg_len < 1:
+      continue
+    consumed = 0.0
+    while consumed < seg_len:
+      step = min(remaining, seg_len - consumed)
+      t0 = consumed / seg_len
+      t1 = (consumed + step) / seg_len
+      p0 = (int(pts[i - 1, 0] + dx * t0), int(pts[i - 1, 1] + dy * t0))
+      p1 = (int(pts[i - 1, 0] + dx * t1), int(pts[i - 1, 1] + dy * t1))
+      if drawing:
+        cv2.line(img, p0, p1, color, thickness, cv2.LINE_AA)
+      consumed += step
+      remaining -= step
+      if remaining <= 0:
+        drawing = not drawing
+        remaining = gap_px if not drawing else dash_px
 
 
 class Visualizer:
@@ -96,17 +131,11 @@ class Visualizer:
     return True
 
   def _draw_lane_lines(self, img, out, K, rpyCalib, height):
-    """Draw 4 lane lines with transparency based on confidence."""
+    """Draw 4 lane lines: inner (1,2) green solid, outer (0,3) green dashed."""
     lane_lines = out['lane_lines'][0]  # (4, 33, 2): y, z at each x
     raw_probs = out['lane_lines_prob'][0]  # (8,) - take every other for 4 lane probs
     lane_probs = raw_probs[1::2]  # indices 1,3,5,7 = 4 lane line probabilities
-
-    colors = [
-      (0, 200, 0),    # left outer - green
-      (0, 255, 0),    # left inner - bright green
-      (0, 200, 255),  # right inner - yellow
-      (0, 140, 255),  # right outer - orange
-    ]
+    color = (0, 220, 0)  # green in BGR
 
     for i in range(4):
       prob = float(lane_probs[i])
@@ -116,10 +145,10 @@ class Visualizer:
       zs = lane_lines[i, :, 1]  # height offset
       pixels = project_points_to_image(self.x_idxs, ys, zs, K, rpyCalib)
 
-      # Adjust alpha based on probability
-      alpha = np.clip(prob, 0.3, 1.0)
-      color = tuple(int(c * alpha) for c in colors[i])
-      draw_path(img, pixels, color, thickness=3)
+      if i == 1 or i == 2:  # inner lanes (current lane boundaries) - solid
+        draw_path(img, pixels, color, thickness=3)
+      else:  # outer lanes (0, 3) - dashed
+        draw_dashed_path(img, pixels, color, thickness=3)
 
   def _draw_road_edges(self, img, out, K, rpyCalib, height):
     """Draw 2 road edges in red."""
