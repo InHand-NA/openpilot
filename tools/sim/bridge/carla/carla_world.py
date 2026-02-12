@@ -10,7 +10,7 @@ from openpilot.tools.sim.lib.camerad import W, H
 
 class CarlaWorld(World):
   def __init__(self, client, high_quality, dual_camera, num_selected_spawn_point, town,
-               carla_autopilot=False, carla_autopilot_speed=35.0, perfect_cam=False):
+               carla_autopilot=False, carla_autopilot_speed=35.0, perfect_cam=False, num_npc=20):
     super().__init__(dual_camera)
     import carla
 
@@ -137,7 +137,7 @@ class CarlaWorld(World):
     available_points = [sp for sp in spawn_points
                         if sp.location.distance(self.spawn_point.location) > 2.0]
     random.shuffle(available_points)
-    for sp in available_points[:20]:
+    for sp in available_points[:num_npc]:
       bp = random.choice(npc_bps)
       if bp.has_attribute('color'):
         bp.set_attribute('color', random.choice(bp.get_attribute('color').recommended_values))

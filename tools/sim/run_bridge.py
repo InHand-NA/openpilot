@@ -8,7 +8,7 @@ from openpilot.tools.sim.bridge.common import SimulatorBridge
 from openpilot.tools.sim.bridge.metadrive.metadrive_bridge import MetaDriveBridge
 from openpilot.tools.sim.bridge.carla.carla_bridge import CarlaBridge
 
-def create_bridge(simulator_type, dual_camera, high_quality, carla_autopilot=False, carla_autopilot_speed=35.0, perfect_cam=False):
+def create_bridge(simulator_type, dual_camera, high_quality, carla_autopilot=False, carla_autopilot_speed=35.0, perfect_cam=False, num_npc=20):
   queue: Any = Queue()
 
   simulator_bridge: SimulatorBridge
@@ -17,7 +17,7 @@ def create_bridge(simulator_type, dual_camera, high_quality, carla_autopilot=Fal
   elif simulator_type == 'carla':
     simulator_bridge = CarlaBridge(dual_camera, high_quality, carla_autopilot=carla_autopilot,
                                    carla_autopilot_speed=carla_autopilot_speed,
-                                   perfect_cam=perfect_cam)
+                                   perfect_cam=perfect_cam, num_npc=num_npc)
   else:
     raise ValueError(f"Unknown simulator type: {simulator_type}")
 
@@ -39,6 +39,7 @@ def parse_args(add_args=None):
   parser.add_argument('--carla_autopilot_speed', type=float, default=35.0, help='Carla autopilot target speed in MPH (default: 35)')
   parser.add_argument('--perfect_cam', action='store_true',
                       help='Use standard camera pose (no pitch/yaw offset) and skip calibration')
+  parser.add_argument('--num_npc', type=int, default=20, help='Number of NPC vehicles to spawn (default: 20)')
 
   return parser.parse_args(add_args)
 
@@ -49,7 +50,8 @@ if __name__ == "__main__":
                                                              args.dual_camera, args.high_quality,
                                                              carla_autopilot=args.carla_autopilot,
                                                              carla_autopilot_speed=args.carla_autopilot_speed,
-                                                             perfect_cam=args.perfect_cam)
+                                                             perfect_cam=args.perfect_cam,
+                                                             num_npc=args.num_npc)
 
   if args.joystick:
     # start input poll for joystick

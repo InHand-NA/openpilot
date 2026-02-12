@@ -10,7 +10,7 @@ class CarlaBridge(SimulatorBridge):
   TICKS_PER_FRAME = 5
 
   def __init__(self, dual_camera, high_quality, test_duration=math.inf, test_run=False,
-               carla_autopilot=False, carla_autopilot_speed=35.0, perfect_cam=False):
+               carla_autopilot=False, carla_autopilot_speed=35.0, perfect_cam=False, num_npc=20):
     super().__init__(dual_camera, high_quality, disable_manual_control=carla_autopilot, perfect_cam=perfect_cam)
     self.host = '127.0.0.1' # arguments.host
     self.port = 2000 # arguments.port
@@ -19,6 +19,7 @@ class CarlaBridge(SimulatorBridge):
     self.carla_autopilot = carla_autopilot
     self.carla_autopilot_speed = carla_autopilot_speed
     self.perfect_cam = perfect_cam
+    self.num_npc = num_npc
 
   def spawn_world(self, q: Queue):
     import carla
@@ -37,4 +38,4 @@ class CarlaBridge(SimulatorBridge):
                       num_selected_spawn_point=self.num_selected_spawn_point, town=self.town,
                       carla_autopilot=self.carla_autopilot,
                       carla_autopilot_speed=self.carla_autopilot_speed,
-                      perfect_cam=self.perfect_cam)
+                      perfect_cam=self.perfect_cam, num_npc=self.num_npc)
