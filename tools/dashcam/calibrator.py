@@ -42,7 +42,7 @@ class KnownPoseCalibrator:
   """Calibrator with known camera pose (for debugging/validation)."""
 
   def __init__(self, pitch_deg=0.0, yaw_deg=0.0, height=1.22):
-    self.rpy = np.array([0.0, np.deg2rad(pitch_deg), np.deg2rad(yaw_deg)])
+    self.rpy = np.array([0.0, -np.deg2rad(pitch_deg), -np.deg2rad(yaw_deg)])
     self._height = np.array([height])
     self.cal_status = 'calibrated'
     self.valid_blocks = INPUTS_WANTED
