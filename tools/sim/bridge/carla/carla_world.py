@@ -1,3 +1,4 @@
+import time
 import numpy as np
 
 from openpilot.common.params import Params
@@ -54,6 +55,9 @@ class CarlaWorld(World):
     self.params = Params()
 
     self.steer_ratio = 15
+
+    self.tick_count = 0
+    self.tick_batch_start = time.monotonic()
 
     self.carla_objects = []
 
@@ -197,11 +201,20 @@ class CarlaWorld(World):
       try:
         timeout_ms = int(timeout_ms_env)
         self.world.tick(timeout_ms=timeout_ms)
-        return
       except Exception:
         # 回退到默认行为
-        pass
-    self.world.tick()
+        self.world.tick()
+    else:
+      self.world.tick()
+
+    self.tick_count += 1
+    if self.tick_count % 200 == 0:
+      now = time.monotonic()
+      elapsed = now - self.tick_batch_start
+      sim_time = 200 * 0.01  # 200 ticks × fixed_delta_seconds(0.01s) = 2.0s
+      ratio = sim_time / elapsed if elapsed > 0 else float('inf')
+      print(f"[CARLA PERF] 200 ticks in {elapsed:.2f}s wall time | sim time: {sim_time:.1f}s | ratio: {ratio:.2f}x realtime")
+      self.tick_batch_start = now
 
   def reset(self):
     import carla
