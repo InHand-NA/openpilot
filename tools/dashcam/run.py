@@ -260,9 +260,11 @@ def main():
       if tick_count % 100 == 0:
         speed = world.get_vehicle_speed()
         modeld_status = 'connected' if sm.seen['modelV2'] else 'waiting...'
+        calib_status = 'connected' if sm.seen['liveCalibration'] else 'waiting...'
         pitch_d, yaw_d = np.degrees(cur_rpyCalib[1]), np.degrees(cur_rpyCalib[2])
         print(f"[DASHCAM] frame={tick_count//TICKS_PER_FRAME} speed={speed:.1f}m/s "
-              + f"pitch={pitch_d:.2f}\u00b0 yaw={yaw_d:.2f}\u00b0 fps={fps:.1f} modeld={modeld_status}")
+              + f"pitch={pitch_d:.2f}\u00b0 yaw={yaw_d:.2f}\u00b0 fps={fps:.1f} modeld={modeld_status} "
+              + f"calib={calib_status} calPerc={cur_cal_perc}% blocks={cur_valid_blocks}/{5} status={cur_cal_status}")
 
       # Frame rate limiter: sleep until next 50ms boundary for real-time playback
       if not args.fast:

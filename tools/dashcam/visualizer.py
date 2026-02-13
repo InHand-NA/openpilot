@@ -190,15 +190,16 @@ class Visualizer:
       self._draw_road_edges(img, model_msg, fcam_intrinsics_3x3, rpyCalib)
       self._draw_lead(img, model_msg, fcam_intrinsics_3x3, rpyCalib, camera_height)
 
-    self._draw_info_panel(img, model_msg, vehicle_speed, rpyCalib,
-                          cal_status, valid_blocks, cal_perc, camera_height, fps)
-
     # Zoom 1.1x then center-crop to UI size (matching openpilot UI)
     zoomed_w, zoomed_h = int(W * ZOOM), int(H * ZOOM)
     zoomed = cv2.resize(img, (zoomed_w, zoomed_h), interpolation=cv2.INTER_LINEAR)
     x0 = (zoomed_w - UI_W) // 2
     y0 = (zoomed_h - UI_H) // 2
     display = zoomed[y0:y0 + UI_H, x0:x0 + UI_W]
+
+    # Draw HUD on final display (after crop, so it's always visible)
+    self._draw_info_panel(display, model_msg, vehicle_speed, rpyCalib,
+                          cal_status, valid_blocks, cal_perc, camera_height, fps)
 
     if self.writer is not None:
       self.writer.write(display)
