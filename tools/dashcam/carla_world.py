@@ -78,12 +78,7 @@ class DashcamCarlaWorld:
     self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
     self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)
 
-    # IMU sensor
-    imu_bp = blueprint_library.find('sensor.other.imu')
-    imu_bp.set_attribute('sensor_tick', '0.01')
-    self.imu = world.spawn_actor(imu_bp, transform, attach_to=self.vehicle)
-
-    self.carla_objects = [self.imu, self.road_camera, self.wide_road_camera, self.vehicle]
+    self.carla_objects = [self.road_camera, self.wide_road_camera, self.vehicle]
 
     # Traffic manager
     self.tm = client.get_trafficmanager()
