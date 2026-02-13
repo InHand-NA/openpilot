@@ -1,28 +1,61 @@
 #!/usr/bin/env python3
-"""Standalone dashcam with openpilot vision network.
+"""Multi-process dashcam: Bridge (Carla + VisionIPC + visualization) + modeld subprocess + optional calibrationd.
 
 Usage:
   # Start Carla server first, then:
-  python tools/dashcam/run.py
-  python tools/dashcam/run.py --perfect-cam
-  python tools/dashcam/run.py --save-video output.mp4
-  python tools/dashcam/run.py --camera-pitch 5 --camera-yaw 3 --online-calib
+  python tools/dashcam/run.py --perfect-cam --high-quality
+  python tools/dashcam/run.py --online-calib --camera-pitch 5 --camera-yaw 3
+  python tools/dashcam/run.py --perfect-cam --save-video output.mp4 --max-frames 100
 """
 
 import argparse
+import os
 import signal
+import subprocess
 import sys
 import time
 
+# Environment variables must be set before importing openpilot modules
+os.environ['NOBOARD'] = '1'
+os.environ['SIMULATION'] = '1'
+
 import numpy as np
 
+from cereal import log, messaging
+from openpilot.common.params import Params
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
+from openpilot.system.hardware import HARDWARE
+from openpilot.tools.sim.lib.camerad import Camerad
 
 TICKS_PER_FRAME = 5  # match openpilot sim bridge
 
 
+def publish_device_state(pm):
+  """Publish deviceState so modeld can determine DEVICE_CAMERAS config."""
+  dat = messaging.new_message('deviceState', valid=True)
+  dat.deviceState.deviceType = HARDWARE.get_device_type()
+  pm.send('deviceState', dat)
+
+
+def publish_car_state(pm, v_ego):
+  """Publish carState with vehicle speed (calibrationd uses vEgo)."""
+  dat = messaging.new_message('carState', valid=True)
+  dat.carState.vEgo = float(v_ego)
+  pm.send('carState', dat)
+
+
+def publish_live_calibration(pm, rpyCalib, height):
+  """Known pose mode: publish fixed calibration values."""
+  msg = messaging.new_message('liveCalibration', valid=True)
+  msg.liveCalibration.rpyCalib = rpyCalib.tolist()
+  msg.liveCalibration.validBlocks = 20
+  msg.liveCalibration.calStatus = log.LiveCalibrationData.Status.calibrated
+  msg.liveCalibration.height = [height]
+  pm.send('liveCalibration', msg)
+
+
 def main():
-  parser = argparse.ArgumentParser(description='Standalone dashcam with openpilot vision')
+  parser = argparse.ArgumentParser(description='Multi-process dashcam with openpilot vision')
   parser.add_argument('--host', default='127.0.0.1')
   parser.add_argument('--port', type=int, default=2000)
   parser.add_argument('--town', default='Town04_Opt')
@@ -36,7 +69,7 @@ def main():
   parser.add_argument('--perfect-cam', action='store_true',
                       help='Use pitch=0, yaw=0 (ideal mounting)')
   parser.add_argument('--online-calib', action='store_true',
-                      help='Use online calibration instead of known pose')
+                      help='Use online calibration (calibrationd subprocess)')
   parser.add_argument('--num-npc', type=int, default=20)
   parser.add_argument('--high-quality', action='store_true')
   parser.add_argument('--no-display', action='store_true')
@@ -52,39 +85,70 @@ def main():
   else:
     pitch_deg, yaw_deg = args.camera_pitch, args.camera_yaw
 
-  print(f"Camera pose: pitch={pitch_deg}° yaw={yaw_deg}° height={args.camera_height}m")
-  print(f"Calibration mode: {'online' if args.online_calib else 'known pose'}")
+  camera_height = args.camera_height
+  # rpyCalib convention: [roll, -pitch, -yaw] in radians
+  rpyCalib = np.array([0.0, -np.deg2rad(pitch_deg), -np.deg2rad(yaw_deg)])
 
-  # Initialize Carla world
+  print(f"Camera pose: pitch={pitch_deg}\u00b0 yaw={yaw_deg}\u00b0 height={camera_height}m")
+  print(f"Calibration mode: {'online (calibrationd)' if args.online_calib else 'known pose'}")
+
+  # 1. Initialize Params
+  params = Params()
+
+  # Write CarParams (modeld and calibrationd block on this)
+  from opendbc.car.car_helpers import get_demo_car_params
+  CP = get_demo_car_params()
+  params.put("CarParams", CP.to_bytes())
+
+  # Write CalibrationParams (calibrationd reads this on startup)
+  calib_msg = messaging.new_message('liveCalibration')
+  if args.online_calib:
+    calib_msg.liveCalibration.validBlocks = 0
+    calib_msg.liveCalibration.rpyCalib = [0.0, 0.0, 0.0]
+  else:
+    calib_msg.liveCalibration.validBlocks = 20
+    calib_msg.liveCalibration.rpyCalib = rpyCalib.tolist()
+  params.put("CalibrationParams", calib_msg.to_bytes())
+
+  # 2. Create VisionIPC server (must be before starting modeld)
+  print("Creating VisionIPC server...")
+  camerad = Camerad(dual_camera=True)
+
+  # 3. Start modeld subprocess
+  print("Starting modeld subprocess...")
+  modeld_proc = subprocess.Popen(
+    [sys.executable, '-m', 'selfdrive.modeld.modeld'],
+    env={**os.environ})
+
+  # 4. Optionally start calibrationd subprocess
+  calibrationd_proc = None
+  if args.online_calib:
+    print("Starting calibrationd subprocess...")
+    calibrationd_proc = subprocess.Popen(
+      [sys.executable, '-m', 'selfdrive.locationd.calibrationd'],
+      env={**os.environ})
+
+  # 5. Create cereal pub/sub
+  pub_services = ['carState', 'deviceState']
+  if not args.online_calib:
+    pub_services.append('liveCalibration')
+  pm = messaging.PubMaster(pub_services)
+  sm = messaging.SubMaster(['modelV2', 'liveCalibration'])
+
+  # 6. Connect to Carla
   print("Connecting to Carla...")
   from openpilot.tools.dashcam.carla_world import DashcamCarlaWorld
   world = DashcamCarlaWorld(
     host=args.host, port=args.port, town=args.town,
     spawn_point=args.spawn_point,
     camera_pitch_deg=pitch_deg, camera_yaw_deg=yaw_deg,
-    camera_height=args.camera_height,
+    camera_height=camera_height,
     high_quality=args.high_quality, num_npc=args.num_npc)
 
-  # Initialize vision model
-  print("Initializing vision model...")
-  from openpilot.tools.dashcam.vision_model import VisionModel
-  model = VisionModel()
-
-  # Initialize calibrator
-  from openpilot.tools.dashcam.calibrator import KnownPoseCalibrator, OnlineCalibrator
-  if args.online_calib:
-    calibrator = OnlineCalibrator(
-      pitch_deg_init=pitch_deg, yaw_deg_init=yaw_deg,
-      height_init=args.camera_height)
-  else:
-    calibrator = KnownPoseCalibrator(
-      pitch_deg=pitch_deg, yaw_deg=yaw_deg,
-      height=args.camera_height)
-
-  # Camera intrinsics
+  # Camera intrinsics (for visualization)
   dc = DEVICE_CAMERAS[("pc", "unknown")]
 
-  # Initialize visualizer
+  # 7. Initialize visualizer
   from openpilot.tools.dashcam.visualizer import Visualizer
   visualizer = Visualizer(
     save_video_path=args.save_video,
@@ -108,7 +172,6 @@ def main():
   frame_count = 0
   fps_start = time.monotonic()
   fps = 0.0
-  last_output = None
 
   try:
     # Warm-up ticks
@@ -127,15 +190,25 @@ def main():
       if road_rgb is None:
         continue
 
-      # Preprocess + inference
-      t0 = time.monotonic()
-      vision_inputs = model.preprocess(road_rgb, wide_rgb, dc, calibrator.rpyCalib)
-      output = model.run(vision_inputs)
-      t1 = time.monotonic()
-      last_output = output
+      # Send frames via VisionIPC
+      yuv_road = camerad.rgb_to_yuv(road_rgb)
+      camerad.cam_send_yuv_road(yuv_road)
+      if wide_rgb is not None:
+        yuv_wide = camerad.rgb_to_yuv(wide_rgb)
+        camerad.cam_send_yuv_wide_road(yuv_wide)
 
-      # Update calibrator
-      calibrator.update(output, world.get_vehicle_speed())
+      # Publish deviceState (modeld needs deviceType for DEVICE_CAMERAS lookup)
+      publish_device_state(pm)
+
+      # Publish carState (calibrationd needs vEgo)
+      publish_car_state(pm, world.get_vehicle_speed())
+
+      # Known pose mode: publish liveCalibration directly
+      if not args.online_calib:
+        publish_live_calibration(pm, rpyCalib, camera_height)
+
+      # Non-blocking receive modelV2 and liveCalibration
+      sm.update(0)
 
       # FPS tracking
       frame_count += 1
@@ -146,12 +219,25 @@ def main():
         frame_count = 0
         fps_start = now
 
-      # Visualize
+      # Get current calibration from liveCalibration message
+      if sm.seen['liveCalibration']:
+        cur_rpyCalib = np.array(sm['liveCalibration'].rpyCalib)
+        cur_height = float(sm['liveCalibration'].height[0]) if len(sm['liveCalibration'].height) > 0 else camera_height
+        cur_valid_blocks = sm['liveCalibration'].validBlocks
+        cur_cal_status = str(sm['liveCalibration'].calStatus)
+      else:
+        cur_rpyCalib = rpyCalib
+        cur_height = camera_height
+        cur_valid_blocks = 0
+        cur_cal_status = 'uncalibrated'
+
+      # Visualize (show last received model data, or None if never received)
+      model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
       ok = visualizer.draw(
-        road_rgb, output, dc.fcam.intrinsics,
-        calibrator.rpyCalib, calibrator.height,
-        world.get_vehicle_speed(), calibrator.cal_status,
-        calibrator.valid_blocks, fps)
+        road_rgb, model_msg, dc.fcam.intrinsics,
+        cur_rpyCalib, cur_height,
+        world.get_vehicle_speed(), cur_cal_status,
+        cur_valid_blocks, fps)
 
       if not ok:
         break
@@ -162,19 +248,34 @@ def main():
 
       if tick_count % 100 == 0:
         speed = world.get_vehicle_speed()
-        rpy = calibrator.rpyCalib
+        modeld_status = 'connected' if sm.seen['modelV2'] else 'waiting...'
+        pitch_d, yaw_d = np.degrees(cur_rpyCalib[1]), np.degrees(cur_rpyCalib[2])
         print(f"[DASHCAM] frame={tick_count//TICKS_PER_FRAME} speed={speed:.1f}m/s "
-              f"pitch={np.degrees(rpy[1]):.2f}° yaw={np.degrees(rpy[2]):.2f}° "
-              f"model_time={t1-t0:.3f}s fps={fps:.1f}")
+              + f"pitch={pitch_d:.2f}\u00b0 yaw={yaw_d:.2f}\u00b0 fps={fps:.1f} modeld={modeld_status}")
 
   except Exception as e:
     print(f"Error: {e}")
     raise
   finally:
-    # Ensure cleanup runs even without atexit
     visualizer.close()
-    world.close()
+    # Terminate subprocesses first (before destroying Carla actors)
+    for proc in [calibrationd_proc, modeld_proc]:
+      if proc is not None:
+        proc.terminate()
+    for proc in [calibrationd_proc, modeld_proc]:
+      if proc is not None:
+        try:
+          proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+          proc.kill()
+    # Note: skip world.close() explicit actor destroy - Carla cleans up on client disconnect.
+    # Calling s.destroy() can trigger C++ std::runtime_error that bypasses Python exception handling.
+    try:
+      world.vehicle.set_autopilot(False)
+    except Exception:
+      pass
     print("Done")
+    os._exit(0)
 
 
 if __name__ == "__main__":

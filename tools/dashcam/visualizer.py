@@ -1,4 +1,8 @@
-"""Visualization: draw perception results on camera images, display and record video."""
+"""Visualization: draw perception results on camera images, display and record video.
+
+Adapted for cereal modelV2 message format with continuous probability rendering
+matching the openpilot UI approach (no hard probability thresholds).
+"""
 
 import math
 import cv2
@@ -6,8 +10,6 @@ import numpy as np
 
 from openpilot.common.transformations.camera import view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
-from openpilot.selfdrive.modeld.constants import ModelConstants
-from openpilot.tools.dashcam.calibrator import INPUTS_NEEDED
 
 from openpilot.tools.dashcam.carla_world import W, H
 
@@ -15,12 +17,15 @@ from openpilot.tools.dashcam.carla_world import W, H
 UI_W, UI_H = 2160, 1080
 ZOOM = max(UI_W / W, UI_H / H)  # ~1.12, fill width then crop height
 
+# Calibration constants for info panel display
+INPUTS_NEEDED = 5
+
 
 def project_points_to_image(xs, ys, zs, intrinsics_3x3, rpyCalib):
   """Project calibration-frame 3D points to image pixel coordinates.
 
   Calibration frame: x=forward, y=right, z=down.
-  Model outputs lane_lines/road_edges with z ≈ camera_height (road surface).
+  Model outputs lane_lines/road_edges with z ~ camera_height (road surface).
   Projection: intrinsic @ view_frame_from_device_frame @ device_from_calib.
   Returns Nx2 array of (u, v) pixel coords. Invalid points have NaN.
   """
@@ -60,7 +65,6 @@ def draw_dashed_path(img, points, color, thickness=2, dash_px=20, gap_px=15):
   # Walk along the polyline, alternating dash/gap
   drawing = True
   remaining = dash_px
-  seg_start = 0
   for i in range(1, len(pts)):
     dx = float(pts[i, 0] - pts[i - 1, 0])
     dy = float(pts[i, 1] - pts[i - 1, 1])
@@ -98,23 +102,32 @@ class Visualizer:
       cv2.namedWindow('dashcam', cv2.WINDOW_NORMAL)
       cv2.resizeWindow('dashcam', UI_W, UI_H)
 
-    self.x_idxs = np.array(ModelConstants.X_IDXS)
-
-  def draw(self, frame_rgb, vision_output, fcam_intrinsics_3x3, rpyCalib,
-           camera_height, vehicle_speed, calibrator_status, valid_blocks, fps):
+  def draw(self, frame_rgb, model_msg, fcam_intrinsics_3x3, rpyCalib,
+           camera_height, vehicle_speed, cal_status, valid_blocks, fps):
     """Draw all perception results on frame and display/record.
+
+    Args:
+      frame_rgb: HxWx3 RGB image from Carla camera.
+      model_msg: cereal modelV2 message object, or None if no model output yet.
+      fcam_intrinsics_3x3: 3x3 camera intrinsic matrix.
+      rpyCalib: [roll, pitch, yaw] calibration in radians.
+      camera_height: camera height in meters.
+      vehicle_speed: ego vehicle speed in m/s.
+      cal_status: calibration status string (e.g. 'calibrated').
+      valid_blocks: number of valid calibration blocks.
+      fps: current FPS.
 
     Returns True if should continue, False if user pressed 'q'.
     """
     img = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-    if vision_output is not None:
-      self._draw_lane_lines(img, vision_output, fcam_intrinsics_3x3, rpyCalib, camera_height)
-      self._draw_road_edges(img, vision_output, fcam_intrinsics_3x3, rpyCalib, camera_height)
-      self._draw_lead(img, vision_output, fcam_intrinsics_3x3, rpyCalib, camera_height)
+    if model_msg is not None:
+      self._draw_lane_lines(img, model_msg, fcam_intrinsics_3x3, rpyCalib)
+      self._draw_road_edges(img, model_msg, fcam_intrinsics_3x3, rpyCalib)
+      self._draw_lead(img, model_msg, fcam_intrinsics_3x3, rpyCalib, camera_height)
 
-    self._draw_info_panel(img, vision_output, vehicle_speed, rpyCalib,
-                          calibrator_status, valid_blocks, camera_height, fps)
+    self._draw_info_panel(img, model_msg, vehicle_speed, rpyCalib,
+                          cal_status, valid_blocks, camera_height, fps)
 
     # Zoom 1.1x then center-crop to UI size (matching openpilot UI)
     zoomed_w, zoomed_h = int(W * ZOOM), int(H * ZOOM)
@@ -134,57 +147,72 @@ class Visualizer:
 
     return True
 
-  def _draw_lane_lines(self, img, out, K, rpyCalib, height):
-    """Draw 4 lane lines: inner (1,2) green solid, outer (0,3) green dashed."""
-    lane_lines = out['lane_lines'][0]  # (4, 33, 2): y, z at each x
-    raw_probs = out['lane_lines_prob'][0]  # (8,) - take every other for 4 lane probs
-    lane_probs = raw_probs[1::2]  # indices 1,3,5,7 = 4 lane line probabilities
-    color = (0, 220, 0)  # green in BGR
+  def _draw_lane_lines(self, img, model, K, rpyCalib):
+    """Draw 4 lane lines with continuous probability rendering.
 
-    for i in range(4):
-      prob = float(lane_probs[i])
-      if prob < 0.3:
+    Matches openpilot UI: alpha = clip(prob, 0, 0.7), green color,
+    thickness scales with probability. No hard threshold cutoff.
+    Inner lanes (1,2) drawn solid, outer lanes (0,3) drawn dashed.
+    """
+    lane_probs = list(model.laneLineProbs)  # 4 probability values
+
+    for i, ll in enumerate(model.laneLines):
+      prob = lane_probs[i]
+      if prob < 0.01:  # skip nearly invisible lines
         continue
-      ys = lane_lines[i, :, 0]  # lateral offset
-      zs = lane_lines[i, :, 1]  # height offset
-      pixels = project_points_to_image(self.x_idxs, ys, zs, K, rpyCalib)
+
+      xs = np.array(ll.x)
+      ys = np.array(ll.y)
+      zs = np.array(ll.z)
+      pixels = project_points_to_image(xs, ys, zs, K, rpyCalib)
+
+      # Continuous rendering: alpha and thickness vary with probability
+      # openpilot UI: alpha = clip(prob, 0, 0.7), width = 0.025 * prob
+      alpha = np.clip(prob, 0.0, 0.7) / 0.7  # normalize to 0~1
+      green_val = int(220 * alpha)
+      color = (0, green_val, 0)  # BGR green, brightness varies with prob
+      thickness = max(1, int(4 * prob))
 
       if i == 1 or i == 2:  # inner lanes (current lane boundaries) - solid
-        draw_path(img, pixels, color, thickness=3)
+        draw_path(img, pixels, color, thickness)
       else:  # outer lanes (0, 3) - dashed
-        draw_dashed_path(img, pixels, color, thickness=3)
+        draw_dashed_path(img, pixels, color, thickness)
 
-  def _draw_road_edges(self, img, out, K, rpyCalib, height):
-    """Draw 2 road edges in red."""
-    road_edges = out['road_edges'][0]  # (2, 33, 2)
-    color = (0, 0, 220)  # red in BGR
+  def _draw_road_edges(self, img, model, K, rpyCalib):
+    """Draw 2 road edges with continuous probability rendering.
 
-    for i in range(2):
-      ys = road_edges[i, :, 0]
-      zs = road_edges[i, :, 1]
-      pixels = project_points_to_image(self.x_idxs, ys, zs, K, rpyCalib)
-      draw_path(img, pixels, color, thickness=2)
+    Matches openpilot UI: alpha = clip(1 - std, 0, 1), red color.
+    Lower std = more certain = more visible.
+    """
+    road_stds = list(model.roadEdgeStds)  # 2 std values
 
-  def _draw_lead(self, img, out, K, rpyCalib, height):
-    """Draw lead vehicle detection."""
-    lead = out['lead']  # (1, 6, 4) or (1, 3, 6, 4) depending on MHP
-    lead_prob = out['lead_prob'][0]  # (3,) probabilities
+    for i, re in enumerate(model.roadEdges):
+      std = road_stds[i]
+      alpha = np.clip(1.0 - std, 0.0, 1.0)  # std closer to 0 = more certain
+      if alpha < 0.01:
+        continue
 
-    if lead.ndim == 4:
-      # MHP format: (1, n_selections, traj_len, 4)
-      lead_data = lead[0, 0]  # best hypothesis, first time step
-    else:
-      # (1, traj_len, 4)
-      lead_data = lead[0]
+      xs = np.array(re.x)
+      ys = np.array(re.y)
+      zs = np.array(re.z)
+      pixels = project_points_to_image(xs, ys, zs, K, rpyCalib)
 
-    prob = float(lead_prob[0])
-    if prob < 0.3:
+      red_val = int(220 * alpha)
+      color = (0, 0, red_val)  # BGR red
+      thickness = max(1, int(3 * alpha))
+      draw_path(img, pixels, color, thickness)
+
+  def _draw_lead(self, img, model, K, rpyCalib, height):
+    """Draw lead vehicle detection from modelV2.leadsV3."""
+    if len(model.leadsV3) == 0:
       return
 
-    # lead_data[0] = (x_dist, y_offset, v_rel, a_rel) at t=0
-    x_dist = float(lead_data[0, 0])
-    y_offset = float(lead_data[0, 1])
-    v_rel = float(lead_data[0, 2])
+    lead = model.leadsV3[0]
+    if lead.prob < 0.3:
+      return
+
+    x_dist = float(lead.x[0])
+    y_offset = float(lead.y[0])
 
     if x_dist < 1.0 or x_dist > 200.0:
       return
@@ -202,16 +230,16 @@ class Visualizer:
     if 0 <= u < W and 0 <= v < H:
       # Draw marker
       radius = max(10, int(600 / max(x_dist, 1)))
-      alpha = np.clip(prob, 0.3, 1.0)
       color = (255, 255, 0)  # cyan in BGR
       cv2.circle(img, (u, v), radius, color, 2, cv2.LINE_AA)
 
       # Label
+      v_rel = float(lead.v[0]) if len(lead.v) > 0 else 0.0
       label = f"{x_dist:.0f}m v:{v_rel:+.1f}"
       cv2.putText(img, label, (u + radius + 5, v + 5),
                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
 
-  def _draw_info_panel(self, img, out, speed, rpyCalib, cal_status, valid_blocks, height, fps):
+  def _draw_info_panel(self, img, model, speed, rpyCalib, cal_status, valid_blocks, height, fps):
     """Draw semi-transparent info panel in top-left corner."""
     # Background
     panel_h = 200
@@ -227,28 +255,23 @@ class Visualizer:
     dy = 28
     scale = 0.65
 
+    status_str = str(cal_status).upper()
     lines = [
       f"FPS: {fps:.1f}",
       f"Speed: {speed:.1f} m/s ({speed*3.6:.1f} km/h)",
-      f"Calib: pitch={math.degrees(rpyCalib[1]):.2f} yaw={math.degrees(rpyCalib[2]):.2f} [{cal_status.upper()}]",
+      f"Calib: pitch={math.degrees(rpyCalib[1]):.2f} yaw={math.degrees(rpyCalib[2]):.2f} [{status_str}]",
       f"Calib blocks: {valid_blocks}/{INPUTS_NEEDED}",
       f"Height: {height:.2f}m",
     ]
 
-    if out is not None:
-      # Camera odometry
-      trans = out['pose'][0, :3]
-      lines.append(f"Cam Odom: vx={trans[0]:.2f} vy={trans[1]:.3f} vz={trans[2]:.3f} m/s")
-
-      # Lead info
-      lead_prob = out['lead_prob'][0]
-      if lead_prob[0] > 0.3:
-        lead = out['lead']
-        if lead.ndim == 4:
-          ld = lead[0, 0, 0]
-        else:
-          ld = lead[0, 0]
-        lines.append(f"Lead: {ld[0]:.1f}m  v_rel={ld[2]:+.1f} m/s  prob={lead_prob[0]:.2f}")
+    if model is not None:
+      # Lead info from leadsV3
+      if len(model.leadsV3) > 0:
+        lead = model.leadsV3[0]
+        if lead.prob > 0.3:
+          x_dist = float(lead.x[0])
+          v_rel = float(lead.v[0]) if len(lead.v) > 0 else 0.0
+          lines.append(f"Lead: {x_dist:.1f}m  v_rel={v_rel:+.1f} m/s  prob={lead.prob:.2f}")
 
     for i, line in enumerate(lines):
       cv2.putText(img, line, (10, y0 + i * dy), font, scale, color, 1, cv2.LINE_AA)

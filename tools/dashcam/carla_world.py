@@ -177,8 +177,22 @@ class DashcamCarlaWorld:
       self.vehicle.set_autopilot(False)
     except Exception:
       pass
+    # Stop camera listeners before destroying to avoid C++ callback crashes
+    for cam in [self.road_camera, self.wide_road_camera]:
+      try:
+        if cam is not None and cam.is_listening:
+          cam.stop()
+      except Exception:
+        pass
     try:
       self.tm.set_synchronous_mode(False)
+    except Exception:
+      pass
+    # Tick once to let Carla process the stop commands
+    try:
+      settings = self.world.get_settings()
+      settings.synchronous_mode = False
+      self.world.apply_settings(settings)
     except Exception:
       pass
     for s in self.carla_objects:
