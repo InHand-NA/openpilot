@@ -1,12 +1,18 @@
+import math
 import random
 import threading
 import time
 
+import cv2
 import numpy as np
 
 
 # Camera resolution matching openpilot standard
 W, H = 1928, 1208
+
+# Intrinsic focal lengths from common/transformations/camera.py
+FCAM_FOCAL = 2648.0  # narrow road camera
+WIDE_FOV = 120  # Carla wide camera FOV in degrees
 
 
 class DashcamCarlaWorld:
@@ -15,7 +21,8 @@ class DashcamCarlaWorld:
   def __init__(self, host='127.0.0.1', port=2000, town='Town04_Opt',
                spawn_point=16, camera_pitch_deg=5.0, camera_yaw_deg=3.0,
                camera_height=1.13, high_quality=False, num_npc=20,
-               wide_road_only=False, road_only=False):
+               wide_road_only=False, road_only=False,
+               virtual_dual=False, render_scale=2):
     import carla
 
     client = carla.Client(host, port)
@@ -64,10 +71,10 @@ class DashcamCarlaWorld:
     self.wide_road_image = None
     self._new_frame = False
 
-    def create_camera(fov, callback):
+    def create_camera(fov, callback, cam_w=W, cam_h=H):
       blueprint = blueprint_library.find('sensor.camera.rgb')
-      blueprint.set_attribute('image_size_x', str(W))
-      blueprint.set_attribute('image_size_y', str(H))
+      blueprint.set_attribute('image_size_x', str(cam_w))
+      blueprint.set_attribute('image_size_y', str(cam_h))
       blueprint.set_attribute('fov', str(fov))
       blueprint.set_attribute('sensor_tick', str(1 / 20))
       if not high_quality:
@@ -78,13 +85,33 @@ class DashcamCarlaWorld:
 
     self.wide_road_only = wide_road_only
     self.road_only = road_only
-    if wide_road_only:
-      self.road_camera = None
+    self.virtual_dual = virtual_dual
+    self.road_camera = None
+    self.wide_road_camera = None
+    self._vd_camera = None
+
+    if virtual_dual:
+      # Virtual dual: single high-res wide camera → synthesize both road and wide streams
+      self._vd_W_render = W * render_scale
+      self._vd_H_render = H * render_scale
+      # Compute focal length of the high-res render from Carla FOV
+      f_hires = (self._vd_W_render / 2) / math.tan(math.radians(WIDE_FOV / 2))
+      # Center crop dimensions to simulate fcam (focal=2648)
+      self._vd_crop_w = int(round(f_hires * W / FCAM_FOCAL))
+      self._vd_crop_h = int(round(f_hires * H / FCAM_FOCAL))
+      # Ensure even dimensions for clean center crop
+      self._vd_crop_w = self._vd_crop_w & ~1
+      self._vd_crop_h = self._vd_crop_h & ~1
+      print(f"[Virtual Dual] render={self._vd_W_render}x{self._vd_H_render} (scale={render_scale}), crop={self._vd_crop_w}x{self._vd_crop_h} for virtual fcam")
+      self._vd_camera = create_camera(
+        fov=WIDE_FOV, callback=self._cam_callback_virtual_dual,
+        cam_w=self._vd_W_render, cam_h=self._vd_H_render)
+      self.carla_objects = [self._vd_camera, self.vehicle]
+    elif wide_road_only:
       self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)
       self.carla_objects = [self.wide_road_camera, self.vehicle]
     elif road_only:
       self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
-      self.wide_road_camera = None
       self.carla_objects = [self.road_camera, self.vehicle]
     else:
       self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
@@ -152,6 +179,26 @@ class DashcamCarlaWorld:
       if self.wide_road_only:
         self._new_frame = True
 
+  def _cam_callback_virtual_dual(self, image):
+    """Process high-res wide frame: synthesize road (center crop) and wide (full downsample)."""
+    raw = np.frombuffer(image.raw_data, dtype=np.uint8)
+    raw = np.reshape(raw, (self._vd_H_render, self._vd_W_render, 4))
+    hires = raw[:, :, :3]  # Drop alpha, keep same channel order as _carla_image_to_rgb
+
+    # Wide road: full image downsampled to W×H
+    wide = cv2.resize(hires, (W, H), interpolation=cv2.INTER_AREA)
+
+    # Road: center crop (simulating fcam FOV) then resize to W×H
+    cy, cx = self._vd_H_render // 2, self._vd_W_render // 2
+    hh, hw = self._vd_crop_h // 2, self._vd_crop_w // 2
+    crop = hires[cy - hh:cy + hh, cx - hw:cx + hw]
+    road = cv2.resize(crop, (W, H), interpolation=cv2.INTER_LINEAR)
+
+    with self.image_lock:
+      self.road_image = np.ascontiguousarray(road)
+      self.wide_road_image = np.ascontiguousarray(wide)
+      self._new_frame = True
+
   def get_frame(self):
     """Get latest camera RGB frames. Returns (road, wide) or (None, None) if no new frame."""
     with self.image_lock:
@@ -190,7 +237,7 @@ class DashcamCarlaWorld:
     except Exception:
       pass
     # Stop camera listeners before destroying to avoid C++ callback crashes
-    for cam in [c for c in [self.road_camera, self.wide_road_camera] if c is not None]:
+    for cam in [c for c in [self.road_camera, self.wide_road_camera, self._vd_camera] if c is not None]:
       try:
         if cam is not None and cam.is_listening:
           cam.stop()

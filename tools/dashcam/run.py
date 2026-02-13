@@ -84,10 +84,14 @@ def main():
                       help='Single wide camera mode (modeld uses ecam intrinsics for both inputs)')
   parser.add_argument('--road-only', action='store_true',
                       help='Single narrow camera mode (modeld uses fcam intrinsics for main input)')
+  parser.add_argument('--virtual-dual', action='store_true',
+                      help='Virtual dual camera: single high-res wide Carla camera, synthesize both ROAD and WIDE_ROAD streams')
+  parser.add_argument('--render-scale', type=int, default=2,
+                      help='Render scale for virtual-dual mode (default: 2)')
   args = parser.parse_args()
 
-  if args.wide_road_only and args.road_only:
-    parser.error('--wide-road-only and --road-only are mutually exclusive')
+  if sum([args.wide_road_only, args.road_only, args.virtual_dual]) > 1:
+    parser.error('--wide-road-only, --road-only, and --virtual-dual are mutually exclusive')
 
   # Camera pose
   if args.perfect_cam:
@@ -100,7 +104,9 @@ def main():
   rpyCalib = np.array([0.0, -np.deg2rad(pitch_deg), -np.deg2rad(yaw_deg)])
 
   print(f"Camera pose: pitch={pitch_deg}\u00b0 yaw={yaw_deg}\u00b0 height={camera_height}m")
-  if args.wide_road_only:
+  if args.virtual_dual:
+    cam_mode_str = f'virtual-dual (single wide cam, scale={args.render_scale}, synthesize fcam+ecam)'
+  elif args.wide_road_only:
     cam_mode_str = 'wide-road-only (single ecam)'
   elif args.road_only:
     cam_mode_str = 'road-only (single fcam)'
@@ -163,7 +169,8 @@ def main():
     camera_pitch_deg=pitch_deg, camera_yaw_deg=yaw_deg,
     camera_height=camera_height,
     high_quality=args.high_quality, num_npc=args.num_npc,
-    wide_road_only=args.wide_road_only, road_only=args.road_only)
+    wide_road_only=args.wide_road_only, road_only=args.road_only,
+    virtual_dual=args.virtual_dual, render_scale=args.render_scale)
 
   # Camera intrinsics (for visualization)
   # wide-road-only: modeld uses ecam.intrinsics for both transforms, so visualization must match
