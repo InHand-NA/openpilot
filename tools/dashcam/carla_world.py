@@ -183,20 +183,22 @@ class DashcamCarlaWorld:
     """Process high-res wide frame: synthesize road (center crop) and wide (full downsample)."""
     raw = np.frombuffer(image.raw_data, dtype=np.uint8)
     raw = np.reshape(raw, (self._vd_H_render, self._vd_W_render, 4))
-    hires = raw[:, :, :3]  # Drop alpha, keep same channel order as _carla_image_to_rgb
+    # Keep 4 channels (BGRA) for resize — contiguous + 4-byte aligned = faster cv2.resize
 
-    # Wide road: full image downsampled to W×H
-    wide = cv2.resize(hires, (W, H), interpolation=cv2.INTER_AREA)
+    # Wide road: full 4ch image downsampled, then drop alpha
+    wide_4ch = cv2.resize(raw, (W, H), interpolation=cv2.INTER_LINEAR)
+    wide = np.ascontiguousarray(wide_4ch[:, :, :3])
 
-    # Road: center crop (simulating fcam FOV) then resize to W×H
+    # Road: center crop 4ch (view, no copy), resize, then drop alpha
     cy, cx = self._vd_H_render // 2, self._vd_W_render // 2
     hh, hw = self._vd_crop_h // 2, self._vd_crop_w // 2
-    crop = hires[cy - hh:cy + hh, cx - hw:cx + hw]
-    road = cv2.resize(crop, (W, H), interpolation=cv2.INTER_LINEAR)
+    crop_4ch = raw[cy - hh:cy + hh, cx - hw:cx + hw]
+    road_4ch = cv2.resize(crop_4ch, (W, H), interpolation=cv2.INTER_LINEAR)
+    road = np.ascontiguousarray(road_4ch[:, :, :3])
 
     with self.image_lock:
-      self.road_image = np.ascontiguousarray(road)
-      self.wide_road_image = np.ascontiguousarray(wide)
+      self.road_image = road
+      self.wide_road_image = wide
       self._new_frame = True
 
   def get_frame(self):
