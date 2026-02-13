@@ -257,7 +257,11 @@ class Visualizer:
       _draw_polygon_alpha(img, polygon, color_bgr, alpha)
 
   def _draw_lead(self, img, model, K, rpyCalib, height):
-    """Draw lead vehicle detection from modelV2.leadsV3."""
+    """Draw lead vehicle chevron indicator, aligned with model_renderer.py.
+
+    Renders a yellow glow triangle (outer) and a red chevron triangle (inner)
+    with fill alpha based on distance and relative speed.
+    """
     if len(model.leadsV3) == 0:
       return
 
@@ -272,7 +276,6 @@ class Visualizer:
       return
 
     # Project lead position to image
-    # In calibration frame z=down, so road level is z=camera_height
     pts = project_points_to_image(
       np.array([x_dist]), np.array([y_offset]), np.array([height]),
       K, rpyCalib)
@@ -280,18 +283,53 @@ class Visualizer:
     if np.isnan(pts[0]).any():
       return
 
-    u, v = int(pts[0, 0]), int(pts[0, 1])
-    if 0 <= u < W and 0 <= v < H:
-      # Draw marker
-      radius = max(10, int(600 / max(x_dist, 1)))
-      color = (255, 255, 0)  # cyan in BGR
-      cv2.circle(img, (u, v), radius, color, 2, cv2.LINE_AA)
+    x, y = float(pts[0, 0]), float(pts[0, 1])
 
-      # Label
-      v_rel = float(lead.v[0]) if len(lead.v) > 0 else 0.0
-      label = f"{x_dist:.0f}m v:{v_rel:+.1f}"
-      cv2.putText(img, label, (u + radius + 5, v + 5),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+    # Compute chevron size (aligned with model_renderer.py:_update_lead_vehicle)
+    sz = np.clip((25 * 30) / (x_dist / 3 + 30), 15.0, 30.0) * 2.35
+    x = np.clip(x, 0.0, W - sz / 2)
+    y = min(y, H - sz * 0.6)
+
+    g_xo = sz / 5
+    g_yo = sz / 10
+
+    # Glow triangle (outer, yellow) — aligned with model_renderer.py
+    glow = np.array([
+      [x + sz * 1.35 + g_xo, y + sz + g_yo],
+      [x, y - g_yo],
+      [x - sz * 1.35 - g_xo, y + sz + g_yo],
+    ], dtype=np.int32)
+
+    # Chevron triangle (inner, red)
+    chevron = np.array([
+      [x + sz * 1.25, y + sz],
+      [x, y],
+      [x - sz * 1.25, y + sz],
+    ], dtype=np.int32)
+
+    # Fill alpha based on distance and relative speed
+    speed_buff, lead_buff = 10.0, 40.0
+    v_rel = float(lead.v[0]) if len(lead.v) > 0 else 0.0
+    fill_alpha = 0.0
+    if x_dist < lead_buff:
+      fill_alpha = 1.0 - (x_dist / lead_buff)
+      if v_rel < 0:
+        fill_alpha += -v_rel / speed_buff
+      fill_alpha = min(fill_alpha, 1.0)
+
+    # Draw glow (yellow, fully opaque) — BGR for rl.Color(218, 202, 37)
+    cv2.fillPoly(img, [glow], (37, 202, 218), cv2.LINE_AA)
+
+    # Draw chevron (red, alpha blended) — BGR for rl.Color(201, 34, 49)
+    if fill_alpha > 0.01:
+      _draw_polygon_alpha(img, chevron, (49, 34, 201), fill_alpha)
+
+    # Label
+    label = f"{x_dist:.0f}m v:{v_rel:+.1f}"
+    label_x = int(x + sz * 1.35 + g_xo + 5)
+    label_y = int(y + sz / 2)
+    cv2.putText(img, label, (label_x, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (37, 202, 218), 2, cv2.LINE_AA)
 
   def _draw_info_panel(self, img, model, speed, rpyCalib, cal_status, valid_blocks, height, fps):
     """Draw semi-transparent info panel in top-left corner."""
