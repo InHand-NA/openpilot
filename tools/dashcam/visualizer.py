@@ -370,7 +370,7 @@ class Visualizer:
     y += dy
 
     # Line 3: Progress bar
-    bar_x, bar_w, bar_h = 10, 400, 18
+    bar_x, bar_w, bar_h = 10, 200, 18
     # Background
     cv2.rectangle(img, (bar_x, y - 2), (bar_x + bar_w, y - 2 + bar_h), (60, 60, 60), -1)
     # Fill
