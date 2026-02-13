@@ -41,7 +41,8 @@ dashcam 是一个将 openpilot 感知管线（modeld + calibrationd）接入 Car
 | 文件 | 说明 |
 |------|------|
 | `run.py` | 主入口：编排子进程、Carla 连接、消息发布/订阅、可视化循环 |
-| `carla_world.py` | Carla 环境管理：自车/NPC 生成、双目相机挂载、帧采集 |
+| `camerad.py` | VisionIPC 服务端：支持双目和单广角（wide-road-only）两种模式 |
+| `carla_world.py` | Carla 环境管理：自车/NPC 生成、相机挂载、帧采集 |
 | `visualizer.py` | 感知渲染：车道线多边形、路边沿、前车三角标记、标定进度面板 |
 | `calibrationd.py` | 在线标定：从视觉里程计估计相机姿态（pitch/yaw）和高度 |
 | `start_carla.sh` | 启动 Carla 0.9.16 Docker 容器（NVIDIA GPU、Epic 画质） |
@@ -107,6 +108,7 @@ python tools/dashcam/run.py --perfect-cam --high-quality
 | `--fast` | - | 全速运行，不做帧率限制 |
 | `--save-video` | `''` | 保存可视化为 MP4 文件 |
 | `--max-frames` | `0` | 最大帧数（0=无限） |
+| `--wide-road-only` | - | 单广角相机模式（仅 WIDE_ROAD 流，modeld 用 ecam intrinsics） |
 
 ## 使用示例
 
@@ -125,6 +127,9 @@ python tools/dashcam/run.py --perfect-cam --no-display --fast
 
 # 自定义场景：Town03 地图，50 辆 NPC
 python tools/dashcam/run.py --perfect-cam --town Town03 --num-npc 50
+
+# 单广角相机模式（与 openpilot 仅 WIDE_ROAD 模式一致）
+python tools/dashcam/run.py --perfect-cam --wide-road-only
 ```
 
 ## 在线标定系统

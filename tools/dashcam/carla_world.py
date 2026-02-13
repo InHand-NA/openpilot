@@ -14,7 +14,8 @@ class DashcamCarlaWorld:
 
   def __init__(self, host='127.0.0.1', port=2000, town='Town04_Opt',
                spawn_point=16, camera_pitch_deg=5.0, camera_yaw_deg=3.0,
-               camera_height=1.13, high_quality=False, num_npc=20):
+               camera_height=1.13, high_quality=False, num_npc=20,
+               wide_road_only=False):
     import carla
 
     client = carla.Client(host, port)
@@ -75,10 +76,15 @@ class DashcamCarlaWorld:
       camera.listen(callback)
       return camera
 
-    self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
-    self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)
-
-    self.carla_objects = [self.road_camera, self.wide_road_camera, self.vehicle]
+    self.wide_road_only = wide_road_only
+    if wide_road_only:
+      self.road_camera = None
+      self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)
+      self.carla_objects = [self.wide_road_camera, self.vehicle]
+    else:
+      self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
+      self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)
+      self.carla_objects = [self.road_camera, self.wide_road_camera, self.vehicle]
 
     # Traffic manager
     self.tm = client.get_trafficmanager()
@@ -138,6 +144,8 @@ class DashcamCarlaWorld:
   def _cam_callback_wide(self, image):
     with self.image_lock:
       self.wide_road_image = self._carla_image_to_rgb(image)
+      if self.wide_road_only:
+        self._new_frame = True
 
   def get_frame(self):
     """Get latest camera RGB frames. Returns (road, wide) or (None, None) if no new frame."""
@@ -145,7 +153,9 @@ class DashcamCarlaWorld:
       if not self._new_frame:
         return None, None
       self._new_frame = False
-      return self.road_image.copy(), self.wide_road_image.copy() if self.wide_road_image is not None else None
+      road = self.road_image.copy() if self.road_image is not None else None
+      wide = self.wide_road_image.copy() if self.wide_road_image is not None else None
+      return road, wide
 
   def get_vehicle_speed(self):
     """Get 3D speed scalar in m/s."""
@@ -175,7 +185,7 @@ class DashcamCarlaWorld:
     except Exception:
       pass
     # Stop camera listeners before destroying to avoid C++ callback crashes
-    for cam in [self.road_camera, self.wide_road_camera]:
+    for cam in [c for c in [self.road_camera, self.wide_road_camera] if c is not None]:
       try:
         if cam is not None and cam.is_listening:
           cam.stop()

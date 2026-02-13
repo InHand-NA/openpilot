@@ -26,7 +26,7 @@ from cereal import log, messaging
 from openpilot.common.params import Params
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.hardware import HARDWARE
-from openpilot.tools.sim.lib.camerad import Camerad
+from openpilot.tools.dashcam.camerad import DashcamCamerad
 
 TICKS_PER_FRAME = 2  # 2 ticks × 0.025s = 0.05s per frame = 20 FPS
 
@@ -80,6 +80,8 @@ def main():
                       help='Stop after N frames (0 = unlimited)')
   parser.add_argument('--fast', action='store_true',
                       help='Run as fast as possible, bypass frame rate limiter')
+  parser.add_argument('--wide-road-only', action='store_true',
+                      help='Single wide camera mode (modeld uses ecam intrinsics for both inputs)')
   args = parser.parse_args()
 
   # Camera pose
@@ -93,6 +95,7 @@ def main():
   rpyCalib = np.array([0.0, -np.deg2rad(pitch_deg), -np.deg2rad(yaw_deg)])
 
   print(f"Camera pose: pitch={pitch_deg}\u00b0 yaw={yaw_deg}\u00b0 height={camera_height}m")
+  print(f"Camera mode: {'wide-road-only (single ecam)' if args.wide_road_only else 'dual (fcam + ecam)'}")
   print(f"Calibration mode: {'online (calibrationd)' if args.online_calib else 'known pose'}")
 
   # 1. Initialize Params
@@ -115,7 +118,7 @@ def main():
 
   # 2. Create VisionIPC server (must be before starting modeld)
   print("Creating VisionIPC server...")
-  camerad = Camerad(dual_camera=True)
+  camerad = DashcamCamerad(wide_road_only=args.wide_road_only)
 
   # 3. Start modeld subprocess (use CUDA on NVIDIA GPU for faster inference)
   # CUDA backend handles FP16 natively; CL has exp2(half) ambiguity on NVIDIA OpenCL
@@ -148,10 +151,14 @@ def main():
     spawn_point=args.spawn_point,
     camera_pitch_deg=pitch_deg, camera_yaw_deg=yaw_deg,
     camera_height=camera_height,
-    high_quality=args.high_quality, num_npc=args.num_npc)
+    high_quality=args.high_quality, num_npc=args.num_npc,
+    wide_road_only=args.wide_road_only)
 
   # Camera intrinsics (for visualization)
+  # wide-road-only: modeld uses ecam.intrinsics for both transforms, so visualization must match
+  # dual mode: display the narrow road camera, use fcam.intrinsics
   dc = DEVICE_CAMERAS[("pc", "unknown")]
+  vis_intrinsics = dc.ecam.intrinsics if args.wide_road_only else dc.fcam.intrinsics
 
   # 7. Initialize visualizer
   from openpilot.tools.dashcam.visualizer import Visualizer
@@ -196,15 +203,23 @@ def main():
         continue
 
       road_rgb, wide_rgb = world.get_frame()
-      if road_rgb is None:
-        continue
 
-      # Send frames via VisionIPC
-      yuv_road = camerad.rgb_to_yuv(road_rgb)
-      camerad.cam_send_yuv_road(yuv_road)
-      if wide_rgb is not None:
+      # Choose display frame and send via VisionIPC
+      if args.wide_road_only:
+        if wide_rgb is None:
+          continue
+        display_rgb = wide_rgb
         yuv_wide = camerad.rgb_to_yuv(wide_rgb)
         camerad.cam_send_yuv_wide_road(yuv_wide)
+      else:
+        if road_rgb is None:
+          continue
+        display_rgb = road_rgb
+        yuv_road = camerad.rgb_to_yuv(road_rgb)
+        camerad.cam_send_yuv_road(yuv_road)
+        if wide_rgb is not None:
+          yuv_wide = camerad.rgb_to_yuv(wide_rgb)
+          camerad.cam_send_yuv_wide_road(yuv_wide)
 
       # Publish deviceState (modeld needs deviceType for DEVICE_CAMERAS lookup)
       publish_device_state(pm)
@@ -245,7 +260,7 @@ def main():
       # Visualize (show last received model data, or None if never received)
       model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
       ok = visualizer.draw(
-        road_rgb, model_msg, dc.fcam.intrinsics,
+        display_rgb, model_msg, vis_intrinsics,
         cur_rpyCalib, cur_height,
         world.get_vehicle_speed(), cur_cal_status,
         cur_valid_blocks, cur_cal_perc, fps)
