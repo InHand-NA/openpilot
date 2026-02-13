@@ -130,7 +130,7 @@ def main():
   if args.online_calib:
     print("Starting calibrationd subprocess...")
     calibrationd_proc = subprocess.Popen(
-      [sys.executable, '-m', 'selfdrive.locationd.calibrationd'],
+      [sys.executable, '-m', 'openpilot.tools.dashcam.calibrationd'],
       env={**os.environ})
 
   # 5. Create cereal pub/sub
