@@ -1,9 +1,10 @@
-"""DashcamCamerad: VisionIPC server supporting dual-camera and wide-road-only modes.
+"""DashcamCamerad: VisionIPC server supporting three camera modes.
 
-In wide-road-only mode, only VISION_STREAM_WIDE_ROAD buffer is created.
-modeld will detect the absence of VISION_STREAM_ROAD and enter single-camera mode
-(main_wide_camera=True, use_extra_client=False), using the same wide frame for
-both 'img' and 'big_img' network inputs with ecam.intrinsics.
+- dual (default): ROAD + WIDE_ROAD streams, modeld uses both cameras
+- wide_road_only: only WIDE_ROAD stream, modeld enters single-camera mode
+  (main_wide_camera=True, use_extra_client=False, ecam.intrinsics for both inputs)
+- road_only: only ROAD stream, modeld enters single-camera mode
+  (main_wide_camera=False, use_extra_client=False, fcam.intrinsics for main input)
 """
 
 import os
@@ -20,14 +21,16 @@ from openpilot.tools.dashcam.carla_world import W, H
 
 
 class DashcamCamerad:
-  """VisionIPC server for dashcam, supports dual-camera and wide-road-only modes."""
+  """VisionIPC server for dashcam, supports dual / road-only / wide-road-only modes."""
 
-  def __init__(self, wide_road_only=False):
-    self.wide_road_only = wide_road_only
+  def __init__(self, wide_road_only=False, road_only=False):
+    assert not (wide_road_only and road_only), "Cannot use both wide_road_only and road_only"
 
     # PubMaster for camera state messages
     if wide_road_only:
       self.pm = messaging.PubMaster(['wideRoadCameraState'])
+    elif road_only:
+      self.pm = messaging.PubMaster(['roadCameraState'])
     else:
       self.pm = messaging.PubMaster(['roadCameraState', 'wideRoadCameraState'])
 
@@ -37,6 +40,8 @@ class DashcamCamerad:
 
     if wide_road_only:
       self.vipc_server.create_buffers(VisionStreamType.VISION_STREAM_WIDE_ROAD, 5, W, H)
+    elif road_only:
+      self.vipc_server.create_buffers(VisionStreamType.VISION_STREAM_ROAD, 5, W, H)
     else:
       self.vipc_server.create_buffers(VisionStreamType.VISION_STREAM_ROAD, 5, W, H)
       self.vipc_server.create_buffers(VisionStreamType.VISION_STREAM_WIDE_ROAD, 5, W, H)

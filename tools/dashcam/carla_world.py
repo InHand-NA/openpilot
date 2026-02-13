@@ -15,7 +15,7 @@ class DashcamCarlaWorld:
   def __init__(self, host='127.0.0.1', port=2000, town='Town04_Opt',
                spawn_point=16, camera_pitch_deg=5.0, camera_yaw_deg=3.0,
                camera_height=1.13, high_quality=False, num_npc=20,
-               wide_road_only=False):
+               wide_road_only=False, road_only=False):
     import carla
 
     client = carla.Client(host, port)
@@ -77,10 +77,15 @@ class DashcamCarlaWorld:
       return camera
 
     self.wide_road_only = wide_road_only
+    self.road_only = road_only
     if wide_road_only:
       self.road_camera = None
       self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)
       self.carla_objects = [self.wide_road_camera, self.vehicle]
+    elif road_only:
+      self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
+      self.wide_road_camera = None
+      self.carla_objects = [self.road_camera, self.vehicle]
     else:
       self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
       self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)

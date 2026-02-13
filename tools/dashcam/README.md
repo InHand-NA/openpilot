@@ -109,6 +109,7 @@ python tools/dashcam/run.py --perfect-cam --high-quality
 | `--save-video` | `''` | 保存可视化为 MP4 文件 |
 | `--max-frames` | `0` | 最大帧数（0=无限） |
 | `--wide-road-only` | - | 单广角相机模式（仅 WIDE_ROAD 流，modeld 用 ecam intrinsics） |
+| `--road-only` | - | 单窄角相机模式（仅 ROAD 流，modeld 用 fcam intrinsics） |
 
 ## 使用示例
 
@@ -130,6 +131,9 @@ python tools/dashcam/run.py --perfect-cam --town Town03 --num-npc 50
 
 # 单广角相机模式（与 openpilot 仅 WIDE_ROAD 模式一致）
 python tools/dashcam/run.py --perfect-cam --wide-road-only
+
+# 单窄角相机模式（仅 ROAD 流）
+python tools/dashcam/run.py --perfect-cam --road-only
 ```
 
 ## 在线标定系统

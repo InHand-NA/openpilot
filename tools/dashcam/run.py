@@ -82,7 +82,12 @@ def main():
                       help='Run as fast as possible, bypass frame rate limiter')
   parser.add_argument('--wide-road-only', action='store_true',
                       help='Single wide camera mode (modeld uses ecam intrinsics for both inputs)')
+  parser.add_argument('--road-only', action='store_true',
+                      help='Single narrow camera mode (modeld uses fcam intrinsics for main input)')
   args = parser.parse_args()
+
+  if args.wide_road_only and args.road_only:
+    parser.error('--wide-road-only and --road-only are mutually exclusive')
 
   # Camera pose
   if args.perfect_cam:
@@ -95,7 +100,13 @@ def main():
   rpyCalib = np.array([0.0, -np.deg2rad(pitch_deg), -np.deg2rad(yaw_deg)])
 
   print(f"Camera pose: pitch={pitch_deg}\u00b0 yaw={yaw_deg}\u00b0 height={camera_height}m")
-  print(f"Camera mode: {'wide-road-only (single ecam)' if args.wide_road_only else 'dual (fcam + ecam)'}")
+  if args.wide_road_only:
+    cam_mode_str = 'wide-road-only (single ecam)'
+  elif args.road_only:
+    cam_mode_str = 'road-only (single fcam)'
+  else:
+    cam_mode_str = 'dual (fcam + ecam)'
+  print(f"Camera mode: {cam_mode_str}")
   print(f"Calibration mode: {'online (calibrationd)' if args.online_calib else 'known pose'}")
 
   # 1. Initialize Params
@@ -118,7 +129,7 @@ def main():
 
   # 2. Create VisionIPC server (must be before starting modeld)
   print("Creating VisionIPC server...")
-  camerad = DashcamCamerad(wide_road_only=args.wide_road_only)
+  camerad = DashcamCamerad(wide_road_only=args.wide_road_only, road_only=args.road_only)
 
   # 3. Start modeld subprocess (use CUDA on NVIDIA GPU for faster inference)
   # CUDA backend handles FP16 natively; CL has exp2(half) ambiguity on NVIDIA OpenCL
@@ -152,11 +163,11 @@ def main():
     camera_pitch_deg=pitch_deg, camera_yaw_deg=yaw_deg,
     camera_height=camera_height,
     high_quality=args.high_quality, num_npc=args.num_npc,
-    wide_road_only=args.wide_road_only)
+    wide_road_only=args.wide_road_only, road_only=args.road_only)
 
   # Camera intrinsics (for visualization)
   # wide-road-only: modeld uses ecam.intrinsics for both transforms, so visualization must match
-  # dual mode: display the narrow road camera, use fcam.intrinsics
+  # road-only / dual: display the narrow road camera, use fcam.intrinsics
   dc = DEVICE_CAMERAS[("pc", "unknown")]
   vis_intrinsics = dc.ecam.intrinsics if args.wide_road_only else dc.fcam.intrinsics
 
@@ -211,6 +222,12 @@ def main():
         display_rgb = wide_rgb
         yuv_wide = camerad.rgb_to_yuv(wide_rgb)
         camerad.cam_send_yuv_wide_road(yuv_wide)
+      elif args.road_only:
+        if road_rgb is None:
+          continue
+        display_rgb = road_rgb
+        yuv_road = camerad.rgb_to_yuv(road_rgb)
+        camerad.cam_send_yuv_road(yuv_road)
       else:
         if road_rgb is None:
           continue
