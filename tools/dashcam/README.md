@@ -110,6 +110,8 @@ python tools/dashcam/run.py --perfect-cam --high-quality
 | `--max-frames` | `0` | 最大帧数（0=无限） |
 | `--wide-road-only` | - | 单广角相机模式（仅 WIDE_ROAD 流，modeld 用 ecam intrinsics） |
 | `--road-only` | - | 单窄角相机模式（仅 ROAD 流，modeld 用 fcam intrinsics） |
+| `--virtual-dual` | - | 虚拟双目模式：单个高分辨率广角 Carla 相机，合成 ROAD + WIDE_ROAD 双路流 |
+| `--render-scale` | `2` | 虚拟双目渲染倍率（2 = 3856×2416，3 = 5784×3624） |
 
 ## 使用示例
 
@@ -134,7 +136,40 @@ python tools/dashcam/run.py --perfect-cam --wide-road-only
 
 # 单窄角相机模式（仅 ROAD 流）
 python tools/dashcam/run.py --perfect-cam --road-only
+
+# 虚拟双目模式：单个广角相机合成双路流（改善 wide-road-only 感知效果）
+python tools/dashcam/run.py --perfect-cam --virtual-dual
+
+# 虚拟双目 3x 渲染（更高质量，更大 GPU 开销）
+python tools/dashcam/run.py --perfect-cam --virtual-dual --render-scale 3
 ```
+
+## 相机模式
+
+dashcam 支持四种相机模式（互斥）：
+
+| 模式 | 参数 | Carla 相机 | VisionIPC 流 | modeld 行为 |
+|------|------|-----------|-------------|------------|
+| 双目（默认） | （无） | 2 个：FOV=40° + FOV=120° | ROAD + WIDE_ROAD | 双目，fcam + ecam intrinsics |
+| 单广角 | `--wide-road-only` | 1 个：FOV=120° | WIDE_ROAD | 单目，ecam intrinsics |
+| 单窄角 | `--road-only` | 1 个：FOV=40° | ROAD | 单目，fcam intrinsics |
+| **虚拟双目** | `--virtual-dual` | 1 个：FOV=120°，高分辨率 | ROAD + WIDE_ROAD | 双目，fcam + ecam intrinsics |
+
+### 虚拟双目模式
+
+`--virtual-dual` 解决 wide-road-only 模式感知效果差的问题（详见 `docs/dashcam_wide_road_only_analysis.md`）。
+
+**原理**：只用一个 Carla 广角相机（FOV=120°），以 `render_scale` 倍分辨率渲染，在软件层合成两路 VisionIPC 流：
+
+- **WIDE_ROAD**：全图降采样到 1928×1208（模拟 ecam）
+- **ROAD**：裁剪中心 ~40° FOV 区域，缩放到 1928×1208（模拟 fcam）
+
+modeld 看到双路流后进入完整双目模式，MEDMODEL 和 SBIGMODEL 两个输入都能获得足够的像素信息。
+
+| 渲染倍率 | 渲染分辨率 | 中心裁剪尺寸 | MEDMODEL 有效采样 | GPU 开销 |
+|---------|----------|------------|-----------------|---------|
+| 2（默认） | 3856×2416 | 810×508 | 1.22x 降采样 | 4x 像素量 |
+| 3 | 5784×3624 | 1214×760 | 1.83x 降采样 | 9x 像素量 |
 
 ## 在线标定系统
 
