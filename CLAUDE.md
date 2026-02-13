@@ -75,6 +75,8 @@ The `op` CLI wrapper (`tools/op.sh`) provides shortcuts: `op build`, `op test`, 
 
 Concise subject prefixed by subsystem in imperative mood: `camerad: fix FPS drop (#123)`
 
+DO NOT commit codes without the user's instruction.
+
 ## Safety
 
 The safety model is enforced in `panda/` (C code, MISRA C guidelines). Changes to safety-critical code require extra scrutiny per ISO26262.
