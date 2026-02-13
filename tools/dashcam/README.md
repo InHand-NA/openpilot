@@ -11,7 +11,7 @@ dashcam 是一个将 openpilot 感知管线（modeld + calibrationd）接入 Car
 │  Carla 客户端        VisionIPC 服务端       可视化渲染     │
 │  (carla_world.py)    (双目 YUV420)         (visualizer.py)│
 │  - 双目 RGB 相机     - road 帧流            - 车道线       │
-│  - IMU              - wide 帧流             - 路边沿       │
+│                     - wide 帧流             - 路边沿       │
 │  - 自车 + NPC                               - 前车标记     │
 │                                              - 标定面板     │
 │  cereal 消息总线                                          │
@@ -41,7 +41,7 @@ dashcam 是一个将 openpilot 感知管线（modeld + calibrationd）接入 Car
 | 文件 | 说明 |
 |------|------|
 | `run.py` | 主入口：编排子进程、Carla 连接、消息发布/订阅、可视化循环 |
-| `carla_world.py` | Carla 环境管理：自车/NPC 生成、双目相机+IMU 挂载、帧采集 |
+| `carla_world.py` | Carla 环境管理：自车/NPC 生成、双目相机挂载、帧采集 |
 | `visualizer.py` | 感知渲染：车道线多边形、路边沿、前车三角标记、标定进度面板 |
 | `calibrationd.py` | 在线标定：从视觉里程计估计相机姿态（pitch/yaw）和高度 |
 | `start_carla.sh` | 启动 Carla 0.9.16 Docker 容器（NVIDIA GPU、Epic 画质） |
