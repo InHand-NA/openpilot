@@ -78,6 +78,8 @@ def main():
                       help='Save visualization to mp4 file')
   parser.add_argument('--max-frames', type=int, default=0,
                       help='Stop after N frames (0 = unlimited)')
+  parser.add_argument('--fast', action='store_true',
+                      help='Run as fast as possible, bypass frame rate limiter')
   args = parser.parse_args()
 
   # Camera pose
@@ -170,17 +172,21 @@ def main():
   signal.signal(signal.SIGTERM, signal_handler)
 
   # Main loop
+  TARGET_FPS = 20.0
+  FRAME_DT = 1.0 / TARGET_FPS  # 50ms per frame
   print("Starting main loop...")
   tick_count = 0
   frame_count = 0
   fps_start = time.monotonic()
   fps = 0.0
+  next_frame_time = 0.0  # initialized after warm-up
 
   try:
     # Warm-up ticks
     for _ in range(20):
       world.tick()
       tick_count += 1
+    next_frame_time = time.monotonic()
 
     while running:
       world.tick()
@@ -255,6 +261,15 @@ def main():
         pitch_d, yaw_d = np.degrees(cur_rpyCalib[1]), np.degrees(cur_rpyCalib[2])
         print(f"[DASHCAM] frame={tick_count//TICKS_PER_FRAME} speed={speed:.1f}m/s "
               + f"pitch={pitch_d:.2f}\u00b0 yaw={yaw_d:.2f}\u00b0 fps={fps:.1f} modeld={modeld_status}")
+
+      # Frame rate limiter: sleep until next 50ms boundary for real-time playback
+      if not args.fast:
+        next_frame_time += FRAME_DT
+        sleep_time = next_frame_time - time.monotonic()
+        if sleep_time > 0:
+          time.sleep(sleep_time)
+        elif sleep_time < -FRAME_DT:
+          next_frame_time = time.monotonic()
 
   except Exception as e:
     print(f"Error: {e}")
