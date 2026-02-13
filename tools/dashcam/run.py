@@ -234,11 +234,13 @@ def main():
         cur_height = float(sm['liveCalibration'].height[0]) if len(sm['liveCalibration'].height) > 0 else camera_height
         cur_valid_blocks = sm['liveCalibration'].validBlocks
         cur_cal_status = str(sm['liveCalibration'].calStatus)
+        cur_cal_perc = int(sm['liveCalibration'].calPerc)
       else:
         cur_rpyCalib = rpyCalib
         cur_height = camera_height
         cur_valid_blocks = 0
         cur_cal_status = 'uncalibrated'
+        cur_cal_perc = 0
 
       # Visualize (show last received model data, or None if never received)
       model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
@@ -246,7 +248,7 @@ def main():
         road_rgb, model_msg, dc.fcam.intrinsics,
         cur_rpyCalib, cur_height,
         world.get_vehicle_speed(), cur_cal_status,
-        cur_valid_blocks, fps)
+        cur_valid_blocks, cur_cal_perc, fps)
 
       if not ok:
         break

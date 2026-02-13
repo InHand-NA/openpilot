@@ -25,6 +25,14 @@ MAX_DRAW_DISTANCE = 100.0
 # Calibration constants for info panel display
 INPUTS_NEEDED = 5
 
+# Status colors (BGR) for calibration display
+_STATUS_COLORS = {
+  'uncalibrated': (0, 200, 255),    # yellow
+  'calibrated': (0, 220, 0),        # green
+  'invalid': (0, 0, 220),           # red
+  'recalibrating': (0, 165, 255),   # orange
+}
+
 
 def project_points_to_image(xs, ys, zs, intrinsics_3x3, rpyCalib):
   """Project calibration-frame 3D points to image pixel coordinates.
@@ -158,7 +166,7 @@ class Visualizer:
       cv2.resizeWindow('dashcam', UI_W, UI_H)
 
   def draw(self, frame_rgb, model_msg, fcam_intrinsics_3x3, rpyCalib,
-           camera_height, vehicle_speed, cal_status, valid_blocks, fps):
+           camera_height, vehicle_speed, cal_status, valid_blocks, cal_perc, fps):
     """Draw all perception results on frame and display/record.
 
     Args:
@@ -170,6 +178,7 @@ class Visualizer:
       vehicle_speed: ego vehicle speed in m/s.
       cal_status: calibration status string (e.g. 'calibrated').
       valid_blocks: number of valid calibration blocks.
+      cal_perc: calibration percentage (0-100).
       fps: current FPS.
 
     Returns True if should continue, False if user pressed 'q'.
@@ -182,7 +191,7 @@ class Visualizer:
       self._draw_lead(img, model_msg, fcam_intrinsics_3x3, rpyCalib, camera_height)
 
     self._draw_info_panel(img, model_msg, vehicle_speed, rpyCalib,
-                          cal_status, valid_blocks, camera_height, fps)
+                          cal_status, valid_blocks, cal_perc, camera_height, fps)
 
     # Zoom 1.1x then center-crop to UI size (matching openpilot UI)
     zoomed_w, zoomed_h = int(W * ZOOM), int(H * ZOOM)
@@ -331,42 +340,64 @@ class Visualizer:
     cv2.putText(img, label, (label_x, label_y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (37, 202, 218), 2, cv2.LINE_AA)
 
-  def _draw_info_panel(self, img, model, speed, rpyCalib, cal_status, valid_blocks, height, fps):
-    """Draw semi-transparent info panel in top-left corner."""
+  def _draw_info_panel(self, img, model, speed, rpyCalib, cal_status, valid_blocks, cal_perc, height, fps):
+    """Draw semi-transparent info panel with calibration progress bar."""
     # Background
-    panel_h = 200
+    panel_h = 230
     panel_w = 550
     overlay = img[0:panel_h, 0:panel_w].copy()
     cv2.rectangle(overlay, (0, 0), (panel_w, panel_h), (0, 0, 0), -1)
     img[0:panel_h, 0:panel_w] = cv2.addWeighted(overlay, 0.6, img[0:panel_h, 0:panel_w], 0.4, 0)
 
-    # Text
     font = cv2.FONT_HERSHEY_SIMPLEX
-    color = (255, 255, 255)
-    y0 = 30
+    white = (255, 255, 255)
+    gray = (160, 160, 160)
+    y = 30
     dy = 28
     scale = 0.65
 
+    # Line 1: FPS + Speed
+    cv2.putText(img, f"FPS: {fps:.1f}", (10, y), font, scale, white, 1, cv2.LINE_AA)
+    cv2.putText(img, f"Speed: {speed:.1f} m/s ({speed*3.6:.1f} km/h)", (180, y), font, scale, white, 1, cv2.LINE_AA)
+    y += dy
+
+    # Line 2: Calibration status (color-coded)
     status_str = str(cal_status).upper()
-    lines = [
-      f"FPS: {fps:.1f}",
-      f"Speed: {speed:.1f} m/s ({speed*3.6:.1f} km/h)",
-      f"Calib: pitch={math.degrees(rpyCalib[1]):.2f} yaw={math.degrees(rpyCalib[2]):.2f} [{status_str}]",
-      f"Calib blocks: {valid_blocks}/{INPUTS_NEEDED}",
-      f"Height: {height:.2f}m",
-    ]
+    status_color = _STATUS_COLORS.get(str(cal_status), white)
+    cv2.putText(img, "Calib: ", (10, y), font, scale, gray, 1, cv2.LINE_AA)
+    cv2.putText(img, status_str, (105, y), font, scale, status_color, 2, cv2.LINE_AA)
+    y += dy
 
-    if model is not None:
-      # Lead info from leadsV3
-      if len(model.leadsV3) > 0:
-        lead = model.leadsV3[0]
-        if lead.prob > 0.3:
-          x_dist = float(lead.x[0])
-          v_rel = float(lead.v[0]) if len(lead.v) > 0 else 0.0
-          lines.append(f"Lead: {x_dist:.1f}m  v_rel={v_rel:+.1f} m/s  prob={lead.prob:.2f}")
+    # Line 3: Progress bar
+    bar_x, bar_w, bar_h = 10, 400, 18
+    # Background
+    cv2.rectangle(img, (bar_x, y - 2), (bar_x + bar_w, y - 2 + bar_h), (60, 60, 60), -1)
+    # Fill
+    fill_w = int(bar_w * min(cal_perc, 100) / 100)
+    if fill_w > 0:
+      cv2.rectangle(img, (bar_x, y - 2), (bar_x + fill_w, y - 2 + bar_h), status_color, -1)
+    # Border
+    cv2.rectangle(img, (bar_x, y - 2), (bar_x + bar_w, y - 2 + bar_h), (120, 120, 120), 1)
+    # Percentage + blocks text
+    perc_text = f"{cal_perc}%  ({valid_blocks}/{INPUTS_NEEDED} blocks)"
+    cv2.putText(img, perc_text, (bar_x + bar_w + 10, y + 12), font, 0.55, white, 1, cv2.LINE_AA)
+    y += bar_h + 12
 
-    for i, line in enumerate(lines):
-      cv2.putText(img, line, (10, y0 + i * dy), font, scale, color, 1, cv2.LINE_AA)
+    # Line 4: Calibration results (pitch, yaw, height)
+    pitch_d = math.degrees(rpyCalib[1])
+    yaw_d = math.degrees(rpyCalib[2])
+    cv2.putText(img, f"pitch={pitch_d:+.2f}\u00b0  yaw={yaw_d:+.2f}\u00b0  height={height:.2f}m",
+                (10, y), font, scale, white, 1, cv2.LINE_AA)
+    y += dy
+
+    # Line 5: Lead info (optional)
+    if model is not None and len(model.leadsV3) > 0:
+      lead = model.leadsV3[0]
+      if lead.prob > 0.3:
+        x_dist = float(lead.x[0])
+        v_rel = float(lead.v[0]) if len(lead.v) > 0 else 0.0
+        cv2.putText(img, f"Lead: {x_dist:.1f}m  v_rel={v_rel:+.1f} m/s  prob={lead.prob:.2f}",
+                    (10, y), font, scale, white, 1, cv2.LINE_AA)
 
   def close(self):
     """Release resources (idempotent)."""
