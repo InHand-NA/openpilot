@@ -387,7 +387,7 @@ class Visualizer:
     # Line 4: Calibration results (pitch, yaw, height)
     pitch_d = math.degrees(rpyCalib[1])
     yaw_d = math.degrees(rpyCalib[2])
-    cv2.putText(img, f"pitch={pitch_d:+.2f}\u00b0  yaw={yaw_d:+.2f}\u00b0  height={height:.2f}m",
+    cv2.putText(img, f"pitch={pitch_d:+.2f}deg  yaw={yaw_d:+.2f}deg  height={height:.2f}m",
                 (10, y), font, scale, white, 1, cv2.LINE_AA)
     y += dy
 
