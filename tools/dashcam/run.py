@@ -134,9 +134,11 @@ def main():
   # 3. Start modeld subprocess (use CUDA on NVIDIA GPU for faster inference)
   # CUDA backend handles FP16 natively; CL has exp2(half) ambiguity on NVIDIA OpenCL
   modeld_env = {**os.environ, 'DEV': 'CUDA', 'PYOPENCL_CTX': ''}
-  print(f"Starting modeld subprocess (DEV={modeld_env['DEV']})...")
+  # wide-road-only: use patched modeld (Solution C — MEDMODEL uses SBIGMODEL warp)
+  modeld_module = 'openpilot.tools.dashcam.modeld' if args.wide_road_only else 'selfdrive.modeld.modeld'
+  print(f"Starting modeld subprocess (DEV={modeld_env['DEV']}, module={modeld_module})...")
   modeld_proc = subprocess.Popen(
-    [sys.executable, '-m', 'selfdrive.modeld.modeld'],
+    [sys.executable, '-m', modeld_module],
     env=modeld_env)
 
   # 4. Optionally start calibrationd subprocess
