@@ -23,7 +23,9 @@ modeld 模块（Python 版本）
 import os
 from openpilot.system.hardware import TICI
 # 根据硬件类型选择推理设备：TICI 上默认使用 QCOM（OpenCL），其它平台使用 CPU
-os.environ['DEV'] = 'QCOM' if TICI else 'CPU'
+# 若调用方已设置 DEV（如 DEV=CUDA），则尊重该设置
+if 'DEV' not in os.environ:
+  os.environ['DEV'] = 'QCOM' if TICI else 'CPU'
 USBGPU = "USBGPU" in os.environ  # 环境变量开关：通过 USB 外接 GPU（AMD）
 if USBGPU:
   # 当使用 USB GPU 时，切换到 AMD 后端，并指定接口为 USB
@@ -59,8 +61,11 @@ PROCESS_NAME = "selfdrive.modeld.modeld"
 # 调试用途：若设置该环境变量，则在消息中额外带上未解析的原始预测向量
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 
-VISION_PKL_PATH = Path(__file__).parent / 'models/driving_vision_tinygrad.pkl'
-POLICY_PKL_PATH = Path(__file__).parent / 'models/driving_policy_tinygrad.pkl'
+# 根据推理设备选择对应的预编译 pkl（CUDA 版在 RTX GPU 上推理速度提升 ~370x）
+_DEV = os.environ.get('DEV', 'CPU')
+_PKL_SUFFIX = {'CUDA': '_cuda', 'CL': '_cl'}.get(_DEV, '')
+VISION_PKL_PATH = Path(__file__).parent / f'models/driving_vision_tinygrad{_PKL_SUFFIX}.pkl'
+POLICY_PKL_PATH = Path(__file__).parent / f'models/driving_policy_tinygrad{_PKL_SUFFIX}.pkl'
 VISION_METADATA_PATH = Path(__file__).parent / 'models/driving_vision_metadata.pkl'
 POLICY_METADATA_PATH = Path(__file__).parent / 'models/driving_policy_metadata.pkl'
 
@@ -238,6 +243,7 @@ class ModelState:
 
     with open(POLICY_PKL_PATH, "rb") as f:
       self.policy_run = pickle.load(f)
+
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
     """按元数据提供的切片将扁平输出拆分为命名的子向量"""

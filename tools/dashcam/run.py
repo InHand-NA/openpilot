@@ -18,6 +18,7 @@ import time
 # Environment variables must be set before importing openpilot modules
 os.environ['NOBOARD'] = '1'
 os.environ['SIMULATION'] = '1'
+os.environ.setdefault('PYOPENCL_CTX', '')  # auto-select OpenCL platform, avoid interactive prompt
 
 import numpy as np
 
@@ -114,11 +115,13 @@ def main():
   print("Creating VisionIPC server...")
   camerad = Camerad(dual_camera=True)
 
-  # 3. Start modeld subprocess
-  print("Starting modeld subprocess...")
+  # 3. Start modeld subprocess (use CUDA on NVIDIA GPU for faster inference)
+  # CUDA backend handles FP16 natively; CL has exp2(half) ambiguity on NVIDIA OpenCL
+  modeld_env = {**os.environ, 'DEV': 'CUDA', 'PYOPENCL_CTX': ''}
+  print(f"Starting modeld subprocess (DEV={modeld_env['DEV']})...")
   modeld_proc = subprocess.Popen(
     [sys.executable, '-m', 'selfdrive.modeld.modeld'],
-    env={**os.environ})
+    env=modeld_env)
 
   # 4. Optionally start calibrationd subprocess
   calibrationd_proc = None
