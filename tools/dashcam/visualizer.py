@@ -17,6 +17,11 @@ from openpilot.tools.dashcam.carla_world import W, H
 UI_W, UI_H = 2160, 1080
 ZOOM = max(UI_W / W, UI_H / H)  # ~1.12, fill width then crop height
 
+# Distance clipping constants (aligned with model_renderer.py)
+CLIP_MARGIN = 500
+MIN_DRAW_DISTANCE = 10.0
+MAX_DRAW_DISTANCE = 100.0
+
 # Calibration constants for info panel display
 INPUTS_NEEDED = 5
 
@@ -40,51 +45,101 @@ def project_points_to_image(xs, ys, zs, intrinsics_3x3, rpyCalib):
   return uv.T  # Nx2
 
 
-def _filter_points(points):
-  """Filter Nx2 pixel points: remove NaN and out-of-bounds."""
-  valid = ~np.isnan(points).any(axis=1)
-  pts = points[valid].astype(np.int32)
-  margin = 200
-  in_bounds = ((pts[:, 0] > -margin) & (pts[:, 0] < W + margin) &
-               (pts[:, 1] > -margin) & (pts[:, 1] < H + margin))
-  return pts[in_bounds]
+def _build_transform(K, rpyCalib):
+  """Build 3x3 projection matrix from intrinsics and calibration RPY."""
+  device_from_calib = rot_from_euler(rpyCalib)
+  return K @ view_frame_from_device_frame @ device_from_calib
 
 
-def draw_path(img, points, color, thickness=2):
-  """Draw a solid polyline on image from Nx2 pixel coordinates."""
-  pts = _filter_points(points)
-  if len(pts) >= 2:
-    cv2.polylines(img, [pts], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+def _get_path_length_idx(pos_x, distance):
+  """Get the index of the last point with x <= distance."""
+  indices = np.where(pos_x <= distance)[0]
+  return indices[-1] if indices.size > 0 else 0
 
 
-def draw_dashed_path(img, points, color, thickness=2, dash_px=20, gap_px=15):
-  """Draw a dashed polyline on image from Nx2 pixel coordinates."""
-  pts = _filter_points(points)
-  if len(pts) < 2:
+def _map_line_to_polygon(points_3d, y_off, z_off, max_idx, max_distance, transform):
+  """Convert 3D line to 2D closed polygon for rendering.
+
+  Aligned with model_renderer.py:_map_line_to_polygon.
+  Returns Mx2 int32 array of polygon vertices (left forward + right reversed).
+  """
+  if points_3d.shape[0] == 0:
+    return np.empty((0, 2), dtype=np.int32)
+
+  points = points_3d[:max_idx + 1]
+
+  # Interpolate around max_idx for smooth path end
+  if 0 < max_idx < points_3d.shape[0] - 1:
+    p0 = points_3d[max_idx]
+    p1 = points_3d[max_idx + 1]
+    interp_y = np.interp(max_distance, [p0[0], p1[0]], [p0[1], p1[1]])
+    interp_z = np.interp(max_distance, [p0[0], p1[0]], [p0[2], p1[2]])
+    interp_point = np.array([max_distance, interp_y, interp_z], dtype=points.dtype)
+    points = np.concatenate((points, interp_point[None, :]), axis=0)
+
+  # Filter non-negative x (points in front of camera)
+  points = points[points[:, 0] >= 0]
+  if points.shape[0] == 0:
+    return np.empty((0, 2), dtype=np.int32)
+
+  N = points.shape[0]
+  # Generate left and right 3D points with ±y_off
+  offsets = np.array([[0, -y_off, z_off], [0, y_off, z_off]], dtype=np.float32)
+  points_lr = points[None, :, :] + offsets[:, None, :]  # 2xNx3
+  points_lr = points_lr.reshape(2 * N, 3)
+
+  # Project to 2D
+  proj = transform @ points_lr.T  # 3x(2*N)
+  proj = proj.reshape(3, 2, N)
+  left_proj = proj[:, 0, :]
+  right_proj = proj[:, 1, :]
+
+  # Filter valid depth
+  valid = (np.abs(left_proj[2]) >= 1e-6) & (np.abs(right_proj[2]) >= 1e-6)
+  if not np.any(valid):
+    return np.empty((0, 2), dtype=np.int32)
+
+  # Compute screen coordinates
+  left_screen = left_proj[:2, valid] / left_proj[2, valid][None, :]
+  right_screen = right_proj[:2, valid] / right_proj[2, valid][None, :]
+
+  # Clip to image bounds with margin
+  x_min, x_max = -CLIP_MARGIN, W + CLIP_MARGIN
+  y_min, y_max = -CLIP_MARGIN, H + CLIP_MARGIN
+
+  both_in = (
+    (left_screen[0] >= x_min) & (left_screen[0] <= x_max) &
+    (left_screen[1] >= y_min) & (left_screen[1] <= y_max) &
+    (right_screen[0] >= x_min) & (right_screen[0] <= x_max) &
+    (right_screen[1] >= y_min) & (right_screen[1] <= y_max)
+  )
+
+  if not np.any(both_in):
+    return np.empty((0, 2), dtype=np.int32)
+
+  left_screen = left_screen[:, both_in]
+  right_screen = right_screen[:, both_in]
+
+  # Build closed polygon: left forward, right reversed
+  return np.vstack((left_screen.T, right_screen[:, ::-1].T)).astype(np.int32)
+
+
+def _draw_polygon_alpha(img, polygon, color_bgr, alpha):
+  """Draw a filled polygon with alpha blending using ROI optimization."""
+  x, y, w, h = cv2.boundingRect(polygon)
+  # Clip ROI to image bounds
+  x0 = max(x, 0)
+  y0 = max(y, 0)
+  x1 = min(x + w, img.shape[1])
+  y1 = min(y + h, img.shape[0])
+  if x1 <= x0 or y1 <= y0:
     return
-  # Walk along the polyline, alternating dash/gap
-  drawing = True
-  remaining = dash_px
-  for i in range(1, len(pts)):
-    dx = float(pts[i, 0] - pts[i - 1, 0])
-    dy = float(pts[i, 1] - pts[i - 1, 1])
-    seg_len = math.hypot(dx, dy)
-    if seg_len < 1:
-      continue
-    consumed = 0.0
-    while consumed < seg_len:
-      step = min(remaining, seg_len - consumed)
-      t0 = consumed / seg_len
-      t1 = (consumed + step) / seg_len
-      p0 = (int(pts[i - 1, 0] + dx * t0), int(pts[i - 1, 1] + dy * t0))
-      p1 = (int(pts[i - 1, 0] + dx * t1), int(pts[i - 1, 1] + dy * t1))
-      if drawing:
-        cv2.line(img, p0, p1, color, thickness, cv2.LINE_AA)
-      consumed += step
-      remaining -= step
-      if remaining <= 0:
-        drawing = not drawing
-        remaining = gap_px if not drawing else dash_px
+
+  roi = img[y0:y1, x0:x1]
+  overlay = roi.copy()
+  shifted = polygon - np.array([x0, y0])
+  cv2.fillPoly(overlay, [shifted], color_bgr)
+  img[y0:y1, x0:x1] = cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0)
 
 
 class Visualizer:
@@ -148,59 +203,58 @@ class Visualizer:
     return True
 
   def _draw_lane_lines(self, img, model, K, rpyCalib):
-    """Draw 4 lane lines with continuous probability rendering.
+    """Draw 4 lane lines as filled polygons with alpha blending.
 
-    Matches openpilot UI: alpha = clip(prob, 0, 0.7), green color,
-    thickness scales with probability. No hard threshold cutoff.
-    Inner lanes (1,2) drawn solid, outer lanes (0,3) drawn dashed.
+    Aligned with model_renderer.py: polygon fill, alpha = clip(prob, 0, 0.7),
+    width = 0.025 * prob (meters in 3D), green color.
     """
-    lane_probs = list(model.laneLineProbs)  # 4 probability values
+    transform = _build_transform(K, rpyCalib)
+    path_xs = np.array(model.laneLines[0].x) if len(model.laneLines) > 0 else np.array([])
+    max_distance = np.clip(path_xs[-1] if len(path_xs) > 0 else 0, MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE)
+    max_idx = _get_path_length_idx(path_xs, max_distance)
 
+    lane_probs = list(model.laneLineProbs)
     for i, ll in enumerate(model.laneLines):
       prob = lane_probs[i]
-      if prob < 0.01:  # skip nearly invisible lines
+      if prob < 0.01:
         continue
 
-      xs = np.array(ll.x)
-      ys = np.array(ll.y)
-      zs = np.array(ll.z)
-      pixels = project_points_to_image(xs, ys, zs, K, rpyCalib)
+      points_3d = np.array([ll.x, ll.y, ll.z], dtype=np.float32).T  # Nx3
+      y_off = 0.025 * prob  # 3D width in meters
+      polygon = _map_line_to_polygon(points_3d, y_off, 0.0, max_idx, max_distance, transform)
+      if len(polygon) < 3:
+        continue
 
-      # Continuous rendering: alpha and thickness vary with probability
-      # openpilot UI: alpha = clip(prob, 0, 0.7), width = 0.025 * prob
-      alpha = np.clip(prob, 0.0, 0.7) / 0.7  # normalize to 0~1
-      green_val = int(220 * alpha)
-      color = (0, green_val, 0)  # BGR green, brightness varies with prob
-      thickness = max(1, int(4 * prob))
-
-      if i == 1 or i == 2:  # inner lanes (current lane boundaries) - solid
-        draw_path(img, pixels, color, thickness)
-      else:  # outer lanes (0, 3) - dashed
-        draw_dashed_path(img, pixels, color, thickness)
+      alpha = float(np.clip(prob, 0.0, 0.7))
+      color_bgr = (64, 255, 0)  # BGR for green (aligned with rl.Color(0, 255, 64))
+      _draw_polygon_alpha(img, polygon, color_bgr, alpha)
 
   def _draw_road_edges(self, img, model, K, rpyCalib):
-    """Draw 2 road edges with continuous probability rendering.
+    """Draw 2 road edges as filled polygons with alpha blending.
 
-    Matches openpilot UI: alpha = clip(1 - std, 0, 1), red color.
-    Lower std = more certain = more visible.
+    Aligned with model_renderer.py: polygon fill, alpha = clip(1 - std, 0, 1),
+    fixed width = 0.025m, red color.
     """
-    road_stds = list(model.roadEdgeStds)  # 2 std values
+    transform = _build_transform(K, rpyCalib)
+    path_xs = np.array(model.laneLines[0].x) if len(model.laneLines) > 0 else np.array([])
+    max_distance = np.clip(path_xs[-1] if len(path_xs) > 0 else 0, MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE)
+    max_idx = _get_path_length_idx(path_xs, max_distance)
 
+    road_stds = list(model.roadEdgeStds)
     for i, re in enumerate(model.roadEdges):
       std = road_stds[i]
-      alpha = np.clip(1.0 - std, 0.0, 1.0)  # std closer to 0 = more certain
+      alpha = float(np.clip(1.0 - std, 0.0, 1.0))
       if alpha < 0.01:
         continue
 
-      xs = np.array(re.x)
-      ys = np.array(re.y)
-      zs = np.array(re.z)
-      pixels = project_points_to_image(xs, ys, zs, K, rpyCalib)
+      points_3d = np.array([re.x, re.y, re.z], dtype=np.float32).T  # Nx3
+      y_off = 0.025  # fixed width in meters
+      polygon = _map_line_to_polygon(points_3d, y_off, 0.0, max_idx, max_distance, transform)
+      if len(polygon) < 3:
+        continue
 
-      red_val = int(220 * alpha)
-      color = (0, 0, red_val)  # BGR red
-      thickness = max(1, int(3 * alpha))
-      draw_path(img, pixels, color, thickness)
+      color_bgr = (0, 0, 255)  # BGR for red (aligned with rl.Color(255, 0, 0))
+      _draw_polygon_alpha(img, polygon, color_bgr, alpha)
 
   def _draw_lead(self, img, model, K, rpyCalib, height):
     """Draw lead vehicle detection from modelV2.leadsV3."""
