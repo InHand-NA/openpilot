@@ -26,7 +26,7 @@ class DashcamCarlaWorld:
 
     settings = world.get_settings()
     settings.synchronous_mode = True
-    settings.fixed_delta_seconds = 0.01
+    settings.fixed_delta_seconds = 0.025
     settings.actor_active_distance = 150.0
     world.apply_settings(settings)
     world.set_weather(carla.WeatherParameters.ClearSunset)
@@ -158,15 +158,17 @@ class DashcamCarlaWorld:
     return np.sqrt(v.x**2 + v.y**2 + v.z**2)
 
   def tick(self):
-    """Advance simulation by one step (0.01s)."""
+    """Advance simulation by one step."""
     self.world.tick()
     self.tick_count += 1
-    if self.tick_count % 200 == 0:
+    delta = self.world.get_settings().fixed_delta_seconds
+    batch = max(1, int(2.0 / delta))  # ~2s of sim time per log
+    if self.tick_count % batch == 0:
       now = time.monotonic()
       elapsed = now - self.tick_batch_start
-      sim_time = 200 * 0.01
+      sim_time = batch * delta
       ratio = sim_time / elapsed if elapsed > 0 else float('inf')
-      print(f"[CARLA PERF] 200 ticks in {elapsed:.2f}s | sim: {sim_time:.1f}s | ratio: {ratio:.2f}x realtime")
+      print(f"[CARLA PERF] {batch} ticks in {elapsed:.2f}s | sim: {sim_time:.1f}s | ratio: {ratio:.2f}x realtime")
       self.tick_batch_start = now
 
   def close(self):

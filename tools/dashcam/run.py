@@ -28,7 +28,7 @@ from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.system.hardware import HARDWARE
 from openpilot.tools.sim.lib.camerad import Camerad
 
-TICKS_PER_FRAME = 5  # match openpilot sim bridge
+TICKS_PER_FRAME = 2  # 2 ticks × 0.025s = 0.05s per frame = 20 FPS
 
 
 def publish_device_state(pm):
