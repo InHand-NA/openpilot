@@ -176,7 +176,8 @@ def main():
   visualizer = Visualizer(
     save_video_path=args.save_video,
     no_display=args.no_display,
-    source_fps=20.0)
+    source_fps=20.0,
+    actual_height=camera_height)
 
   # Signal handler
   running = True

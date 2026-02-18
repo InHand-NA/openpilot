@@ -13,6 +13,18 @@ from openpilot.common.transformations.orientation import rot_from_euler
 
 from openpilot.tools.dashcam.carla_world import W, H
 
+# Height compensation constants
+_HEIGHT_Z_IDX_START = 5   # ~4.7m forward, skip noisy near-range
+_HEIGHT_Z_IDX_END = 21    # ~82.7m forward, avoid far-range road slope
+_HEIGHT_MIN_PROB = 0.3    # minimum lane line probability for height estimation
+_HEIGHT_MIN_Z = 0.5       # minimum reasonable camera height (meters)
+
+# Bird's eye view (BEV) panel constants
+_BEV_W, _BEV_H = 300, 450   # panel pixel size
+_BEV_X_MAX = 80.0            # forward range (meters)
+_BEV_Y_HALF = 10.0           # lateral half-range (meters), ±10m
+_BEV_MARGIN = 15             # pixels from edge of display
+
 # Match openpilot UI: 2160x1080, camera zoomed to fill then center-cropped
 UI_W, UI_H = 2160, 1080
 ZOOM = max(UI_W / W, UI_H / H)  # ~1.12, fill width then crop height
@@ -150,10 +162,76 @@ def _draw_polygon_alpha(img, polygon, color_bgr, alpha):
   img[y0:y1, x0:x1] = cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0)
 
 
+def compensate_lane_lines_for_height(lane_lines_xyz, lane_line_probs, actual_height):
+  """Compensate lane line 3D coordinates for camera height difference.
+
+  When the actual camera mounting height differs from what the model perceives,
+  the model's 3D lane line coordinates have systematic bias. This function corrects
+  them using projection geometry (see docs/model_output_semantics.md section 1.3).
+
+  Projection: v = fx * z / x + cy. A 3D point (x, y, z) maps to a fixed image pixel.
+  To correct the 3D coordinates while preserving this pixel mapping:
+
+      delta_height = actual_height - model_height
+      scale_i = (z_i + delta_height) / z_i    (per-point, varies with road undulation)
+      x_corrected_i = x_i * scale_i
+      y_corrected_i = y_i * scale_i
+      z_corrected_i = z_i + delta_height
+
+  Assumes road surface undulation (variation in z across points) is accurate;
+  only a constant height offset needs correction.
+
+  Args:
+    lane_lines_xyz: list of Nx3 float32 arrays [(x, y, z) per point], one per lane line.
+    lane_line_probs: list of floats, existence probability per lane line.
+    actual_height: actual camera mounting height in meters (ground truth from CLI).
+
+  Returns:
+    tuple: (compensated_lines, model_height, delta_height)
+      compensated_lines: list of Nx3 float32 arrays with corrected coordinates.
+      model_height: estimated model perceived camera height (meters).
+      delta_height: correction applied (meters), = actual_height - model_height.
+  """
+  # 1. Estimate model's perceived camera height from lane line z values.
+  #    Use z at moderate forward distances (indices 5-20, ~5m to ~83m) from
+  #    high-probability lines to avoid near-range noise and far-range slope effects.
+  z_samples = []
+  for pts, prob in zip(lane_lines_xyz, lane_line_probs, strict=True):
+    if prob > _HEIGHT_MIN_PROB and pts.shape[0] > _HEIGHT_Z_IDX_END:
+      z_samples.append(pts[_HEIGHT_Z_IDX_START:_HEIGHT_Z_IDX_END, 2])
+
+  if len(z_samples) == 0:
+    return lane_lines_xyz, actual_height, 0.0
+
+  model_height = float(np.median(np.concatenate(z_samples)))
+  if model_height < _HEIGHT_MIN_Z:
+    return lane_lines_xyz, model_height, 0.0
+
+  # 2. Per-point compensation
+  delta_height = actual_height - model_height
+  compensated = []
+  for pts in lane_lines_xyz:
+    z = pts[:, 2]
+    safe_z = np.maximum(z, _HEIGHT_MIN_Z)
+    scale = (safe_z + delta_height) / safe_z
+    compensated.append(np.stack([pts[:, 0] * scale,
+                                 pts[:, 1] * scale,
+                                 z + delta_height], axis=1).astype(np.float32))
+
+  return compensated, model_height, delta_height
+
+
 class Visualizer:
   """Draw perception results on camera images, optionally save video."""
 
-  def __init__(self, save_video_path='', no_display=False, source_fps=20.0):
+  def __init__(self, save_video_path='', no_display=False, source_fps=20.0, actual_height=0.0):
+    self.actual_height = actual_height
+    self._model_height = 0.0
+    self._delta_height = 0.0
+    # Stored for BEV rendering (set each frame by _draw_lane_lines)
+    self._lane_lines_xyz = []
+    self._lane_probs = []
+    self._comp_lines = []
     self.no_display = no_display
     self.writer = None
     if save_video_path:
@@ -198,6 +276,8 @@ class Visualizer:
     display = zoomed[y0:y0 + UI_H, x0:x0 + UI_W]
 
     # Draw HUD on final display (after crop, so it's always visible)
+    if self.actual_height > 0:
+      self._draw_bev_panel(display)
     self._draw_info_panel(display, model_msg, vehicle_speed, rpyCalib,
                           cal_status, valid_blocks, cal_perc, camera_height, fps)
 
@@ -213,31 +293,45 @@ class Visualizer:
     return True
 
   def _draw_lane_lines(self, img, model, K, rpyCalib):
-    """Draw 4 lane lines as filled polygons with alpha blending.
+    """Draw 4 lane lines as filled polygons with alpha blending (green).
 
-    Aligned with model_renderer.py: polygon fill, alpha = clip(prob, 0, 0.7),
-    width = 0.025 * prob (meters in 3D), green color.
+    Also computes height compensation and stores results for BEV rendering.
+    Note: compensated lines project to identical 2D pixels (projection invariant),
+    so they are only visualized in the BEV panel, not overlaid here.
     """
     transform = _build_transform(K, rpyCalib)
-    path_xs = np.array(model.laneLines[0].x) if len(model.laneLines) > 0 else np.array([])
+    lane_probs = list(model.laneLineProbs)
+
+    # Extract lane line data as numpy arrays
+    lane_lines_xyz = []
+    for ll in model.laneLines:
+      lane_lines_xyz.append(np.array([ll.x, ll.y, ll.z], dtype=np.float32).T)
+
+    # Draw original lane lines (green) in perspective view
+    path_xs = lane_lines_xyz[0][:, 0] if len(lane_lines_xyz) > 0 else np.array([])
     max_distance = np.clip(path_xs[-1] if len(path_xs) > 0 else 0, MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE)
     max_idx = _get_path_length_idx(path_xs, max_distance)
 
-    lane_probs = list(model.laneLineProbs)
-    for i, ll in enumerate(model.laneLines):
+    for i, pts in enumerate(lane_lines_xyz):
       prob = lane_probs[i]
       if prob < 0.01:
         continue
-
-      points_3d = np.array([ll.x, ll.y, ll.z], dtype=np.float32).T  # Nx3
-      y_off = 0.025 * prob  # 3D width in meters
-      polygon = _map_line_to_polygon(points_3d, y_off, 0.0, max_idx, max_distance, transform)
+      y_off = 0.025 * prob
+      polygon = _map_line_to_polygon(pts, y_off, 0.0, max_idx, max_distance, transform)
       if len(polygon) < 3:
         continue
-
       alpha = float(np.clip(prob, 0.0, 0.7))
-      color_bgr = (64, 255, 0)  # BGR for green (aligned with rl.Color(0, 255, 64))
-      _draw_polygon_alpha(img, polygon, color_bgr, alpha)
+      _draw_polygon_alpha(img, polygon, (64, 255, 0), alpha)  # green
+
+    # Compute height compensation (store for BEV and info panel)
+    self._lane_lines_xyz = lane_lines_xyz
+    self._lane_probs = lane_probs
+    self._comp_lines = []
+    if self.actual_height > 0:
+      comp_lines, self._model_height, self._delta_height = compensate_lane_lines_for_height(
+        lane_lines_xyz, lane_probs, self.actual_height)
+      if abs(self._delta_height) > 0.05:
+        self._comp_lines = comp_lines
 
   def _draw_road_edges(self, img, model, K, rpyCalib):
     """Draw 2 road edges as filled polygons with alpha blending.
@@ -341,10 +435,94 @@ class Visualizer:
     cv2.putText(img, label, (label_x, label_y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (37, 202, 218), 2, cv2.LINE_AA)
 
+  def _draw_bev_panel(self, img):
+    """Draw bird's eye view panel showing lane lines from above.
+
+    When height compensation is active, shows both original (green) and
+    compensated (cyan) lane lines. This is the correct way to visualize
+    compensation effects — perspective projection is invariant to the
+    compensation transform, so the difference is only visible in BEV.
+    """
+    if len(self._lane_lines_xyz) == 0:
+      return
+
+    bev_w, bev_h = _BEV_W, _BEV_H
+    # Position: bottom-right corner of display
+    x0 = img.shape[1] - bev_w - _BEV_MARGIN
+    y0 = img.shape[0] - bev_h - _BEV_MARGIN
+
+    # Semi-transparent black background
+    roi = img[y0:y0 + bev_h, x0:x0 + bev_w]
+    overlay = roi.copy()
+    cv2.rectangle(overlay, (0, 0), (bev_w, bev_h), (0, 0, 0), -1)
+    img[y0:y0 + bev_h, x0:x0 + bev_w] = cv2.addWeighted(overlay, 0.7, roi, 0.3, 0)
+
+    # Coordinate mapping: 3D (x=fwd, y=right) -> BEV pixel
+    scale_x = bev_h / _BEV_X_MAX          # px per meter forward
+    scale_y = bev_w / (2 * _BEV_Y_HALF)   # px per meter lateral
+    cx_bev = bev_w // 2                    # lateral center
+
+    def to_bev(x_fwd, y_lat):
+      """Map 3D forward/lateral to BEV pixel coords (relative to panel)."""
+      px = cx_bev + y_lat * scale_y
+      py = bev_h - x_fwd * scale_x  # forward = up
+      return int(np.clip(px, 0, bev_w - 1)), int(np.clip(py, 0, bev_h - 1))
+
+    # Draw grid lines
+    grid_color = (60, 60, 60)
+    for dist in [20, 40, 60]:
+      _, gy = to_bev(dist, 0)
+      cv2.line(img, (x0, y0 + gy), (x0 + bev_w, y0 + gy), grid_color, 1)
+      cv2.putText(img, f"{dist}m", (x0 + 3, y0 + gy - 3),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1, cv2.LINE_AA)
+    # Center line (ego forward)
+    cv2.line(img, (x0 + cx_bev, y0), (x0 + cx_bev, y0 + bev_h), grid_color, 1)
+
+    # Draw ego vehicle marker
+    ego_bx, ego_by = to_bev(0, 0)
+    cv2.circle(img, (x0 + ego_bx, y0 + ego_by - 3), 5, (255, 255, 255), -1)
+
+    # Helper: draw lane line polyline on BEV
+    def draw_bev_line(pts_3d, prob, color, thickness):
+      if prob < 0.01:
+        return
+      xs, ys = pts_3d[:, 0], pts_3d[:, 1]
+      # Filter to valid forward range
+      mask = (xs > 0) & (xs < _BEV_X_MAX) & (np.abs(ys) < _BEV_Y_HALF)
+      if np.sum(mask) < 2:
+        return
+      bev_pts = []
+      for xi, yi in zip(xs[mask], ys[mask], strict=True):
+        bx, by = to_bev(xi, yi)
+        bev_pts.append([x0 + bx, y0 + by])
+      bev_pts = np.array(bev_pts, dtype=np.int32)
+      cv2.polylines(img, [bev_pts], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+    # Draw original lane lines (green)
+    for i, pts in enumerate(self._lane_lines_xyz):
+      draw_bev_line(pts, self._lane_probs[i], (64, 255, 0), 2)
+
+    # Draw compensated lane lines (cyan), if active
+    if len(self._comp_lines) > 0:
+      for i, pts in enumerate(self._comp_lines):
+        draw_bev_line(pts, self._lane_probs[i], (255, 255, 0), 2)
+
+    # Title and legend
+    cv2.putText(img, "BEV (top-down)", (x0 + 5, y0 + 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+    if len(self._comp_lines) > 0:
+      legend_y = y0 + 32
+      cv2.putText(img, "--- original", (x0 + 5, legend_y),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.35, (64, 255, 0), 1, cv2.LINE_AA)
+      cv2.putText(img, "--- compensated", (x0 + 120, legend_y),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1, cv2.LINE_AA)
+      cv2.putText(img, f"dh={self._delta_height:+.2f}m", (x0 + 5, legend_y + 16),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1, cv2.LINE_AA)
+
   def _draw_info_panel(self, img, model, speed, rpyCalib, cal_status, valid_blocks, cal_perc, height, fps):
     """Draw semi-transparent info panel with calibration progress bar."""
     # Background
-    panel_h = 230
+    panel_h = 260 if abs(self._delta_height) > 0.05 else 230
     panel_w = 550
     overlay = img[0:panel_h, 0:panel_w].copy()
     cv2.rectangle(overlay, (0, 0), (panel_w, panel_h), (0, 0, 0), -1)
@@ -390,6 +568,13 @@ class Visualizer:
     cv2.putText(img, f"pitch={pitch_d:+.2f}deg  yaw={yaw_d:+.2f}deg  height={height:.2f}m",
                 (10, y), font, scale, white, 1, cv2.LINE_AA)
     y += dy
+
+    # Line 4b: Height compensation (when active)
+    if abs(self._delta_height) > 0.05:
+      cv2.putText(img, f"HeightComp: model={self._model_height:.2f}m actual={self.actual_height:.2f}m "
+                        + f"dh={self._delta_height:+.2f}m",
+                  (10, y), font, scale, (255, 255, 0), 1, cv2.LINE_AA)  # cyan
+      y += dy
 
     # Line 5: Lead info (optional)
     if model is not None and len(model.leadsV3) > 0:
