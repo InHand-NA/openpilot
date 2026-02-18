@@ -162,24 +162,12 @@ def _draw_polygon_alpha(img, polygon, color_bgr, alpha):
   img[y0:y1, x0:x1] = cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0)
 
 
-def compensate_lane_lines_for_height(lane_lines_xyz, lane_line_probs, actual_height):
-  """Compensate lane line 3D coordinates for camera height difference.
+def compensate_lane_lines_for_height(lane_lines_xyz, lane_line_probs, actual_height, left_scale=0.25, right_scale=0.1):
+  """Compensate lane line z coordinates for camera height difference.
 
-  When the actual camera mounting height differs from what the model perceives,
-  the model's 3D lane line coordinates have systematic bias. This function corrects
-  them using projection geometry (see docs/model_output_semantics.md section 1.3).
-
-  Projection: v = fx * z / x + cy. A 3D point (x, y, z) maps to a fixed image pixel.
-  To correct the 3D coordinates while preserving this pixel mapping:
-
-      delta_height = actual_height - model_height
-      scale_i = (z_i + delta_height) / z_i    (per-point, varies with road undulation)
-      x_corrected_i = x_i * scale_i
-      y_corrected_i = y_i * scale_i
-      z_corrected_i = z_i + delta_height
-
-  Assumes road surface undulation (variation in z across points) is accurate;
-  only a constant height offset needs correction.
+  Only z is corrected (z' = z + delta_height); x and y are unchanged.
+  This breaks projection invariance: v' = fy*(z+dh)/x ≠ fy*z/x,
+  so compensated lines appear at different vertical positions in the 2D image.
 
   Args:
     lane_lines_xyz: list of Nx3 float32 arrays [(x, y, z) per point], one per lane line.
@@ -188,13 +176,11 @@ def compensate_lane_lines_for_height(lane_lines_xyz, lane_line_probs, actual_hei
 
   Returns:
     tuple: (compensated_lines, model_height, delta_height)
-      compensated_lines: list of Nx3 float32 arrays with corrected coordinates.
+      compensated_lines: list of Nx3 float32 arrays with corrected z.
       model_height: estimated model perceived camera height (meters).
       delta_height: correction applied (meters), = actual_height - model_height.
   """
-  # 1. Estimate model's perceived camera height from lane line z values.
-  #    Use z at moderate forward distances (indices 5-20, ~5m to ~83m) from
-  #    high-probability lines to avoid near-range noise and far-range slope effects.
+  # Estimate model's perceived camera height from lane line z values.
   z_samples = []
   for pts, prob in zip(lane_lines_xyz, lane_line_probs, strict=True):
     if prob > _HEIGHT_MIN_PROB and pts.shape[0] > _HEIGHT_Z_IDX_END:
@@ -207,16 +193,19 @@ def compensate_lane_lines_for_height(lane_lines_xyz, lane_line_probs, actual_hei
   if model_height < _HEIGHT_MIN_Z:
     return lane_lines_xyz, model_height, 0.0
 
-  # 2. Per-point compensation
   delta_height = actual_height - model_height
   compensated = []
-  for pts in lane_lines_xyz:
-    z = pts[:, 2]
-    safe_z = np.maximum(z, _HEIGHT_MIN_Z)
-    scale = (safe_z + delta_height) / safe_z
-    compensated.append(np.stack([pts[:, 0] * scale,
-                                 pts[:, 1] * scale,
-                                 z + delta_height], axis=1).astype(np.float32))
+  for i, pts in enumerate(lane_lines_xyz):
+    new_pts = pts.copy()
+    if i < 2:  # left lanes (0=far-left, 1=near-left)
+      dh = delta_height * left_scale
+    else:       # right lanes (2=near-right, 3=far-right)
+      dh = delta_height * right_scale
+    new_pts[:, 2] = pts[:, 2] + dh
+    #safe_z = np.maximum(pts[:, 2], _HEIGHT_MIN_Z)
+    #scale = (safe_z + dh) / safe_z
+    #new_pts[:, 1] = pts[:, 1] * scale
+    compensated.append(new_pts)
 
   return compensated, model_height, delta_height
 
@@ -293,11 +282,11 @@ class Visualizer:
     return True
 
   def _draw_lane_lines(self, img, model, K, rpyCalib):
-    """Draw 4 lane lines as filled polygons with alpha blending (green).
+    """Draw 4 lane lines as filled polygons with alpha blending.
 
-    Also computes height compensation and stores results for BEV rendering.
-    Note: compensated lines project to identical 2D pixels (projection invariant),
-    so they are only visualized in the BEV panel, not overlaid here.
+    Original lines in green; when height compensation is active (z-only),
+    compensated lines in cyan are drawn on top. Since only z changes,
+    the 2D vertical position shifts while horizontal stays the same.
     """
     transform = _build_transform(K, rpyCalib)
     lane_probs = list(model.laneLineProbs)
@@ -307,11 +296,12 @@ class Visualizer:
     for ll in model.laneLines:
       lane_lines_xyz.append(np.array([ll.x, ll.y, ll.z], dtype=np.float32).T)
 
-    # Draw original lane lines (green) in perspective view
+    # Draw parameters (shared by original and compensated)
     path_xs = lane_lines_xyz[0][:, 0] if len(lane_lines_xyz) > 0 else np.array([])
     max_distance = np.clip(path_xs[-1] if len(path_xs) > 0 else 0, MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE)
     max_idx = _get_path_length_idx(path_xs, max_distance)
 
+    # Draw original lane lines (green)
     for i, pts in enumerate(lane_lines_xyz):
       prob = lane_probs[i]
       if prob < 0.01:
@@ -323,7 +313,8 @@ class Visualizer:
       alpha = float(np.clip(prob, 0.0, 0.7))
       _draw_polygon_alpha(img, polygon, (64, 255, 0), alpha)  # green
 
-    # Compute height compensation (store for BEV and info panel)
+    # Compute height compensation and draw compensated lines (cyan) on perspective view
+    # Lane line order: 0=far-left, 1=near-left, 2=near-right, 3=far-right
     self._lane_lines_xyz = lane_lines_xyz
     self._lane_probs = lane_probs
     self._comp_lines = []
@@ -332,6 +323,16 @@ class Visualizer:
         lane_lines_xyz, lane_probs, self.actual_height)
       if abs(self._delta_height) > 0.05:
         self._comp_lines = comp_lines
+        for i, pts in enumerate(comp_lines):
+          prob = lane_probs[i]
+          if prob < 0.01:
+            continue
+          y_off = 0.025 * prob
+          polygon = _map_line_to_polygon(pts, y_off, 0.0, max_idx, max_distance, transform)
+          if len(polygon) < 3:
+            continue
+          alpha = float(np.clip(prob, 0.0, 0.7))
+          _draw_polygon_alpha(img, polygon, (255, 255, 0), alpha)  # cyan
 
   def _draw_road_edges(self, img, model, K, rpyCalib):
     """Draw 2 road edges as filled polygons with alpha blending.
