@@ -84,6 +84,10 @@ def main():
                       help='Single wide camera mode (modeld uses ecam intrinsics for both inputs)')
   parser.add_argument('--road-only', action='store_true',
                       help='Single narrow camera mode (modeld uses fcam intrinsics for main input)')
+  parser.add_argument('--eval-lanes', action='store_true',
+                      help='Enable lane line ground truth evaluation')
+  parser.add_argument('--eval-interval', type=int, default=1,
+                      help='GT evaluation interval in frames (default: every frame)')
   args = parser.parse_args()
 
   if args.wide_road_only and args.road_only:
@@ -164,6 +168,16 @@ def main():
     camera_height=camera_height,
     high_quality=args.high_quality, num_npc=args.num_npc,
     wide_road_only=args.wide_road_only, road_only=args.road_only)
+
+  # Lane GT evaluation
+  gt_extractor = None
+  evaluator = None
+  if args.eval_lanes:
+    from openpilot.tools.dashcam.lane_evaluator import LaneEvaluator
+    from openpilot.tools.dashcam.lane_ground_truth import LaneGroundTruth
+    gt_extractor = LaneGroundTruth(world.get_map(), camera_offset_x=0.8, camera_height=camera_height)
+    evaluator = LaneEvaluator()
+    print(f"Lane GT evaluation enabled (interval={args.eval_interval})")
 
   # Camera intrinsics (for visualization)
   # wide-road-only: modeld uses ecam.intrinsics for both transforms, so visualization must match
@@ -252,6 +266,21 @@ def main():
       # Non-blocking receive modelV2 and liveCalibration
       sm.update(0)
 
+      # Lane GT evaluation
+      gt_lines = None
+      gt_probs = None
+      eval_metrics = None
+      eval_frame_count = tick_count // TICKS_PER_FRAME
+      if gt_extractor is not None and eval_frame_count % args.eval_interval == 0:
+        gt_lines, gt_probs = gt_extractor.get_lane_lines(world.get_vehicle_transform())
+        # gt_lines is None when junction detected ahead — skip eval and GT drawing
+        if gt_lines is not None:
+          model_msg_for_eval = sm['modelV2'] if sm.seen['modelV2'] else None
+          if model_msg_for_eval is not None and evaluator is not None:
+            model_lane_lines = [np.array([ll.x, ll.y, ll.z], dtype=np.float32).T for ll in model_msg_for_eval.laneLines]
+            model_probs = list(model_msg_for_eval.laneLineProbs)
+            eval_metrics = evaluator.evaluate(model_lane_lines, model_probs, gt_lines, gt_probs)
+
       # FPS tracking
       frame_count += 1
       now = time.monotonic()
@@ -281,7 +310,8 @@ def main():
         display_rgb, model_msg, vis_intrinsics,
         cur_rpyCalib, cur_height,
         world.get_vehicle_speed(), cur_cal_status,
-        cur_valid_blocks, cur_cal_perc, fps)
+        cur_valid_blocks, cur_cal_perc, fps,
+        gt_lines=gt_lines, gt_probs=gt_probs, eval_metrics=eval_metrics)
 
       if not ok:
         break
@@ -312,6 +342,12 @@ def main():
     print(f"Error: {e}")
     raise
   finally:
+    if evaluator is not None and evaluator.history:
+      summary = evaluator.get_summary()
+      print("\n=== Lane Evaluation Summary ===")
+      for k, v in sorted(summary.items()):
+        print(f"  {k}: {v:.4f}")
+      print(f"  total_frames: {len(evaluator.history)}")
     visualizer.close()
     # Terminate subprocesses first (before destroying Carla actors)
     for proc in [calibrationd_proc, modeld_proc]:

@@ -31,7 +31,7 @@ ZOOM = max(UI_W / W, UI_H / H)  # ~1.12, fill width then crop height
 
 # Distance clipping constants (aligned with model_renderer.py)
 CLIP_MARGIN = 500
-MIN_DRAW_DISTANCE = 10.0
+MIN_DRAW_DISTANCE = 5.0
 MAX_DRAW_DISTANCE = 100.0
 
 # Calibration constants for info panel display
@@ -221,6 +221,10 @@ class Visualizer:
     self._lane_lines_xyz = []
     self._lane_probs = []
     self._comp_lines = []
+    # GT and evaluation state
+    self._gt_lines = None
+    self._gt_probs = None
+    self._eval_metrics = None
     self.no_display = no_display
     self.writer = None
     if save_video_path:
@@ -233,7 +237,8 @@ class Visualizer:
       cv2.resizeWindow('dashcam', UI_W, UI_H)
 
   def draw(self, frame_rgb, model_msg, fcam_intrinsics_3x3, rpyCalib,
-           camera_height, vehicle_speed, cal_status, valid_blocks, cal_perc, fps):
+           camera_height, vehicle_speed, cal_status, valid_blocks, cal_perc, fps,
+           gt_lines=None, gt_probs=None, eval_metrics=None):
     """Draw all perception results on frame and display/record.
 
     Args:
@@ -247,6 +252,9 @@ class Visualizer:
       valid_blocks: number of valid calibration blocks.
       cal_perc: calibration percentage (0-100).
       fps: current FPS.
+      gt_lines: list of 4 arrays (33x3), GT lane lines in calibrated frame, or None.
+      gt_probs: list of 4 floats, GT lane existence probabilities, or None.
+      eval_metrics: dict of evaluation metrics for this frame, or None.
 
     Returns True if should continue, False if user pressed 'q'.
     """
@@ -256,6 +264,20 @@ class Visualizer:
       self._draw_lane_lines(img, model_msg, fcam_intrinsics_3x3, rpyCalib)
       self._draw_road_edges(img, model_msg, fcam_intrinsics_3x3, rpyCalib)
       self._draw_lead(img, model_msg, fcam_intrinsics_3x3, rpyCalib, camera_height)
+
+    # Reset GT state each frame (caller provides None when near junction or non-eval frame)
+    self._gt_lines = gt_lines
+    self._gt_probs = gt_probs
+    self._eval_metrics = eval_metrics
+
+    if gt_lines is not None and gt_probs is not None:
+      self._draw_gt_lane_lines(img, gt_lines, gt_probs, fcam_intrinsics_3x3, rpyCalib)
+
+    # Blue crosshair at image center
+    cx, cy = W // 2, H // 2
+    cross_size = 20
+    cv2.line(img, (cx - cross_size, cy), (cx + cross_size, cy), (255, 0, 0), 1, cv2.LINE_AA)
+    cv2.line(img, (cx, cy - cross_size), (cx, cy + cross_size), (255, 0, 0), 1, cv2.LINE_AA)
 
     # Zoom 1.1x then center-crop to UI size (matching openpilot UI)
     zoomed_w, zoomed_h = int(W * ZOOM), int(H * ZOOM)
@@ -269,6 +291,8 @@ class Visualizer:
       self._draw_bev_panel(display)
     self._draw_info_panel(display, model_msg, vehicle_speed, rpyCalib,
                           cal_status, valid_blocks, cal_perc, camera_height, fps)
+    if self._eval_metrics is not None:
+      self._draw_eval_panel(display)
 
     if self.writer is not None:
       self.writer.write(display)
@@ -508,17 +532,128 @@ class Visualizer:
       for i, pts in enumerate(self._comp_lines):
         draw_bev_line(pts, self._lane_probs[i], (255, 255, 0), 2)
 
+    # Draw GT lane lines (magenta) on BEV
+    if self._gt_lines is not None and self._gt_probs is not None:
+      for i, pts in enumerate(self._gt_lines):
+        draw_bev_line(pts, self._gt_probs[i], (255, 0, 255), 2)
+
     # Title and legend
     cv2.putText(img, "BEV (top-down)", (x0 + 5, y0 + 15),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
-    if len(self._comp_lines) > 0:
-      legend_y = y0 + 32
-      cv2.putText(img, "--- original", (x0 + 5, legend_y),
+    legend_y = y0 + 32
+    has_comp = len(self._comp_lines) > 0
+    has_gt = self._gt_lines is not None
+    if has_comp or has_gt:
+      cv2.putText(img, "--- model", (x0 + 5, legend_y),
                   cv2.FONT_HERSHEY_SIMPLEX, 0.35, (64, 255, 0), 1, cv2.LINE_AA)
-      cv2.putText(img, "--- compensated", (x0 + 120, legend_y),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1, cv2.LINE_AA)
-      cv2.putText(img, f"dh={self._delta_height:+.2f}m", (x0 + 5, legend_y + 16),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1, cv2.LINE_AA)
+      col_x = 100
+      if has_comp:
+        cv2.putText(img, "--- comp", (x0 + col_x, legend_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1, cv2.LINE_AA)
+        col_x += 90
+      if has_gt:
+        cv2.putText(img, "--- GT", (x0 + col_x, legend_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 0, 255), 1, cv2.LINE_AA)
+      if has_comp:
+        cv2.putText(img, f"dh={self._delta_height:+.2f}m", (x0 + 5, legend_y + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 0), 1, cv2.LINE_AA)
+
+  def _draw_gt_lane_lines(self, img, gt_lines, gt_probs, K, rpyCalib):
+    """Draw GT lane lines as magenta polylines on perspective view.
+
+    Uses direct point projection + polylines instead of _map_line_to_polygon
+    to avoid polygon closure artifacts from near-camera singularities
+    (X_IDXS starts at x=0 where projection depth ≈ 0).
+    """
+    for i, pts in enumerate(gt_lines):
+      if gt_probs[i] < 0.5:
+        continue
+      # Keep only points with valid data in well-conditioned projection range.
+      # GT points beyond sampling coverage have NaN y/z — exclude them.
+      mask = (pts[:, 0] >= MIN_DRAW_DISTANCE) & (pts[:, 0] <= 100.0) & \
+             ~np.isnan(pts[:, 1]) & ~np.isnan(pts[:, 2])
+      valid_pts = pts[mask]
+      if valid_pts.shape[0] < 2:
+        continue
+
+      uv = project_points_to_image(valid_pts[:, 0], valid_pts[:, 1], valid_pts[:, 2], K, rpyCalib)
+
+      # Filter to valid projections within image bounds
+      good = ~np.isnan(uv).any(axis=1) & \
+             (uv[:, 0] >= 0) & (uv[:, 0] < W) & \
+             (uv[:, 1] >= 0) & (uv[:, 1] < H)
+
+      # Split into contiguous segments at gaps to avoid spurious lines
+      # connecting non-adjacent points (e.g. lane exits then re-enters image on curves)
+      indices = np.where(good)[0]
+      if len(indices) < 2:
+        continue
+      breaks = np.where(np.diff(indices) > 1)[0] + 1
+      for seg_idx in np.split(indices, breaks):
+        if len(seg_idx) < 2:
+          continue
+        seg_uv = uv[seg_idx].astype(np.int32)
+        cv2.polylines(img, [seg_uv], isClosed=False, color=(255, 0, 255), thickness=2, lineType=cv2.LINE_AA)
+
+  def _draw_eval_panel(self, img):
+    """Draw evaluation metrics panel in the top-right corner."""
+    metrics = self._eval_metrics
+    if metrics is None:
+      return
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    panel_w, panel_h = 320, 160
+    x0 = img.shape[1] - panel_w - _BEV_MARGIN
+    y0 = _BEV_MARGIN
+
+    # Semi-transparent background
+    roi = img[y0:y0 + panel_h, x0:x0 + panel_w]
+    overlay = roi.copy()
+    cv2.rectangle(overlay, (0, 0), (panel_w, panel_h), (0, 0, 0), -1)
+    img[y0:y0 + panel_h, x0:x0 + panel_w] = cv2.addWeighted(overlay, 0.7, roi, 0.3, 0)
+
+    def _mae_color(val):
+      """Color-code MAE: green < 0.3m, yellow < 0.5m, red >= 0.5m."""
+      if val < 0.3:
+        return (0, 220, 0)
+      elif val < 0.5:
+        return (0, 220, 220)
+      return (0, 0, 220)
+
+    y = y0 + 20
+    dy = 22
+    scale = 0.45
+
+    cv2.putText(img, "Lane Eval", (x0 + 5, y), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+    y += dy
+
+    # Near-left / near-right MAE
+    for name, label in [('near_left_all_mae', 'L-MAE'), ('near_right_all_mae', 'R-MAE')]:
+      val = metrics.get(name)
+      if val is not None:
+        color = _mae_color(val)
+        cv2.putText(img, f"{label}: {val:.3f}m", (x0 + 5, y), font, scale, color, 1, cv2.LINE_AA)
+        y += dy
+
+    # Overall MAE
+    val = metrics.get('overall_mae')
+    if val is not None:
+      color = _mae_color(val)
+      cv2.putText(img, f"Overall: {val:.3f}m", (x0 + 5, y), font, scale, color, 1, cv2.LINE_AA)
+      y += dy
+
+    # Width MAE
+    val = metrics.get('width_mae')
+    if val is not None:
+      color = _mae_color(val)
+      cv2.putText(img, f"Width: {val:.3f}m", (x0 + 5, y), font, scale, color, 1, cv2.LINE_AA)
+      y += dy
+
+    # Recall
+    val = metrics.get('recall')
+    if val is not None:
+      color = (0, 220, 0) if val > 0.8 else (0, 220, 220) if val > 0.5 else (0, 0, 220)
+      cv2.putText(img, f"Recall: {val:.0%}", (x0 + 5, y), font, scale, color, 1, cv2.LINE_AA)
 
   def _draw_info_panel(self, img, model, speed, rpyCalib, cal_status, valid_blocks, cal_perc, height, fps):
     """Draw semi-transparent info panel with calibration progress bar."""

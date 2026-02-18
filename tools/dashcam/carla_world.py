@@ -162,6 +162,14 @@ class DashcamCarlaWorld:
       wide = self.wide_road_image.copy() if self.wide_road_image is not None else None
       return road, wide
 
+  def get_map(self):
+    """Return the Carla map object."""
+    return self.world.get_map()
+
+  def get_vehicle_transform(self):
+    """Return the vehicle's carla.Transform."""
+    return self.vehicle.get_transform()
+
   def get_vehicle_speed(self):
     """Get 3D speed scalar in m/s."""
     v = self.vehicle.get_velocity()
