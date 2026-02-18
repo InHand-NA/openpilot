@@ -84,6 +84,8 @@ def main():
                       help='Single wide camera mode (modeld uses ecam intrinsics for both inputs)')
   parser.add_argument('--road-only', action='store_true',
                       help='Single narrow camera mode (modeld uses fcam intrinsics for main input)')
+  parser.add_argument('--height-comp', action='store_true',
+                      help='Enable lane line height compensation')
   parser.add_argument('--eval-lanes', action='store_true',
                       help='Enable lane line ground truth evaluation')
   parser.add_argument('--eval-interval', type=int, default=1,
@@ -191,7 +193,7 @@ def main():
     save_video_path=args.save_video,
     no_display=args.no_display,
     source_fps=20.0,
-    actual_height=camera_height)
+    actual_height=camera_height if args.height_comp else 0.0)
 
   # Signal handler
   running = True
