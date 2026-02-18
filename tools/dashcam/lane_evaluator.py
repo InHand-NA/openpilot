@@ -114,10 +114,32 @@ class LaneEvaluator:
     for m in self.history:
       all_keys.update(m.keys())
 
+    # TP/FP/FN: sum across frames, then compute percentages
+    _count_keys = {'tp', 'fp', 'fn'}
+    total_tp = sum(m.get('tp', 0) for m in self.history)
+    total_fp = sum(m.get('fp', 0) for m in self.history)
+    total_fn = sum(m.get('fn', 0) for m in self.history)
+    total = total_tp + total_fp + total_fn
+
     summary = {}
     for key in sorted(all_keys):
+      if key in _count_keys or key in ('recall', 'precision'):
+        continue
       values = [m[key] for m in self.history if key in m]
       if values and isinstance(values[0], (int, float)):
         summary[key] = float(np.mean(values))
+
+    # Detection statistics from cumulative counts
+    summary['tp'] = total_tp
+    summary['fp'] = total_fp
+    summary['fn'] = total_fn
+    if total > 0:
+      summary['tp_rate'] = float(total_tp / total)
+      summary['fp_rate'] = float(total_fp / total)
+      summary['fn_rate'] = float(total_fn / total)
+    if total_tp + total_fn > 0:
+      summary['recall'] = float(total_tp / (total_tp + total_fn))
+    if total_tp + total_fp > 0:
+      summary['precision'] = float(total_tp / (total_tp + total_fp))
 
     return summary
