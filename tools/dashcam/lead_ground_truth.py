@@ -109,12 +109,13 @@ class LeadGroundTruth:
 
       lead_probs[sel_idx] = 1.0
 
-      # Fill 6 time-step predictions using constant acceleration model
+      # Fill 6 time-step predictions using constant acceleration model.
+      # Trajectory always covers LEAD_T_IDXS from current time (t=0),
+      # regardless of which t_offset was used for vehicle selection.
       for t_idx, t in enumerate(LEAD_T_IDXS):
-        total_t = t_offset + t
-        pred_x = best['x'] + best['v_rel'] * total_t + 0.5 * best['ax'] * total_t ** 2
+        pred_x = best['x'] + best['v_rel'] * t + 0.5 * best['ax'] * t ** 2
         pred_y = best['y']  # assume lateral position stays constant
-        pred_v = best['vx'] + best['ax'] * total_t  # absolute speed at future time
+        pred_v = best['vx'] + best['ax'] * t  # absolute speed at future time
         lead_data[sel_idx, t_idx, 0] = pred_x       # x: forward distance (relative to ego)
         lead_data[sel_idx, t_idx, 1] = pred_y       # y: lateral offset
         lead_data[sel_idx, t_idx, 2] = pred_v       # v: absolute forward speed
