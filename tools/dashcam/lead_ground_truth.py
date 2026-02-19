@@ -1,7 +1,13 @@
 """Ground truth lead vehicle extraction from Carla world.
 
-Extracts front vehicles' 3D positions and velocities relative to the ego vehicle,
+Extracts front vehicles' 3D positions, absolute speeds and accelerations,
 outputting in openpilot lead format: [3, 6, 4] (3 selections x 6 time steps x 4 dims).
+
+Feature semantics match openpilot model output (LeadDataV3):
+  [sel, t, 0] x  — forward distance relative to ego (meters)
+  [sel, t, 1] y  — lateral offset relative to ego (meters, right positive)
+  [sel, t, 2] v  — lead absolute forward speed (m/s, NOT relative)
+  [sel, t, 3] a  — lead forward acceleration (m/s²)
 """
 
 from math import cos, radians, sin
@@ -33,7 +39,7 @@ class LeadGroundTruth:
       ego_velocity: scalar speed of ego vehicle in m/s.
 
     Returns:
-      lead_data: [3, 6, 4] float32 -- 3 selections x 6 time points x 4 dims (x, y, v_rel, a)
+      lead_data: [3, 6, 4] float32 -- 3 selections x 6 time points x 4 dims (x, y, v_abs, a)
       lead_probs: [3] float32 -- existence probability per selection (0 or 1)
     """
     lead_data = np.zeros((3, 6, 4), dtype=np.float32)
@@ -51,6 +57,7 @@ class LeadGroundTruth:
 
       npc_transform = actor.get_transform()
       npc_velocity = actor.get_velocity()
+      npc_accel = actor.get_acceleration()
 
       # Transform NPC position to ego calibrated frame
       cal_x, cal_y, cal_z = self._world_to_calibrated(
@@ -66,12 +73,17 @@ class LeadGroundTruth:
         npc_velocity.x, npc_velocity.y, npc_velocity.z,
         vehicle_transform)
 
-      # Relative velocity (along forward axis)
+      # Compute NPC acceleration in ego calibrated frame
+      ax, ay, az = self._velocity_to_calibrated(
+        npc_accel.x, npc_accel.y, npc_accel.z,
+        vehicle_transform)
+
+      # Relative velocity (along forward axis) — used for position prediction
       v_rel = vx - ego_velocity
 
       forward_vehicles.append({
         'x': cal_x, 'y': cal_y, 'z': cal_z,
-        'v_rel': v_rel, 'vx': vx,
+        'v_rel': v_rel, 'vx': vx, 'ax': ax,
         'dist': cal_x,
       })
 
@@ -97,15 +109,16 @@ class LeadGroundTruth:
 
       lead_probs[sel_idx] = 1.0
 
-      # Fill 6 time-step predictions using constant velocity model
+      # Fill 6 time-step predictions using constant acceleration model
       for t_idx, t in enumerate(LEAD_T_IDXS):
         total_t = t_offset + t
-        pred_x = best['x'] + best['v_rel'] * total_t
+        pred_x = best['x'] + best['v_rel'] * total_t + 0.5 * best['ax'] * total_t ** 2
         pred_y = best['y']  # assume lateral position stays constant
-        lead_data[sel_idx, t_idx, 0] = pred_x  # x (forward distance)
-        lead_data[sel_idx, t_idx, 1] = pred_y  # y (lateral offset)
-        lead_data[sel_idx, t_idx, 2] = best['v_rel']  # relative velocity
-        lead_data[sel_idx, t_idx, 3] = 0.0  # acceleration (assume constant velocity)
+        pred_v = best['vx'] + best['ax'] * total_t  # absolute speed at future time
+        lead_data[sel_idx, t_idx, 0] = pred_x       # x: forward distance (relative to ego)
+        lead_data[sel_idx, t_idx, 1] = pred_y       # y: lateral offset
+        lead_data[sel_idx, t_idx, 2] = pred_v       # v: absolute forward speed
+        lead_data[sel_idx, t_idx, 3] = best['ax']   # a: forward acceleration
 
     return lead_data, lead_probs
 
