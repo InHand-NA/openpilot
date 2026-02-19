@@ -25,10 +25,11 @@ class LaneGroundTruth:
     [1] right edge: outermost same-direction lane's right boundary
   """
 
-  def __init__(self, carla_map, camera_offset_x=0.8, camera_height=1.13):
+  def __init__(self, carla_map, camera_offset_x=0.8, camera_height=1.13, road_edge_offset=0.5):
     self.map = carla_map
     self.camera_offset_x = camera_offset_x
     self.camera_height = camera_height
+    self.road_edge_offset = road_edge_offset
     self.x_idxs = np.array(ModelConstants.X_IDXS)
 
   def get_lane_lines(self, vehicle_transform):
@@ -154,6 +155,7 @@ class LaneGroundTruth:
     left_edge = self._compute_boundary(left_edge_wps, vehicle_transform, side='left')
     interp = self._interpolate_at_x_idxs(left_edge)
     if interp is not None:
+      interp[:, 1] += self.road_edge_offset  # shift rightward (toward ego)
       edges_list[0] = interp
       edge_probs[0] = 1.0
 
@@ -170,6 +172,7 @@ class LaneGroundTruth:
     right_edge = self._compute_boundary(right_edge_wps, vehicle_transform, side='right')
     interp = self._interpolate_at_x_idxs(right_edge)
     if interp is not None:
+      interp[:, 1] -= self.road_edge_offset  # shift leftward (toward ego)
       edges_list[1] = interp
       edge_probs[1] = 1.0
 
