@@ -178,6 +178,54 @@ class LaneGroundTruth:
 
     return edges_list, edge_probs
 
+  @staticmethod
+  def filter_road_edges(lane_gt, road_edges_gt):
+    """Filter road edges that are not outside the outermost lane lines.
+
+    In calibrated frame (y+ = right):
+      - Left road edge y should be < outermost left lane line y (more left)
+      - Right road edge y should be > outermost right lane line y (more right)
+    If violated, the road edge is zeroed out with prob=0.
+
+    Args:
+      lane_gt: (gt_lines, gt_probs) from get_lane_lines(). Can be (None, None).
+      road_edges_gt: (edges_list, edge_probs) from get_road_edges(). Can be (None, None).
+
+    Returns:
+      Filtered (edges_list, edge_probs).
+    """
+    if road_edges_gt is None or road_edges_gt[0] is None:
+      return road_edges_gt
+    if lane_gt is None or lane_gt[0] is None:
+      return road_edges_gt
+
+    gt_lines, gt_probs = lane_gt
+    edges_list, edge_probs = road_edges_gt
+
+    # Left side: outermost left lane = [0] if exists, else [1]
+    if edge_probs[0] > 0:
+      left_lane_idx = 0 if gt_probs[0] > 0 else (1 if gt_probs[1] > 0 else -1)
+      if left_lane_idx >= 0:
+        edge_y = edges_list[0][:, 1]
+        lane_y = gt_lines[left_lane_idx][:, 1]
+        valid = ~np.isnan(edge_y) & ~np.isnan(lane_y)
+        if np.any(valid) and np.mean(edge_y[valid]) >= np.mean(lane_y[valid]):
+          edges_list[0] = np.zeros((33, 3), dtype=np.float32)
+          edge_probs[0] = 0.0
+
+    # Right side: outermost right lane = [3] if exists, else [2]
+    if edge_probs[1] > 0:
+      right_lane_idx = 3 if gt_probs[3] > 0 else (2 if gt_probs[2] > 0 else -1)
+      if right_lane_idx >= 0:
+        edge_y = edges_list[1][:, 1]
+        lane_y = gt_lines[right_lane_idx][:, 1]
+        valid = ~np.isnan(edge_y) & ~np.isnan(lane_y)
+        if np.any(valid) and np.mean(edge_y[valid]) <= np.mean(lane_y[valid]):
+          edges_list[1] = np.zeros((33, 3), dtype=np.float32)
+          edge_probs[1] = 0.0
+
+    return edges_list, edge_probs
+
   def _is_same_direction(self, wp_a, wp_b):
     """Check if two waypoints have the same driving direction (forward vector dot product > 0)."""
     fwd_a = wp_a.transform.get_forward_vector()

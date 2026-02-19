@@ -324,6 +324,7 @@ def main():
 
         rec_lane_gt = lane_gt_extractor.get_lane_lines(veh_transform)
         rec_road_edges_gt = lane_gt_extractor.get_road_edges(veh_transform)
+        rec_road_edges_gt = lane_gt_extractor.filter_road_edges(rec_lane_gt, rec_road_edges_gt)
         rec_lead_gt = lead_gt_extractor.get_lead_vehicles(veh_transform, v_ego)
         rec_pose, rec_road_transform = pose_gt_extractor.update(veh_transform)
 
