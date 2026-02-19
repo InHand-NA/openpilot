@@ -279,7 +279,7 @@ def get_RadarState_from_vision(lead_msg, v_ego, model_v_ego):
 不再使用 openpilot 的双网络架构（视觉 + 策略），改用**单一视觉网络 + 多任务输出头**：
 
 ```
-Input: 512×256 YUV (2 frames)
+Input: 512×256 YUV (2 frames)    ← 纯图像输入，无需高度参数
        ↓
   ┌─────────────────────────────────────┐
   │ Backbone: EfficientNet-B0           │
@@ -291,15 +291,13 @@ Input: 512×256 YUV (2 frames)
   │   帧差拼接 + 1×1 Conv              │
   └─────────────┬───────────────────────┘
                 ↓
-  ┌─────────────────────────────────────┐
-  │ Height Conditioning: FiLM Layer     │
-  │   γ(h) * feature + β(h)            │
-  └─────────────┬───────────────────────┘
-                ↓
   ┌──────┬──────┬──────┬──────┬──────┬──────┬──────┐
   │Lane  │Lead  │Meta  │Pose  │Road  │Road  │Desire│
   │Lines │      │(FCW) │      │Trans │Edges │Pred  │
-  └──────┘──────┘──────┘──────┘──────┘──────┘──────┘
+  └──────┘──────┘──────┘──────┘  ↑   └──────┘──────┘
+                                 │
+                          z 分量 = 相机高度估计
+                          (供 calibrationd 在线更新)
 ```
 
 ### 4.2 Backbone 选项比较
@@ -314,76 +312,66 @@ Input: 512×256 YUV (2 frames)
 
 输入分辨率保持 openpilot 的 `MEDMODEL_INPUT_SIZE = (512, 256)`（`common/transformations/model.py:10`），YUV 格式（NV12），双帧拼接后通道维度为 `2 × 6 = 12`（YUV 各 2 通道 × 2 帧）。
 
-### 4.3 高度条件注入（Height Conditioning）
+### 4.3 高度自估计（模型从图像推断安装高度）
 
-#### 4.3.1 问题分析
+#### 4.3.1 设计思路
 
-openpilot 的 `get_warp_matrix()`（`common/transformations/model.py:65-70`）**只补偿旋转（RPY）**，不包含高度信息：
+openpilot 的视觉网络**已经具备从图像推断相机安装高度的能力**——通过 `road_transform` 输出的 z 分量。这一机制无需任何显式高度输入，网络从图像中的视觉线索自行推断：
 
-```python
-def get_warp_matrix(device_from_calib_euler, intrinsics, bigmodel_frame=False):
-    calib_from_model = calib_from_sbigmodel if bigmodel_frame else calib_from_medmodel
-    device_from_calib = rot_from_euler(device_from_calib_euler)
-    camera_from_calib = intrinsics @ view_frame_from_device_frame @ device_from_calib
-    warp_matrix = camera_from_calib @ calib_from_model
-    return warp_matrix
+- **地面消失点位置**：安装越高，消失点在图像中越高
+- **地平面透视几何**：已知宽度的车道标线在不同高度下投影尺度不同
+- **已知尺寸参照物**：车辆、标线宽度等提供绝对尺度参考
+
+因此，卡车模型**不需要外部注入高度条件**（如 FiLM 层），而是沿用 openpilot 的设计，让模型自行估计高度。
+
+#### 4.3.2 与 openpilot 现有机制的对应关系
+
+openpilot 的高度估计数据流：
+
+```
+视觉网络 → road_transform[0:3] (平移分量)
+                    ↓
+         fill_pose_msg (modeld.py)
+                    ↓
+         cameraOdometry.roadTransformTrans
+                    ↓
+         calibrationd.handle_cam_odom()
+                    ↓
+         road_transform_trans[2] → new_height    # z 分量 = 相机高度
+                    ↓
+         滑动平均 → liveCalibration.height
 ```
 
-这意味着模型看到的是经过旋转校正后的图像，但**不知道相机安装在什么高度**。openpilot 的预训练模型隐式假设 `HEIGHT_INIT = 1.22m`（`selfdrive/locationd/calibrationd.py:52`）。当相机在 2.0-2.8m 高度时：
+源码关键路径：
+- 视觉网络输出 `road_transform`（`parse_model_outputs.py:101`）
+- 发布到 `cameraOdometry.roadTransformTrans`（`fill_model_msg.py:189`）
+- `calibrationd` 从 z 分量提取高度（`calibrationd.py:259-260`）：
+  ```python
+  if (len(road_transform_trans) == 3):
+      new_height = np.array([road_transform_trans[2]])
+  ```
+- 通过滑动平均平滑后发布（`calibrationd.py:268`）
 
-- 地面消失点位置显著改变
-- 同一真实距离对应的图像尺度不同
-- 车道线 z 坐标（高度方向）的含义完全不同
+#### 4.3.3 模型自估计的优势
 
-#### 4.3.2 FiLM 条件化方案
+| 维度 | 外部高度注入（FiLM） | 模型自行估计 |
+|------|---------------------|-------------|
+| 架构复杂度 | 增加 FiLM 层 + HeightEncoder | 无额外模块，更简洁 |
+| 推理时输入 | 需要提供高度标量 | 只需图像 |
+| 载重动态变化 | 需外部高度源实时更新 | 模型逐帧自适应，天然处理空载/满载 |
+| 与 openpilot 一致性 | 偏离原有设计 | **完全一致**，复用全部标定流程 |
+| 已验证性 | 需要从零验证 | openpilot 百万级数据已验证 |
+| NPU 部署 | 多一个输入通道，多 FiLM 算子 | 纯 CNN，更友好 |
 
-通过 **FiLM（Feature-wise Linear Modulation）** 将安装高度作为显式条件注入网络：
+#### 4.3.4 训练要求
 
-```python
-class HeightFiLM(nn.Module):
-    """FiLM 层：通过相机高度条件调制特征"""
-    def __init__(self, height_dim, feature_dim):
-        super().__init__()
-        self.gamma_fc = nn.Linear(height_dim, feature_dim)
-        self.beta_fc = nn.Linear(height_dim, feature_dim)
+模型自估计高度的前提是**训练数据必须覆盖目标高度范围**。具体策略：
 
-    def forward(self, features, height_embedding):
-        # features: [B, C, H, W] (卷积特征)
-        # height_embedding: [B, height_dim]
-        gamma = self.gamma_fc(height_embedding).unsqueeze(-1).unsqueeze(-1)
-        beta = self.beta_fc(height_embedding).unsqueeze(-1).unsqueeze(-1)
-        return gamma * features + beta
+1. **Carla 仿真阶段**：使用 `--camera-height` 参数在 [1.0, 3.0]m 范围内均匀采样，确保每个高度档位有足够训练样本
+2. **GT 标签**：`road_transform` 的 z 分量 GT 直接取自 Carla 的相机安装高度参数
+3. **验证指标**：在不同高度上分别评估 `road_transform.z` 的 MAE，确保高度估计误差 < 0.1m
 
-
-class HeightEncoder(nn.Module):
-    """将标量高度编码为向量"""
-    def __init__(self, embed_dim=16, output_dim=64):
-        super().__init__()
-        self.embed_dim = embed_dim
-        # 正弦位置编码
-        self.freqs = nn.Parameter(
-            torch.linspace(0, 4, embed_dim // 2), requires_grad=False)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, output_dim),
-            nn.ReLU(),
-            nn.Linear(output_dim, output_dim),
-        )
-
-    def forward(self, height):
-        # height: [B, 1] 标量高度（米）
-        # 正弦编码
-        h_scaled = height * self.freqs.unsqueeze(0)  # [B, embed_dim//2]
-        h_encoded = torch.cat([torch.sin(h_scaled), torch.cos(h_scaled)], dim=-1)
-        return self.mlp(h_encoded)  # [B, output_dim]
-```
-
-**注入位置**：在 backbone 的第 3-4 个 stage 之后各注入一个 FiLM 层。早期特征（纹理/边缘）受高度影响小，晚期特征（语义/几何）受高度影响大。
-
-#### 4.3.3 高度条件化的必要性
-
-- `calibrationd` 中 `road_transform_trans[2]` 的 z 分量估计路面相对高度（`calibrationd.py:259-260`）
-- 不同安装高度下，模型输出 `lane_lines` 的 z 坐标应当变化（z ≈ 负相机高度），但同一场景 y 坐标不应变化
-- FiLM 条件化让网络显式知道"我安装在多高"，从而正确推理 3D 几何
+如果后续验证发现多高度泛化不足（例如车道线精度在极端高度下显著退化），可考虑回退到 FiLM 条件化方案作为补救。但基于 openpilot 已有的成功经验，模型自估计应是优先选择。
 
 ### 4.4 时序建模
 
@@ -623,7 +611,7 @@ def get_warp_matrix(device_from_calib_euler, intrinsics, bigmodel_frame=False):
 关键点：
 - 只补偿旋转，不含平移/高度
 - `medmodel_fl = 910.0`，`MEDMODEL_CY = 47.6`（`model.py:13-14`）
-- 高度信息通过 FiLM 条件化注入网络（而非几何变换）
+- 高度信息由模型通过 `road_transform` 输出自行估计（而非通过几何变换或外部注入）
 
 ### 7.3 高度在线估计
 
@@ -700,15 +688,15 @@ Camera (YUV)
     ↓
 Warp (calibration RPY) ← liveCalibration (rpyCalib)
     ↓
-Model Input: [512×256 YUV × 2 frames] + [height scalar]
+Model Input: [512×256 YUV × 2 frames]    ← 纯图像输入，无需高度参数
     ↓
 ┌───────────────────────────────────┐
 │  Model Inference (NPU/CPU)        │
-│  Backbone → FiLM(height) → Heads │
+│  Backbone → Temporal → Heads      │
 └──────────────┬────────────────────┘
                ↓
-         Parse Outputs
-               ↓
+         Parse Outputs ──→ road_transform.z ──→ calibrationd
+               ↓                                (高度在线更新)
     ┌──────────┴──────────┐
     ↓                     ↓
 LDW Logic            FCW Logic
@@ -722,7 +710,7 @@ LDW Alert      hardBrake   TTC Check
 
 ### 8.4 NPU 适配注意事项
 
-1. **算子兼容性**：确认目标 NPU 支持所有使用的算子（特别是 ConvGRU/GRU、FiLM 中的乘法）
+1. **算子兼容性**：确认目标 NPU 支持所有使用的算子（特别是 ConvGRU/GRU）
 2. **内存布局**：NPU 通常偏好 NHWC 或特定对齐的 NCHW
 3. **动态 shape**：避免动态 shape，所有输入输出形状固定
 4. **后处理**：sigmoid/softmax 等激活函数尽量在 NPU 上完成
