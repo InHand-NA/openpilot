@@ -25,11 +25,25 @@ LEAD_T_OFFSETS = [0.0, 2.0, 4.0]
 class LeadGroundTruth:
   """Extract lead vehicle ground truth from Carla world actors."""
 
-  def __init__(self, carla_world, ego_vehicle, camera_offset_x=0.8, camera_height=1.13):
+  # Validity constraints matching openpilot downstream processing
+  MIN_FORWARD_DIST = 2.0    # meters — closer vehicles are mostly occluded
+  MAX_FORWARD_DIST = 200.0  # meters — beyond model's useful range
+  MAX_LATERAL_DIST = 10.0   # meters — exclude irrelevant far-lateral vehicles
+  ACCEL_CLIP_MIN = -10.0    # m/s² — matches long_mpc.py clipping
+  ACCEL_CLIP_MAX = 5.0      # m/s² — matches long_mpc.py clipping
+
+  def __init__(self, carla_world, ego_vehicle, camera_offset_x=0.8, camera_height=1.13,
+               image_w=1928, image_h=1208, focal_length=2648.0):
     self.carla_world = carla_world
     self.ego_vehicle = ego_vehicle
     self.camera_offset_x = camera_offset_x
     self.camera_height = camera_height
+    # Camera intrinsics for image visibility check
+    self.image_w = image_w
+    self.image_h = image_h
+    self.focal_length = focal_length
+    self.cx = image_w / 2.0
+    self.cy = image_h / 2.0
 
   def get_lead_vehicles(self, vehicle_transform, ego_velocity):
     """Extract up to 3 lead vehicle GT in calibrated frame.
@@ -64,8 +78,20 @@ class LeadGroundTruth:
         npc_transform.location.x, npc_transform.location.y, npc_transform.location.z,
         vehicle_transform)
 
-      # Only consider vehicles ahead (x > 0) and within reasonable range
-      if cal_x <= 0.0 or cal_x > 200.0:
+      # 1. Forward distance constraint
+      if cal_x < self.MIN_FORWARD_DIST or cal_x > self.MAX_FORWARD_DIST:
+        continue
+
+      # 2. Lateral hard limit — exclude irrelevant far-lateral vehicles
+      if abs(cal_y) > self.MAX_LATERAL_DIST:
+        continue
+
+      # 3. Image visibility — vehicle center must project within camera FOV
+      #    Simplified projection (calibrated ≈ device frame):
+      #    view_x = cal_y, view_y = cal_z, view_z = cal_x
+      u = self.focal_length * (cal_y / cal_x) + self.cx
+      v = self.focal_length * (cal_z / cal_x) + self.cy
+      if u < 0 or u >= self.image_w or v < 0 or v >= self.image_h:
         continue
 
       # Compute NPC velocity in ego calibrated frame
@@ -73,10 +99,11 @@ class LeadGroundTruth:
         npc_velocity.x, npc_velocity.y, npc_velocity.z,
         vehicle_transform)
 
-      # Compute NPC acceleration in ego calibrated frame
+      # Compute NPC acceleration in ego calibrated frame, clipped to valid range
       ax, ay, az = self._velocity_to_calibrated(
         npc_accel.x, npc_accel.y, npc_accel.z,
         vehicle_transform)
+      ax = float(np.clip(ax, self.ACCEL_CLIP_MIN, self.ACCEL_CLIP_MAX))
 
       # Relative velocity (along forward axis) — used for position prediction
       v_rel = vx - ego_velocity
@@ -115,7 +142,7 @@ class LeadGroundTruth:
       for t_idx, t in enumerate(LEAD_T_IDXS):
         pred_x = best['x'] + best['v_rel'] * t + 0.5 * best['ax'] * t ** 2
         pred_y = best['y']  # assume lateral position stays constant
-        pred_v = best['vx'] + best['ax'] * t  # absolute speed at future time
+        pred_v = max(0.0, best['vx'] + best['ax'] * t)  # absolute speed, non-negative
         lead_data[sel_idx, t_idx, 0] = pred_x       # x: forward distance (relative to ego)
         lead_data[sel_idx, t_idx, 1] = pred_y       # y: lateral offset
         lead_data[sel_idx, t_idx, 2] = pred_v       # v: absolute forward speed
