@@ -58,7 +58,7 @@ class DataRecorder:
       rgb: [H, W, 3] uint8 RGB image.
       lane_gt: tuple of (lane_lines, lane_probs) from LaneGroundTruth.
                 lane_lines: list of 4 arrays [33, 3], lane_probs: list of 4 floats.
-                Can be (None, None) if GT unavailable (e.g., junction).
+                Can be (None, None) if GT unavailable (saved as zeros with prob=0).
       lead_gt: tuple of (lead_data, lead_probs) from LeadGroundTruth.
                 lead_data: [3, 6, 4], lead_probs: [3].
       pose_gt: [6] float32 pose increments.
@@ -68,7 +68,7 @@ class DataRecorder:
                       Can be None or (None, None) if GT unavailable.
 
     Returns:
-      True if frame was saved, False if skipped.
+      True if frame was saved, False if skipped (skip_frames only).
     """
     self.frame_idx += 1
 
@@ -76,15 +76,8 @@ class DataRecorder:
       self.skipped_count += 1
       return False
 
-    # Unpack lane GT
-    lane_lines_list, lane_probs_list = lane_gt
-    if lane_lines_list is None:
-      # Junction or invalid -- skip this frame
-      self.skipped_count += 1
-      return False
-
-    lane_lines = np.stack(lane_lines_list, axis=0).astype(np.float32)  # [4, 33, 3]
-    lane_probs = np.array(lane_probs_list, dtype=np.float32)  # [4]
+    # Unpack lane GT (None → zeros with prob=0, preserving temporal continuity)
+    lane_lines, lane_probs = self._unpack_lane_gt(lane_gt)
 
     # Unpack lead GT
     lead_data, lead_probs = lead_gt
@@ -133,13 +126,7 @@ class DataRecorder:
       self.skipped_count += 1
       return False
 
-    lane_lines_list, lane_probs_list = lane_gt
-    if lane_lines_list is None:
-      self.skipped_count += 1
-      return False
-
-    lane_lines = np.stack(lane_lines_list, axis=0).astype(np.float32)
-    lane_probs = np.array(lane_probs_list, dtype=np.float32)
+    lane_lines, lane_probs = self._unpack_lane_gt(lane_gt)
 
     lead_data, lead_probs = lead_gt
 
@@ -173,6 +160,18 @@ class DataRecorder:
       print(f"[DataRecorder] Saved {self.saved_count} frames ({fps:.1f} frames/s)")
 
     return True
+
+  @staticmethod
+  def _unpack_lane_gt(lane_gt):
+    """Unpack lane GT into arrays, falling back to zeros with prob=0 if unavailable."""
+    lane_lines_list, lane_probs_list = lane_gt
+    if lane_lines_list is not None:
+      lane_lines = np.stack(lane_lines_list, axis=0).astype(np.float32)  # [4, 33, 3]
+      lane_probs = np.array(lane_probs_list, dtype=np.float32)           # [4]
+    else:
+      lane_lines = np.zeros((4, 33, 3), dtype=np.float32)
+      lane_probs = np.zeros(4, dtype=np.float32)
+    return lane_lines, lane_probs
 
   @staticmethod
   def _unpack_road_edges(road_edges_gt):
