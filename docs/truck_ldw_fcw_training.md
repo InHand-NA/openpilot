@@ -21,7 +21,7 @@
 
 openpilot 的驾驶模型采用**双网络架构**（`selfdrive/modeld/modeld.py`），ONNX 文件位于 `selfdrive/modeld/models/`：
 
-1. **视觉网络（`driving_vision.onnx`）**：23M 参数，45MB（float16）。接收双目相机图像（窄角 `img` + 广角 `big_img`），backbone 为 **ConvNeXt 变体**（双路深度卷积），输出车道线、前车、视觉里程计等感知结果，以及一个 512 维的 `hidden_state` 特征向量。输出 **1576D**。
+1. **视觉网络（`driving_vision.onnx`）**：23M 参数，45MB（float16）。接收双目相机图像（窄角 `img` + 广角 `big_img`），backbone 为 **ConvNeXt 变体**（双尺度串行深度卷积），输出车道线、前车、视觉里程计等感知结果，以及一个 512 维的 `hidden_state` 特征向量。输出 **1576D**。
 2. **策略网络（`driving_policy.onnx`）**：6.9M 参数，14MB（float16）。接收视觉网络的 `hidden_state`（25 帧缓冲）、驾驶意图脉冲（`desire_pulse`）和交通规则信号，使用 **1 层 GPT 风格 Transformer** 融合时序信息，输出行驶轨迹规划（`plan`）和意图状态（`desire_state`）。输出 **1000D**。
 
 两个网络分别以独立的 `.pkl` 文件存储（`selfdrive/modeld/modeld.py:67-68`）：
@@ -186,7 +186,7 @@ def get_RadarState_from_vision(lead_msg, v_ego, model_v_ego):
     }
 ```
 
-**卡车产品说明**：卡车方案无雷达，完全依赖此纯视觉路径。模型输出 `lead` 包含 6 个时间点（0/2/4/6/8/10s）的 4 维状态（x, y, v, a），以及 3 个 lead 目标的存在概率。
+**卡车产品说明**：卡车方案无雷达，完全依赖此纯视觉路径。模型输出 `lead` 为纯 MDN 编码（非 MHP），包含 3 个时间偏移（0/2/4s）× 6 个时间点（0/2/4/6/8/10s）× 4 维状态（x, y, v, a）的均值和标准差，共 144D。以及 3 个 lead 选择的存在概率（3D）。
 
 ---
 
@@ -208,15 +208,15 @@ def get_RadarState_from_vision(lead_msg, v_ego, model_v_ego):
 | `lane_lines_prob` | BCE sigmoid | (8,) → 取奇数索引 (4,) | 车道线存在概率 |
 | `desire_pred` | CE softmax | (4, 8) | 未来意图预测 |
 | `meta` | BCE sigmoid | (55,) | 元事件概率集合 |
-| `lead_prob` | BCE sigmoid | (3,) 或 (6,) | 前车存在概率 |
-| `lead` | MDN (MHP) | MHP=2, selection=3, (6, 4) | 前车轨迹预测 |
+| `lead_prob` | BCE sigmoid | (3,) | 前车存在概率 |
+| `lead` | MDN | (3, 6, 4) mean + (3, 6, 4) std = 144D | 前车轨迹预测 |
 | `hidden_state` | 直接传递 | (512,) | 传递给策略网络 |
 
 **策略网络输出**（`parse_model_outputs.py:123-128`）：
 
 | 输出名 | 解析方式 | 形状 | 说明 |
 |--------|----------|------|------|
-| `plan` | MDN (MHP) | MHP=5, selection=1, (33, 15) | 驾驶轨迹规划 |
+| `plan` | MDN | (1, 33, 15) mean + (1, 33, 15) std = 990D | 驾驶轨迹规划 |
 | `desire_state` | CE softmax | (8,) | 当前意图状态 |
 
 ### 3.2 LDW 必需输出
@@ -231,8 +231,8 @@ def get_RadarState_from_vision(lead_msg, v_ego, model_v_ego):
 
 | 输出 | 原始维度 | MDN 后维度 | 来源 | 用途 |
 |------|----------|------------|------|------|
-| `lead` | MHP=2 时复杂 | ~200 (含 MHP 权重/std) | 视觉网络 | 前车 (x,y,v,a) × 6 时间点 |
-| `lead_prob` | 3 或 6 | 6 | 视觉网络 | 前车存在概率 |
+| `lead` | 3×6×4 = 72 | 144 (mean + std) | 视觉网络 | 前车 (x,y,v,a) × 6 时间点 × 3 选择 |
+| `lead_prob` | 3 | 3 | 视觉网络 | 前车存在概率 |
 | `meta` (FCW 相关) | 55 total, 取 10 | 10 | 视觉网络 | HARD_BRAKE_3/5 各 5 个时间点 |
 
 ### 3.4 辅助输出
@@ -247,7 +247,7 @@ def get_RadarState_from_vision(lead_msg, v_ego, model_v_ego):
 
 | 输出 | 维度 | 移除理由 |
 |------|------|----------|
-| `plan` | 5×33×15 MHP → ~5000D | 策略网络输出，控制规划用。仅告警不需要 |
+| `plan` | 1×33×15 MDN → 990D | 策略网络输出，控制规划用。仅告警不需要 |
 | `desire_state` | 8D | 策略网络输出，车道变换状态机用 |
 | `wide_from_device_euler` | 6D | 双目对齐用，卡车单目 fcam 方案不需要 |
 | `hidden_state` | 512D | 策略网络输入。不需策略网络时无意义 |
@@ -260,15 +260,15 @@ def get_RadarState_from_vision(lead_msg, v_ego, model_v_ego):
 | lane_lines | 528 |
 | lane_lines_prob | 8 |
 | desire_pred | 32 |
-| lead (简化为非 MHP) | 3×6×4×2 = 144 |
-| lead_prob | 6 |
+| lead (纯 MDN) | 3×6×4×2 = 144 |
+| lead_prob | 3 |
 | meta (FCW only) | 10 |
 | pose | 12 |
 | road_transform | 12 |
 | road_edges | 264 |
-| **总计** | **~1016D** |
+| **总计** | **~1013D** |
 
-对比原始双网络总输出（视觉 + 策略合计数千维），**减少约 70-80%**。
+对比原始双网络总输出（视觉 1576D + 策略 1000D = 2576D），**减少约 60%**。
 
 ### 3.6 策略网络整体移除
 
@@ -302,7 +302,7 @@ Input: img [1,12,128,256] (uint8) + big_img [1,12,128,256] (uint8)
   │  Stage 2: 256ch, 6 blocks     [1,256,8,16]      │
   │  Stage 3: 512ch, 2 blocks     [1,512,4,8]       │
   │                                                  │
-  │  Final Conv: DWConv3×3 → SE(1024→64→1024)→ GELU │
+  │  Final Conv: GConv3×3(g=512,512→1024)→SE→GELU   │
   │  Head: GlobalAvgPool → FC(1024→2048)             │
   └──────────────────┬───────────────────────────────┘
                      ↓ 2048D
@@ -331,10 +331,10 @@ Output: Concat → [1, 1576]  (947 + 117 + 512)
 **关键架构特征**：
 
 1. **双目输入融合**：窄角 `img`（fcam）和广角 `big_img`（ecam）在通道维直接 Concat（24ch），共享同一个 backbone。**卡车方案只使用 fcam 的 12ch 输入**，Stem 层输入通道从 24 改为 12
-2. **ConvNeXt Block 设计**：每个 block 包含**双路并行深度卷积**（3×3 局部 + 7×7 大感受野），这是 openpilot 对标准 ConvNeXt 的自定义改进
-3. **SE 注意力**：仅在 final_conv 处使用一个 Squeeze-and-Excitation block（1024→64→1024）
-4. **Summarizer + Hydra 输出头**：2048D 特征经过独立的 Summarizer（FC 2048→512 + ResBlock + L2 Norm）压缩后，再分支到多个 Hydra Head
-5. **无 BatchNorm**：推理时已折叠，backbone 使用 GELU 激活，输出头使用 ReLU
+2. **ConvNeXt Block 设计**：每个 block 包含**双尺度串行深度卷积**（3×3 DWConv → 7×7 DWConv，串行无激活），残差连接**仅包裹 MLP 部分**（不含 token_mixer），这是 openpilot 对标准 ConvNeXt 的自定义改进
+3. **SE 注意力**：仅在 final_conv 处使用一个 Squeeze-and-Excitation block（1024→64→1024）。Final Conv 是分组卷积（g=512, 512→1024 通道翻倍），非标准 DWConv
+4. **Summarizer + Hydra 输出头**：2048D 特征经过独立的 Summarizer（FC 2048→512 + ResBlock×2）压缩后，再分支到多个 Hydra Head。其中 policy 和 hidden_state Summarizer 末尾有 L2 Norm，no_bottleneck Summarizer 无 L2 Norm
+5. **无 BatchNorm/LayerNorm**：backbone 架构上不使用任何归一化层（非推理时折叠，而是设计上以 LayerScale 替代），backbone 使用 GELU 激活，输出头使用 ReLU
 6. **全 float16**：所有参数 float16 存储
 
 ### 4.2 卡车模型架构设计
@@ -390,7 +390,7 @@ Input: fcam [1,12,128,256] (单目窄角)  ← 纯图像输入，无需高度参
 | hidden_state | 512D (传递给策略网络) | 移除（无策略网络） |
 | wide_from_device_euler | 6D | 移除（无 ecam） |
 | meta | 55D (全部事件) | 10D (仅 HARD_BRAKE_3/5) |
-| 总输出 | 1576D | ~1002D |
+| 总输出 | 1576D | ~1013D |
 | 估计参数量 | 23M | ~5-8M |
 
 #### 4.2.2 Backbone 规模选项
@@ -410,35 +410,40 @@ Input: fcam [1,12,128,256] (单目窄角)  ← 纯图像输入，无需高度参
 
 #### 4.2.3 ConvNeXt Block 详细结构
 
-openpilot 的 ConvNeXt Block 与标准 ConvNeXt 的区别在于**双路深度卷积**设计：
+openpilot 的 ConvNeXt Block 与标准 ConvNeXt 的区别在于**双尺度串行深度卷积**和**残差仅包裹 MLP**设计：
 
 ```python
-# openpilot ConvNeXt Block（从 ONNX 逆向）
-class DualDWConvNeXtBlock(nn.Module):
-    """双路深度卷积 ConvNeXt Block"""
+# openpilot ConvNeXt Block（从 ONNX 逆向，节点 [47-65]）
+class ConvNeXtBlock(nn.Module):
+    """双尺度串行深度卷积 ConvNeXt Block
+    关键特征：
+    1. 3×3 和 7×7 DWConv 串行连接（非并行相加）
+    2. 残差连接仅包裹 MLP 部分（不含 token_mixer）
+    3. 无 BatchNorm/LayerNorm
+    """
     def __init__(self, dim, expand_ratio=3):
         super().__init__()
-        # 双路并行深度卷积（多尺度感受野）
-        self.dw_conv_3x3 = nn.Conv2d(dim, dim, 3, padding=1, groups=dim)  # 局部特征
-        self.dw_conv_7x7 = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)  # 大感受野
+        # Token Mixer: 3×3 DWConv（局部特征混合）
+        self.token_mixer = nn.Conv2d(dim, dim, 3, padding=1, groups=dim)
 
-        # Pointwise expand + project
-        self.pw_expand = nn.Conv2d(dim, dim * expand_ratio, 1)
+        # MLP: 7×7 DWConv → 1×1 expand → GELU → 1×1 project
+        self.mlp_conv = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)  # 大感受野
+        self.fc1 = nn.Conv2d(dim, dim * expand_ratio, 1)  # expand
         self.act = nn.GELU()
-        self.pw_project = nn.Conv2d(dim * expand_ratio, dim, 1)
+        self.fc2 = nn.Conv2d(dim * expand_ratio, dim, 1)  # project
 
         # LayerScale (可学习的残差缩放)
         self.layer_scale = nn.Parameter(torch.ones(dim, 1, 1) * 1e-6)
 
     def forward(self, x):
-        residual = x
-        # 双路深度卷积 → 相加
-        x = self.dw_conv_3x3(x) + self.dw_conv_7x7(x)
-        x = self.pw_expand(x)
-        x = self.act(x)
-        x = self.pw_project(x)
-        x = x * self.layer_scale
-        return x + residual
+        # Token Mixer（串行，无激活）
+        x = self.token_mixer(x)          # DWConv 3×3
+        # MLP（残差仅包裹此部分）
+        h = self.mlp_conv(x)             # DWConv 7×7
+        h = self.act(self.fc1(h))        # expand + GELU
+        h = self.fc2(h)                  # project
+        h = h * self.layer_scale         # LayerScale
+        return x + h                     # 残差: token_mixer 输出 + MLP 输出
 ```
 
 #### 4.2.4 输入格式
@@ -564,29 +569,38 @@ class HydraHead(nn.Module):
 ```
 
 ```python
-# Summarizer：压缩 backbone 输出到固定维度
+# Summarizer：压缩 backbone 输出到固定维度（从 ONNX 逆向）
 class Summarizer(nn.Module):
-    """2048D → 512D 压缩器 + L2 归一化"""
-    def __init__(self):
+    """2048D → 512D 压缩器
+    注意：policy 和 hidden_state 末尾有 FC + L2 Norm，no_bottleneck 无 L2 Norm
+    """
+    def __init__(self, has_l2_norm=True):
         super().__init__()
         self.fc_in = nn.Linear(2048, 512)
-        self.res_block = ...  # 2 层 ResBlock (512→1024→512)
-        self.fc_mu = nn.Linear(512, 512)
+        # 2 层 ResBlock (512→1024→512)
+        self.res_block_1 = nn.Sequential(nn.Linear(512, 1024), nn.ReLU(), nn.Linear(1024, 512))
+        self.res_block_2 = nn.Sequential(nn.Linear(512, 1024), nn.ReLU(), nn.Linear(1024, 512))
+        self.has_l2_norm = has_l2_norm
+        if has_l2_norm:
+            self.fc_mu = nn.Linear(512, 512)
 
     def forward(self, x):
         x = F.relu(self.fc_in(x))
-        x = self.res_block(x)
-        x = self.fc_mu(F.relu(x))
-        return F.normalize(x, dim=-1)  # L2 归一化
+        x = F.relu(x + self.res_block_1(F.relu(x)))  # ResBlock 1
+        x = F.relu(x + self.res_block_2(F.relu(x)))  # ResBlock 2
+        if self.has_l2_norm:
+            x = self.fc_mu(F.relu(x))
+            return F.normalize(x, dim=-1)  # L2 归一化
+        return x  # no_bottleneck 直接输出
 ```
 
 openpilot 将输出头分为三路（共享 backbone 2048D 特征）：
 
-| 路径 | Summarizer 维度 | Hydra Heads | 总输出 |
-|------|-----------------|-------------|--------|
-| `policy` | 2048→512 | lead(144), lead_prob(3), lane_lines_prob(8), road_edges(264), lane_lines(528) | 947D |
-| `no_bottleneck_policy` | 2048→512 | meta(55), desire_pred(32), road_transform(12), pose(12), wide_from_device_euler(6) | 117D |
-| `summarizer`（顶层） | 2048→512 + L2 Norm | — | 512D (hidden_state) |
+| 路径 | Summarizer 维度 | L2 Norm | Hydra Heads | 总输出 |
+|------|-----------------|---------|-------------|--------|
+| `policy` | 2048→512 | **有** | lead(144), lead_prob(3), lane_lines_prob(8), road_edges(264), lane_lines(528) | 947D |
+| `no_bottleneck` | 2048→512 | **无** | meta(55), desire_pred(32), road_transform(12), pose(12), wide_from_device_euler(6) | 117D |
+| `hidden_state` | 2048→512 | **有** | — | 512D (hidden_state) |
 
 每个 Hydra Head 的内部隐藏维度（从 ONNX 确认）：
 
@@ -611,7 +625,7 @@ openpilot 将输出头分为三路（共享 backbone 2048D 特征）：
 |------|------------|----------|----------|------|
 | lane_lines | 64 | 528 | MDN (mean + log_std) | 4 条车道线 y/z 坐标 |
 | lane_lines_prob | 16 | 8 | BCE sigmoid | 车道线存在概率 |
-| lead | 64 | 144 | MDN (MHP) | 前车轨迹 (x,y,v,a) |
+| lead | 64 | 144 | MDN | 前车轨迹 (x,y,v,a) |
 | lead_prob | 16 | 3 | BCE sigmoid | 前车存在概率 |
 | meta_fcw | 32 | 10 | BCE sigmoid | HARD_BRAKE_3/5 各 5 时间点 |
 | pose | 32 | 12 | MDN | 视觉里程计 |
@@ -761,7 +775,7 @@ L_distill_B = distillation_loss(student_out, teacher_B_out) * mask_car_height
 
 #### 5.3.5 输出对齐
 
-Teacher A 和 Student 输出结构完全一致（同为卡车精简版 ~1002D），可直接逐 head 对齐。
+Teacher A 和 Student 输出结构完全一致（同为卡车精简版 ~1013D），可直接逐 head 对齐。
 
 Teacher B（openpilot supercombo）的输出维度更大（1576D），需要选择性对齐：
 - `lane_lines`（528D）、`lane_lines_prob`（8D）：直接对齐
@@ -1260,7 +1274,7 @@ lane_lines_prob_dim = NUM_LANE_LINES * 2  # 8 (raw logits, 取奇数索引得到
 road_edges_dim = NUM_ROAD_EDGES * IDX_N * ROAD_EDGES_WIDTH  # 2 * 33 * 2 = 132 (mean only)
 
 # 前车
-lead_dim = LEAD_MHP_SELECTION * LEAD_TRAJ_LEN * LEAD_WIDTH  # 3 * 6 * 4 = 72 (mean only per hypothesis)
+lead_dim = LEAD_MHP_SELECTION * LEAD_TRAJ_LEN * LEAD_WIDTH  # 3 * 6 * 4 = 72 (mean only), MDN total = 72 * 2 = 144
 
 # Meta (FCW 相关)
 meta_fcw_dim = 5 + 5  # HARD_BRAKE_3(5) + HARD_BRAKE_5(5) = 10
