@@ -260,10 +260,10 @@ def main():
   next_frame_time = 0.0  # initialized after warm-up
 
   try:
-    # Warm-up ticks
+    # Warm-up ticks (not counted towards max_frames)
     for _ in range(20):
       world.tick()
-      tick_count += 1
+    tick_count = 0
     next_frame_time = time.monotonic()
 
     while running:
