@@ -166,6 +166,14 @@ class DashcamCarlaWorld:
     """Return the Carla map object."""
     return self.world.get_map()
 
+  def get_world(self):
+    """Return the Carla world object (for actor queries)."""
+    return self.world
+
+  def get_vehicle(self):
+    """Return the ego vehicle actor."""
+    return self.vehicle
+
   def get_vehicle_transform(self):
     """Return the vehicle's carla.Transform."""
     return self.vehicle.get_transform()
