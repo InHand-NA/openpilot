@@ -28,11 +28,15 @@ import numpy as np
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.tools.dashcam.visualizer import (
   W, H,
-  MIN_DRAW_DISTANCE, MAX_DRAW_DISTANCE,
-  _BEV_W, _BEV_H, _BEV_X_MAX, _BEV_Y_HALF, _BEV_MARGIN,
+  _BEV_W, _BEV_H, _BEV_Y_HALF, _BEV_MARGIN,
   project_points_to_image, _build_transform,
   _map_line_to_polygon, _draw_polygon_alpha, _get_path_length_idx,
 )
+
+# Draw range constants (full X_IDXS coverage: 0-192m)
+MIN_DRAW_DISTANCE = 5.0
+MAX_DRAW_DISTANCE = 192.0
+_BEV_X_MAX = 192.0
 
 # Camera intrinsics for road-only fcam (pc/simulator matches Carla capture)
 K = DEVICE_CAMERAS[("pc", "unknown")].fcam.intrinsics
@@ -100,7 +104,7 @@ def _draw_lane_lines(img, data, rpyCalib):
     # --- polyline (like _draw_gt_lane_lines) ---
     if prob < 0.3:
       continue
-    mask = ((pts[:, 0] >= MIN_DRAW_DISTANCE) & (pts[:, 0] <= 100.0) &
+    mask = ((pts[:, 0] >= MIN_DRAW_DISTANCE) & (pts[:, 0] <= MAX_DRAW_DISTANCE) &
             ~np.isnan(pts[:, 1]) & ~np.isnan(pts[:, 2]))
     valid_pts = pts[mask]
     if valid_pts.shape[0] < 2:
@@ -158,7 +162,7 @@ def _draw_road_edges(img, data, rpyCalib):
     # --- dashed polyline ---
     if prob < 0.3:
       continue
-    mask = ((pts[:, 0] >= MIN_DRAW_DISTANCE) & (pts[:, 0] <= 100.0) &
+    mask = ((pts[:, 0] >= MIN_DRAW_DISTANCE) & (pts[:, 0] <= MAX_DRAW_DISTANCE) &
             ~np.isnan(pts[:, 1]) & ~np.isnan(pts[:, 2]))
     valid_pts = pts[mask]
     if valid_pts.shape[0] < 2:
@@ -292,7 +296,7 @@ def _draw_bev_panel(img, data, camera_height):
 
   # Grid
   grid_color = (60, 60, 60)
-  for dist in [20, 40, 60]:
+  for dist in [50, 100, 150]:
     _, gy = to_bev(dist, 0)
     cv2.line(img, (x0, y0 + gy), (x0 + bev_w, y0 + gy), grid_color, 1)
     cv2.putText(img, f"{dist}m", (x0 + 3, y0 + gy - 3),

@@ -50,11 +50,11 @@ class LaneGroundTruth:
       return None, None
 
     # Skip frame if any junction exists within 0-100m ahead
-    if self._has_junction_ahead(ego_wp, max_dist=100.0, step=2.0):
-      return None, None
+    #if self._has_junction_ahead(ego_wp, max_dist=100.0, step=2.0):
+    #  return None, None
 
     # Sample ego lane waypoints
-    ego_wps = self._sample_waypoints(ego_wp, max_dist=100.0, step=2.0)
+    ego_wps = self._sample_waypoints(ego_wp, max_dist=200.0, step=2.0)
 
     # Compute ego lane boundaries in calibrated frame
     ego_left_boundary = self._compute_boundary(ego_wps, vehicle_transform, side='left')
@@ -80,7 +80,7 @@ class LaneGroundTruth:
     if (left_lane_wp is not None
         and left_lane_wp.lane_type == carla.LaneType.Driving
         and self._is_same_direction(ego_wp, left_lane_wp)):
-      left_wps = self._sample_waypoints(left_lane_wp, max_dist=100.0, step=2.0)
+      left_wps = self._sample_waypoints(left_lane_wp, max_dist=200.0, step=2.0)
       far_left_boundary = self._compute_boundary(left_wps, vehicle_transform, side='left')
       interp = self._interpolate_at_x_idxs(far_left_boundary)
       if interp is not None:
@@ -92,7 +92,7 @@ class LaneGroundTruth:
     if (right_lane_wp is not None
         and right_lane_wp.lane_type == carla.LaneType.Driving
         and self._is_same_direction(ego_wp, right_lane_wp)):
-      right_wps = self._sample_waypoints(right_lane_wp, max_dist=100.0, step=2.0)
+      right_wps = self._sample_waypoints(right_lane_wp, max_dist=200.0, step=2.0)
       far_right_boundary = self._compute_boundary(right_wps, vehicle_transform, side='right')
       interp = self._interpolate_at_x_idxs(far_right_boundary)
       if interp is not None:
@@ -135,8 +135,8 @@ class LaneGroundTruth:
     if ego_wp is None:
       return None, None
 
-    if self._has_junction_ahead(ego_wp, max_dist=100.0, step=2.0):
-      return None, None
+    #if self._has_junction_ahead(ego_wp, max_dist=100.0, step=2.0):
+    #  return None, None
 
     edges_list = [np.zeros((33, 3), dtype=np.float32) for _ in range(2)]
     edge_probs = [0.0, 0.0]
@@ -151,7 +151,7 @@ class LaneGroundTruth:
       if left.lane_type == carla.LaneType.Driving and not self._is_same_direction(wp, left):
         break
       wp = left
-    left_edge_wps = self._sample_waypoints(wp, max_dist=100.0, step=2.0)
+    left_edge_wps = self._sample_waypoints(wp, max_dist=200.0, step=2.0)
     left_edge = self._compute_boundary(left_edge_wps, vehicle_transform, side='left')
     interp = self._interpolate_at_x_idxs(left_edge)
     if interp is not None:
@@ -168,7 +168,7 @@ class LaneGroundTruth:
       if right.lane_type == carla.LaneType.Driving and not self._is_same_direction(wp, right):
         break
       wp = right
-    right_edge_wps = self._sample_waypoints(wp, max_dist=100.0, step=2.0)
+    right_edge_wps = self._sample_waypoints(wp, max_dist=200.0, step=2.0)
     right_edge = self._compute_boundary(right_edge_wps, vehicle_transform, side='right')
     interp = self._interpolate_at_x_idxs(right_edge)
     if interp is not None:
