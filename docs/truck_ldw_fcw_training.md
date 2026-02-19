@@ -6,7 +6,7 @@
 - [第2章：openpilot LDW/FCW 实现分析](#第2章openpilot-ldwfcw-实现分析)
 - [第3章：模型输出精简设计](#第3章模型输出精简设计)
 - [第4章：网络架构设计](#第4章网络架构设计)
-- [第5章：训练数据策略](#第5章训练数据策略)
+- [第5章：训练策略](#第5章训练策略)
 - [第6章：损失函数设计](#第6章损失函数设计)
 - [第7章：相机标定与高度估计](#第7章相机标定与高度估计)
 - [第8章：模型部署方案](#第8章模型部署方案)
@@ -56,6 +56,7 @@ POLICY_PKL_PATH  → models/driving_policy_tinygrad{_suffix}.pkl
 
 | 维度 | 乘用车 (openpilot) | 卡车 |
 |------|---------------------|------|
+| 相机配置 | 双目：fcam（窄角，focal 2648）+ ecam（广角，focal 567） | **单目 fcam（窄角）** |
 | 相机安装高度 | ~1.22m | 2.0-2.8m |
 | 车身宽度 | ~1.8m | ~2.5m |
 | 制动距离 (80km/h) | ~36m | ~70m+ |
@@ -63,6 +64,13 @@ POLICY_PKL_PATH  → models/driving_policy_tinygrad{_suffix}.pkl
 | FOV 特点 | 标准视角 | 高视角，更多地面可见 |
 | 功能需求 | ACC + ALC（控制） | LDW + FCW（仅告警） |
 | 部署硬件 | comma 3X (Qualcomm) | CPU/NPU 嵌入式平台 |
+
+**相机选型说明**：卡车方案采用**单目窄角相机（fcam）**，原因如下：
+- openpilot 的双目设计并非立体视觉（不靠视差测距），而是窄角（~40° FOV）+ 广角（~120° FOV）互补覆盖
+- LDW 和 FCW 的核心感知需求（车道线检测、前车测距）主要依赖窄角相机的远距离分辨能力
+- 窄角 fcam 的 focal length 为 2648，远距离目标（60-100m+）的像素分辨率远优于广角 ecam
+- 单目方案简化硬件和系统复杂度，降低成本，适合第一阶段快速验证
+- 后续如需扩展近距离感知能力（如弯道大角度场景），可增加广角相机升级为双目
 
 ---
 
@@ -241,7 +249,7 @@ def get_RadarState_from_vision(lead_msg, v_ego, model_v_ego):
 |------|------|----------|
 | `plan` | 5×33×15 MHP → ~5000D | 策略网络输出，控制规划用。仅告警不需要 |
 | `desire_state` | 8D | 策略网络输出，车道变换状态机用 |
-| `wide_from_device_euler` | 6D | 双目对齐，卡车系统可简化为单目标定 |
+| `wide_from_device_euler` | 6D | 双目对齐用，卡车单目 fcam 方案不需要 |
 | `hidden_state` | 512D | 策略网络输入。不需策略网络时无意义 |
 | `meta` (非 FCW 部分) | ~45D | ENGAGED、GAS/BRAKE_DISENGAGE、STEER_OVERRIDE 等，仅控制用 |
 
@@ -322,7 +330,7 @@ Output: Concat → [1, 1576]  (947 + 117 + 512)
 
 **关键架构特征**：
 
-1. **双目输入融合**：窄角 `img` 和广角 `big_img` 在通道维直接 Concat（24ch），共享同一个 backbone
+1. **双目输入融合**：窄角 `img`（fcam）和广角 `big_img`（ecam）在通道维直接 Concat（24ch），共享同一个 backbone。**卡车方案只使用 fcam 的 12ch 输入**，Stem 层输入通道从 24 改为 12
 2. **ConvNeXt Block 设计**：每个 block 包含**双路并行深度卷积**（3×3 局部 + 7×7 大感受野），这是 openpilot 对标准 ConvNeXt 的自定义改进
 3. **SE 注意力**：仅在 final_conv 处使用一个 Squeeze-and-Excitation block（1024→64→1024）
 4. **Summarizer + Hydra 输出头**：2048D 特征经过独立的 Summarizer（FC 2048→512 + ResBlock + L2 Norm）压缩后，再分支到多个 Hydra Head
@@ -333,10 +341,10 @@ Output: Concat → [1, 1576]  (947 + 117 + 512)
 
 #### 4.2.1 从 openpilot 视觉网络简化
 
-卡车模型基于 openpilot 视觉网络架构进行**针对性简化**，而非从零设计：
+卡车模型基于 openpilot 视觉网络架构进行**针对性简化**，而非从零设计。采用**单目窄角相机（fcam）**作为唯一视觉输入：
 
 ```
-Input: img [1,12,128,256] (单目)    ← 纯图像输入，无需高度参数
+Input: fcam [1,12,128,256] (单目窄角)  ← 纯图像输入，无需高度参数
        ↓ Cast → [1, 12, 128, 256]
        ↓
   ┌──────────────────────────────────────────────────┐
@@ -362,17 +370,25 @@ Input: img [1,12,128,256] (单目)    ← 纯图像输入，无需高度参数
                           (供 calibrationd 在线更新)
 ```
 
+**单目 fcam 设计依据**：
+- openpilot 的 `img` 输入对应窄角 fcam（focal length 2648，~40° FOV），`big_img` 对应广角 ecam（focal length 567，~120° FOV）
+- 两路输入在 backbone 入口 Concat 为 24ch，共享特征提取。卡车方案去掉 ecam，只保留 fcam 的 12ch 输入
+- fcam 的高焦距在远距离（60-100m+）提供更高的像素分辨率，是 LDW 车道线检测和 FCW 前车测距的核心输入
+- ecam 的广角能力主要服务于近距离侧向感知和弯道场景，在卡车 LDW/FCW 告警场景中优先级较低
+- 后续如需扩展，可增加 ecam 输入，将 12ch 扩展回 24ch，backbone 其余部分无需修改
+
 **与原始视觉网络的差异**：
 
 | 方面 | openpilot 视觉网络 | 卡车精简版 |
 |------|---------------------|-----------|
-| 输入 | 双目 24ch (img + big_img) | 单目 12ch (img only) |
+| 输入 | 双目 24ch (fcam + ecam) | **单目 fcam 12ch** |
+| 相机焦距 | fcam 2648 + ecam 567 | fcam 2648 |
 | Backbone 通道 | 64/128/256/512 | 可减半: 32/64/128/256 |
 | Stage 2 block 数 | 6 | 可减至 3 |
 | FC Head 输出 | 2048D | 1024D |
 | 输出头数 | 3 路 (policy + no_bottleneck + summarizer) | 1 路 (合并的 Summarizer + Hydra) |
 | hidden_state | 512D (传递给策略网络) | 移除（无策略网络） |
-| wide_from_device_euler | 6D | 移除（单目系统不需要） |
+| wide_from_device_euler | 6D | 移除（无 ecam） |
 | meta | 55D (全部事件) | 10D (仅 HARD_BRAKE_3/5) |
 | 总输出 | 1576D | ~1002D |
 | 估计参数量 | 23M | ~5-8M |
@@ -427,11 +443,21 @@ class DualDWConvNeXtBlock(nn.Module):
 
 #### 4.2.4 输入格式
 
-实际模型输入（从 ONNX 确认）：
+**卡车模型输入**（单目 fcam）：
 - 形状：`[1, 12, 128, 256]`，uint8
 - 12 通道 = 2 帧 × 6 通道（YUV420 拆分为通道维度）
 - 空间分辨率 128×256 对应 `MEDMODEL_INPUT_SIZE = (512, 256)` 经 YUV420 转换后的结果
-- 双目输入时两路 concat 为 24ch；卡车单目输入保持 12ch
+- fcam 图像经 `get_warp_matrix()` 校正后裁剪到模型输入分辨率
+
+**与 openpilot 的输入对比**：
+- openpilot：`img [1,12,128,256]`（fcam）+ `big_img [1,12,128,256]`（ecam）→ Concat → `[1,24,128,256]`
+- 卡车：仅 `img [1,12,128,256]`（fcam），无 ecam 输入
+- Warp 变换使用 fcam 的内参（`camera.py` 中 `fcam.intrinsics`，focal=2648）计算，与 openpilot 的 `road-only` 模式一致
+
+**相机内参选择**：
+- 模型坐标系使用 `medmodel_intrinsics`（`model.py:15-18`，focal=910.0，cy=47.6）
+- 物理相机使用 fcam 内参（focal=2648）
+- `get_warp_matrix()` 在两者之间建立映射，与相机高度无关（仅补偿 RPY 旋转）
 
 ### 4.3 高度自估计（模型从图像推断安装高度）
 
@@ -498,10 +524,10 @@ openpilot 的高度估计数据流：
 
 **openpilot 实际方案（从 ONNX 确认）**：直接将 2 帧在通道维拼接为 12ch（每帧 6ch YUV），输入同一个 backbone。无 ConvGRU、无显式时序模块——时序信息完全通过多帧通道拼接隐式编码。
 
-卡车模型**直接沿用此方案**：
+卡车模型**直接沿用此方案**（单目 fcam 双帧拼接）：
 
 ```
-frame_t-1 (6ch YUV) + frame_t (6ch YUV) → concat → [B, 12, 128, 256] → backbone
+fcam_t-1 (6ch YUV) + fcam_t (6ch YUV) → concat → [B, 12, 128, 256] → backbone
 ```
 
 这是最简单高效的时序融合方式，且已被 openpilot 验证有效。网络通过学习帧间差异隐式获取运动信息（速度、光流等）。
@@ -595,11 +621,29 @@ openpilot 将输出头分为三路（共享 backbone 2048D 特征）：
 
 ---
 
-## 第5章：训练数据策略
+## 第5章：训练策略
 
-### 5.1 三阶段数据构建
+### 5.1 三阶段训练总览
 
-#### Phase 1：Carla 仿真数据（0-2 月）
+| 阶段 | 训练数据 | 模型规模 | 训练目标 | 硬件 |
+|------|----------|----------|----------|------|
+| Phase 1 | Carla 仿真 | **Full**（~15M params） | 多高度精度验证 | RTX 4090 GPU |
+| Phase 2 | Carla + openpilot 数据 | **Small**（~3M params） | 双 Teacher 蒸馏压缩 | RTX 4090 GPU |
+| Phase 3 | 真实卡车数据 | Small（微调） | 真实场景适配 | RTX 4090 GPU |
+
+### 5.2 Phase 1：Carla 仿真训练 — Full 模型（0-4 月）
+
+#### 5.2.1 目标
+
+在 Carla 仿真数据上训练一个 **Full 规模**（通道 64/128/256/512，Stage 2 共 6 blocks，~15M params）的卡车视觉模型，侧重**多种安装高度场景的精度**。此阶段的核心任务是验证网络架构在卡车高度范围（1.2-2.8m）下的感知能力上限。
+
+#### 5.2.2 训练平台
+
+- GPU：NVIDIA RTX 4090（24GB VRAM）
+- Full 模型 FP32 训练预估显存：~8-12GB（batch size 16-32）
+- 训练框架：PyTorch
+
+#### 5.2.3 数据采集
 
 利用已有的 `tools/dashcam/` 基础设施：
 
@@ -607,52 +651,45 @@ openpilot 将输出头分为三路（共享 backbone 2048D 特征）：
 - Carla 仿真器对接，支持多 Town 和天气条件
 - VisionIPC 相机数据传输管线
 - `--camera-height` 参数支持（`run.py:68-69`）
+- `--road-only` 单窄角相机模式（`run.py:85-86`），与卡车单目 fcam 方案完全对应
 - `--eval-lanes` 车道线评估（`run.py:89-90`）
 - `lane_ground_truth.py` 提供精确车道线 GT
 - `lane_evaluator.py` 提供评估指标
 
 **需扩展的能力**：
-- 设置 `--camera-height 2.0/2.4/2.8` 模拟卡车视角
+- 使用 `--road-only --camera-height 2.0/2.4/2.8` 采集单目 fcam 卡车视角数据
 - 在多种高度之间随机采样，构建多高度混合数据集
 - 提取 Carla 前车 actor 位置作为 lead GT（Carla 提供所有 actor 的 3D 位置和速度）
 - 保存模型输入（YUV 帧 + 标定参数）和 GT 标签到训练数据格式
 
 **数据量目标**：~50k 帧，覆盖：
-- 高度：1.2m, 1.8m, 2.0m, 2.4m, 2.8m（5 个档位）
+- 高度：1.2m, 1.8m, 2.0m, 2.4m, 2.8m（5 个档位，均匀采样）
 - Town：Town01-Town07（不同道路结构）
 - 天气：晴天/阴天/雨天/雾天
 - 时段：白天/黄昏/夜间
 
-#### Phase 2：知识蒸馏（2-5 月）
+#### 5.2.4 训练重点：多高度精度
 
-使用 openpilot supercombo 模型作为 **teacher**：
+Phase 1 的核心挑战是让模型在 1.2-2.8m 的高度范围内均具备良好的感知精度。策略如下：
 
-```
-                  Teacher (openpilot supercombo, frozen)
-                         ↓ soft labels
-Student (新网络) ← L_distill + L_gt(Carla) + L_temporal
-```
+1. **高度均衡采样**：每个 batch 中各高度档位的样本数量大致均等，防止模型偏向某一高度
+2. **高度感知数据增强**：在 [1.0, 3.0]m 范围内连续随机采样高度（不仅限于 5 个离散档位），提升模型对中间高度的泛化
+3. **分高度评估**：训练过程中按高度分组评估 LDW/FCW 指标，确保各高度段精度均衡：
+   - 乘用车高度（1.2m）：验证与 openpilot 基线的可比性
+   - 卡车常见高度（2.0-2.4m）：核心目标精度
+   - 极端高度（2.8m）：确认无严重退化
+4. **`road_transform.z` 高度估计精度**：作为辅助指标，各高度段的 MAE 应 < 0.1m
 
-**蒸馏策略**：
-1. 在乘用车高度（1.22m）的 Carla 数据上，student 学习 teacher 的输出分布（soft labels），获得 teacher 对车道线和前车检测的"知识"
-2. 在多高度 Carla 数据上，student 同时使用 Carla GT 进行监督学习
-3. 两种损失联合优化，teacher 输出只在 1.22m 高度有效，GT 在所有高度有效
+**Phase 1 达标标准**：
 
-**为什么蒸馏有效**：
-- Teacher 在百万级真实数据上训练，拥有强大的视觉特征提取能力
-- 蒸馏 soft labels 传递了 teacher 对模糊/困难场景的"不确定性"信息
-- Student 可以在更小的网络容量下接近 teacher 的性能
+| 指标 | 目标 | 评估数据 |
+|------|------|----------|
+| LDW 车道线 y MAE (0-60m) | < 0.3m（各高度段均满足） | Carla 验证集 |
+| FCW lead dRel 误差 | < 15% (0-100m) | Carla 验证集 |
+| road_transform.z MAE | < 0.1m（各高度段） | Carla 验证集 |
+| 高度间精度方差 | 各高度段 MAE 差异 < 0.1m | Carla 验证集 |
 
-#### Phase 3：真实卡车数据微调（5-9 月）
-
-- 在实际卡车上安装相机采集道路数据
-- **自监督标注**：参考 openpilot 的 future-retrospective 方法：
-  - 利用后续帧的视觉里程计（`pose` 输出）将未来观测投影回当前帧
-  - 多帧时序累积提高远距离车道线精度
-  - 前车检测可用成熟的 2D 检测器（如 YOLO）在图像上标注，再投影到 3D
-- **半监督学习**：少量人工标注 + 大量自监督/伪标签数据
-
-### 5.2 数据增强
+#### 5.2.5 其他数据增强
 
 | 增强类型 | 方法 | 目的 |
 |----------|------|------|
@@ -662,17 +699,139 @@ Student (新网络) ← L_distill + L_gt(Carla) + L_temporal
 | 遮挡 | 随机矩形遮挡 | 增强鲁棒性 |
 | 模糊 | 运动模糊/高斯模糊 | 模拟真实退化 |
 
+### 5.3 Phase 2：双 Teacher 蒸馏 — Small 模型（4-6 月）
+
+#### 5.3.1 目标
+
+使用**两个 Teacher** 联合蒸馏，训练一个可部署到 NPU 的 **Small 规模**模型（通道 32/64/128/256，Stage 2 共 3 blocks，~3M params）。
+
+#### 5.3.2 双 Teacher 架构
+
+```
+  Teacher A                    Teacher B
+  (Phase 1 Full 模型,          (openpilot supercombo,
+   ~15M, frozen)                23M 视觉网络, frozen)
+      ↓                             ↓
+   多高度场景                    乘用车高度场景
+   soft labels                   soft labels
+      ↓                             ↓
+      └──────────┬──────────────────┘
+                 ↓
+         Student (Small, ~3M)
+              ↓
+         L_total = α·L_gt + β·L_distill_A + γ·L_distill_B + δ·L_temporal
+```
+
+#### 5.3.3 双 Teacher 蒸馏策略
+
+**Teacher A — Phase 1 Full 模型**：
+- 在**全部高度**的 Carla 数据上提供 soft labels
+- 优势：已在卡车高度范围（1.2-2.8m）上验证精度，多高度知识最全面
+- 权重 β 在全部训练数据上均生效
+
+**Teacher B — openpilot supercombo 视觉网络**：
+- 仅在**乘用车高度**（~1.22m）的数据上提供 soft labels
+- 优势：在百万级真实驾驶数据上训练，视觉特征提取和场景理解能力极强
+- 权重 γ 仅在 1.22m 高度数据上生效（其他高度不使用 Teacher B 的输出）
+
+**为什么需要两个 Teacher**：
+- Teacher A（Full 模型）提供**多高度泛化能力**，但仅在 Carla 仿真数据上训练，真实场景泛化有限
+- Teacher B（supercombo）提供**真实场景理解能力**，但仅在乘用车高度有效
+- 双 Teacher 互补：Student 同时继承 Full 模型的高度泛化和 supercombo 的真实场景鲁棒性
+
+#### 5.3.4 蒸馏损失设计
+
+```python
+# 总损失
+L_total = α * L_gt + β * L_distill_A + γ * L_distill_B + δ * L_temporal
+
+# Teacher A 蒸馏（所有高度数据）
+L_distill_A = distillation_loss(student_out, teacher_A_out)
+
+# Teacher B 蒸馏（仅 h ≈ 1.22m 的数据）
+L_distill_B = distillation_loss(student_out, teacher_B_out) * mask_car_height
+
+# mask_car_height: 当前样本高度 ∈ [1.1, 1.4]m 时为 1，否则为 0
+```
+
+**权重调度建议**：
+- 训练初期：β=1.0, γ=1.0, α=0.5（以蒸馏为主，GT 为辅）
+- 训练中期：β=0.5, γ=0.5, α=1.0（逐渐转向 GT 监督）
+- 训练后期：β=0.3, γ=0.3, α=1.0（微调，减少蒸馏依赖）
+
+#### 5.3.5 输出对齐
+
+Teacher A 和 Student 输出结构完全一致（同为卡车精简版 ~1002D），可直接逐 head 对齐。
+
+Teacher B（openpilot supercombo）的输出维度更大（1576D），需要选择性对齐：
+- `lane_lines`（528D）、`lane_lines_prob`（8D）：直接对齐
+- `lead`（144D）、`lead_prob`（3D）：直接对齐
+- `pose`（12D）、`road_transform`（12D）、`road_edges`（264D）：直接对齐
+- `meta`：Teacher B 输出 55D，Student 只需 10D（HARD_BRAKE_3/5），取对应 slice 对齐
+- `desire_pred`（32D）：直接对齐
+- `hidden_state`（512D）、`wide_from_device_euler`（6D）：Student 无对应输出，跳过
+
+#### 5.3.6 Phase 2 达标标准
+
+| 指标 | 目标 | 说明 |
+|------|------|------|
+| LDW 车道线 y MAE (0-60m) | < 0.35m（各高度段） | 允许比 Full 略有退化 |
+| FCW lead dRel 误差 | < 18% (0-100m) | 允许比 Full 略有退化 |
+| 相对 Teacher A 精度保持率 | > 90% | Student 精度 / Teacher A 精度 |
+| 模型参数量 | ~3M | INT8 后 < 5MB |
+
+### 5.4 Phase 3：真实卡车数据微调（6-9 月）
+
+#### 5.4.1 目标
+
+在 Phase 2 得到的 Small 模型基础上，使用真实卡车采集数据微调，弥合仿真-真实域差距（sim-to-real gap）。
+
+#### 5.4.2 数据采集与标注
+
+- 在实际卡车上安装 fcam 窄角相机采集道路数据
+- **自监督标注**：参考 openpilot 的 future-retrospective 方法：
+  - 利用后续帧的视觉里程计（`pose` 输出）将未来观测投影回当前帧
+  - 多帧时序累积提高远距离车道线精度
+  - 前车检测可用成熟的 2D 检测器（如 YOLO）在图像上标注，再投影到 3D
+- **半监督学习**：少量人工标注 + 大量自监督/伪标签数据
+
+#### 5.4.3 微调策略
+
+- 使用较小学习率（Phase 2 的 1/10），防止遗忘 Carla/蒸馏阶段学到的知识
+- 混合训练：真实数据 + 少量 Carla 数据（防止灾难性遗忘）
+- 重点关注 sim-to-real 差异较大的场景：光照变化、道路纹理、标线磨损、天气恶劣
+
+#### 5.4.4 Phase 3 达标标准
+
+| 指标 | 目标 | 评估数据 |
+|------|------|----------|
+| LDW 车道线 y MAE (0-60m) | < 0.5m | 真实卡车验证集 |
+| FCW lead dRel 误差 | < 15% (0-100m) | 真实卡车验证集 |
+| LDW 误报率 | < 1次/100km | 真实路测 |
+| FCW 漏报率 | < 5% | 真实路测 |
+
 ---
 
 ## 第6章：损失函数设计
 
 ### 6.1 总体损失
 
+**Phase 1（Full 模型，纯 GT 监督）**：
 ```
-L_total = α·L_gt + β·L_distill + γ·L_temporal + δ·L_aux
+L_total = L_gt + δ·L_temporal
 ```
 
-其中各部分权重在训练阶段逐步调整。
+**Phase 2（Small 模型，双 Teacher 蒸馏）**：
+```
+L_total = α·L_gt + β·L_distill_A(Full) + γ·L_distill_B(supercombo) + δ·L_temporal
+```
+
+**Phase 3（Small 模型微调）**：
+```
+L_total = L_gt + δ·L_temporal
+```
+
+各权重在 Phase 2 训练过程中逐步调整（详见第 5.3.4 节）。
 
 ### 6.2 各任务损失详解
 
@@ -734,11 +893,11 @@ L_temporal = ||f(t) - warp(f(t-1), ego_motion)||_1
 
 鼓励网络学习在时序上一致的表征，减少检测结果的帧间跳动。
 
-### 6.3 蒸馏损失
+### 6.3 蒸馏损失（Phase 2 使用）
 
 ```python
 def distillation_loss(student_out, teacher_out, temperature=3.0):
-    """KL 散度蒸馏损失"""
+    """单个 Teacher 的蒸馏损失"""
     # 对 MDN 输出：L2 距离（mean）+ KL（分布）
     L_mean = F.mse_loss(student_out['mean'], teacher_out['mean'])
     L_std = F.mse_loss(student_out['log_std'], teacher_out['log_std'])
@@ -748,6 +907,21 @@ def distillation_loss(student_out, teacher_out, temperature=3.0):
         F.softmax(teacher_out['logits'] / temperature, dim=-1),
         reduction='batchmean') * (temperature ** 2)
     return L_mean + L_std + L_prob
+
+def dual_teacher_distillation(student_out, teacher_A_out, teacher_B_out,
+                               sample_height, temperature=3.0):
+    """双 Teacher 蒸馏损失
+    Teacher A: Phase 1 Full 模型 — 所有高度数据上生效
+    Teacher B: openpilot supercombo — 仅乘用车高度数据上生效
+    """
+    L_A = distillation_loss(student_out, teacher_A_out, temperature)
+
+    # Teacher B 仅在乘用车高度 (1.1-1.4m) 上提供监督
+    car_height_mask = (sample_height > 1.1) & (sample_height < 1.4)
+    L_B = distillation_loss(student_out, teacher_B_out, temperature)
+    L_B = L_B * car_height_mask.float()
+
+    return L_A, L_B
 ```
 
 ---
@@ -861,7 +1035,7 @@ FP32 训练 → PTQ (Post-Training Quantization) INT8 → QAT (量化感知训�
 | 模型大小（INT8） | < 5 MB (Small) / < 10 MB (Medium) | NPU 存储约束 |
 | 推理延迟（NPU） | < 30 ms @ 20 FPS | 实时性要求 |
 | 推理延迟（CPU） | < 100 ms | 降级运行 |
-| 输入 | [1, 12, 128, 256] uint8 | 2 帧 YUV，与 openpilot 一致 |
+| 输入 | [1, 12, 128, 256] uint8 | 单目 fcam，2 帧 × 6ch YUV |
 | 输出维度 | ~1013D | 精简后（去除 hidden_state 和 wide_from_device_euler） |
 | 精度要求（LDW） | 车道线 y MAE < 0.3m (0-60m) | 核心指标 |
 | 精度要求（FCW） | lead dRel 误差 < 10% (0-100m) | 核心指标 |
@@ -869,11 +1043,11 @@ FP32 训练 → PTQ (Post-Training Quantization) INT8 → QAT (量化感知训�
 ### 8.3 运行时架构
 
 ```
-Camera (YUV)
-    ↓
+fcam (窄角相机, focal=2648)
+    ↓ YUV420
 Warp (calibration RPY) ← liveCalibration (rpyCalib)
-    ↓
-Model Input: [1, 12, 128, 256] uint8    ← 2帧×6ch YUV，纯图像无需高度参数
+    ↓                     (使用 fcam 内参)
+Model Input: [1, 12, 128, 256] uint8    ← 单目 fcam，2帧×6ch YUV
     ↓
 ┌───────────────────────────────────┐
 │  Model Inference (NPU/CPU)        │
@@ -898,8 +1072,9 @@ LDW Alert      hardBrake   TTC Check
 1. **算子兼容性**：ConvNeXt 使用的算子（DWConv、GELU、SE Block）需确认 NPU 支持。GELU 的 Tanh 近似可能需要替换为 ReLU/HardSwish
 2. **7×7 深度卷积**：部分 NPU 对大 kernel DWConv 支持不佳，可能需要拆分为多个 3×3
 3. **内存布局**：NPU 通常偏好 NHWC 或特定对齐的 NCHW
-4. **动态 shape**：模型已是全静态 shape，无需额外处理
+4. **动态 shape**：模型已是全静态 shape（单目 fcam 固定 `[1,12,128,256]`），无需额外处理
 5. **后处理**：sigmoid/softmax 等激活函数尽量在 NPU 上完成
+6. **单目优势**：相比双目 24ch 输入，单目 fcam 12ch 减少一半的 Stem 计算量和内存带宽
 
 ---
 
@@ -1009,25 +1184,26 @@ class TruckAlertManager:
 
 ## 第10章：项目里程碑
 
-| 阶段 | 时间 | 目标 | 关键交付 |
-|------|------|------|----------|
-| **M1: 基础搭建** | 1-2月 | 数据管线 + 网络骨架 | Carla 多高度数据采集脚本；基于 ConvNeXt 的精简版网络定义（PyTorch）；训练框架搭建 |
-| **M2: 仿真训练** | 2-4月 | Carla 数据训练达标 | LDW 车道线 MAE < 0.3m (0-60m)；FCW lead 检测 precision > 80% |
-| **M3: 知识蒸馏** | 4-5月 | Teacher → Student 蒸馏 | 乘用车高度精度接近 teacher（>90%）；多高度精度保持 |
-| **M4: 真实数据** | 5-7月 | 卡车实采数据微调 | LDW MAE < 0.5m（真实场景）；FCW lead 误差 < 15% |
-| **M5: 部署优化** | 7-8月 | INT8 量化 + NPU 适配 | Small 方案模型 < 5MB；NPU 推理 < 30ms；量化精度损失 < 5% |
-| **M6: 系统集成** | 8-9月 | 完整 LDW/FCW 系统 | 端到端系统测试；误报率 < 1次/100km；漏报率 < 5% |
+| 阶段 | 时间 | 对应训练阶段 | 目标 | 关键交付 |
+|------|------|-------------|------|----------|
+| **M1: 基础搭建** | 1-2月 | Phase 1 准备 | 数据管线 + Full 网络骨架 | Carla 多高度数据采集脚本；Full 规模 ConvNeXt 网络定义（PyTorch）；RTX 4090 训练框架搭建 |
+| **M2: Full 模型训练** | 2-4月 | Phase 1 | Carla 数据训练 Full 模型 | LDW MAE < 0.3m（各高度段）；FCW lead 误差 < 15%；高度估计 MAE < 0.1m |
+| **M3: 双 Teacher 蒸馏** | 4-6月 | Phase 2 | Full + supercombo → Small | Small 模型精度保持率 > 90%（相对 Full）；模型参数 ~3M |
+| **M4: 真实数据微调** | 6-8月 | Phase 3 | 卡车实采数据微调 Small | LDW MAE < 0.5m（真实场景）；FCW lead 误差 < 15% |
+| **M5: 部署优化** | 8-9月 | 部署 | INT8 量化 + NPU 适配 | Small 模型 INT8 < 5MB；NPU 推理 < 30ms；量化精度损失 < 5% |
+| **M6: 系统集成** | 9-10月 | 集成 | 完整 LDW/FCW 系统 | 端到端系统测试；误报率 < 1次/100km；漏报率 < 5% |
 
 ### 验证标准
 
-| 指标 | M2 目标 | M4 目标 | M6 目标 |
-|------|---------|---------|---------|
-| LDW 车道线 y MAE (0-60m) | < 0.3m (Carla) | < 0.5m (真实) | < 0.5m (真实) |
-| LDW 误报率 | - | - | < 1次/100km |
-| FCW lead dRel 误差 | < 15% (Carla) | < 15% (真实) | < 15% (真实) |
-| FCW 漏报率 | - | - | < 5% |
-| 推理延迟 (NPU) | - | - | < 30ms |
-| 模型大小 (INT8) | - | - | < 5MB (Small) |
+| 指标 | M2 (Full) | M3 (Small) | M4 (微调) | M6 (系统) |
+|------|-----------|------------|-----------|-----------|
+| LDW 车道线 y MAE (0-60m) | < 0.3m (Carla) | < 0.35m (Carla) | < 0.5m (真实) | < 0.5m (真实) |
+| LDW 误报率 | - | - | - | < 1次/100km |
+| FCW lead dRel 误差 | < 15% (Carla) | < 18% (Carla) | < 15% (真实) | < 15% (真实) |
+| FCW 漏报率 | - | - | - | < 5% |
+| road_transform.z MAE | < 0.1m | < 0.15m | < 0.15m | - |
+| 推理延迟 (NPU) | - | - | - | < 30ms |
+| 模型大小 (INT8) | ~15MB (非部署) | < 5MB | < 5MB | < 5MB |
 
 ---
 
@@ -1061,7 +1237,8 @@ class TruckAlertManager:
 | `selfdrive/locationd/calibrationd.py` | 259-260 | road_transform 高度更新 |
 | `common/transformations/model.py` | 10-18 | MEDMODEL 参数 |
 | `common/transformations/model.py` | 65-70 | get_warp_matrix 函数 |
-| `common/transformations/camera.py` | 49-53 | 相机硬件参数 |
+| `common/transformations/camera.py` | 49-53 | 相机硬件参数（fcam focal=2648, ecam focal=567） |
+| `common/transformations/camera.py` | 55-69 | DEVICE_CAMERAS 映射 |
 | `common/transformations/camera.py` | 75-80 | 坐标系变换矩阵 |
 | `tools/dashcam/run.py` | 68-69 | --camera-height 参数 |
 | `tools/dashcam/run.py` | 89-90 | --eval-lanes 评估 |
