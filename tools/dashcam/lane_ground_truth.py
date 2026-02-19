@@ -12,11 +12,17 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 
 
 class LaneGroundTruth:
-  """Extract ego lane boundary ground truth from Carla map.
+  """Extract lane boundary and road edge ground truth from Carla map.
 
-  Only extracts the two ego lane boundaries (indices 1 and 2):
+  Lane lines (openpilot format):
+    [0] far-left: left adjacent lane's left boundary
     [1] near-left: ego lane's left boundary
     [2] near-right: ego lane's right boundary
+    [3] far-right: right adjacent lane's right boundary
+
+  Road edges:
+    [0] left edge: outermost same-direction lane's left boundary
+    [1] right edge: outermost same-direction lane's right boundary
   """
 
   def __init__(self, carla_map, camera_offset_x=0.8, camera_height=1.13):
@@ -46,7 +52,7 @@ class LaneGroundTruth:
     if self._has_junction_ahead(ego_wp, max_dist=100.0, step=2.0):
       return None, None
 
-    # Sample ego lane waypoints only (no adjacent lanes needed)
+    # Sample ego lane waypoints
     ego_wps = self._sample_waypoints(ego_wp, max_dist=100.0, step=2.0)
 
     # Compute ego lane boundaries in calibrated frame
@@ -68,7 +74,112 @@ class LaneGroundTruth:
       gt_lines[2] = interp
       gt_probs[2] = 1.0
 
+    # [0] far-left: left adjacent lane's left boundary
+    left_lane_wp = ego_wp.get_left_lane()
+    if (left_lane_wp is not None
+        and left_lane_wp.lane_type == carla.LaneType.Driving
+        and self._is_same_direction(ego_wp, left_lane_wp)):
+      left_wps = self._sample_waypoints(left_lane_wp, max_dist=100.0, step=2.0)
+      far_left_boundary = self._compute_boundary(left_wps, vehicle_transform, side='left')
+      interp = self._interpolate_at_x_idxs(far_left_boundary)
+      if interp is not None:
+        gt_lines[0] = interp
+        gt_probs[0] = 1.0
+
+    # [3] far-right: right adjacent lane's right boundary
+    right_lane_wp = ego_wp.get_right_lane()
+    if (right_lane_wp is not None
+        and right_lane_wp.lane_type == carla.LaneType.Driving
+        and self._is_same_direction(ego_wp, right_lane_wp)):
+      right_wps = self._sample_waypoints(right_lane_wp, max_dist=100.0, step=2.0)
+      far_right_boundary = self._compute_boundary(right_wps, vehicle_transform, side='right')
+      interp = self._interpolate_at_x_idxs(far_right_boundary)
+      if interp is not None:
+        gt_lines[3] = interp
+        gt_probs[3] = 1.0
+
     return gt_lines, gt_probs
+
+  def get_road_edges(self, vehicle_transform):
+    """Extract GT road edges in calibrated frame at X_IDXS distances.
+
+    Traverses outward from ego lane through all road-surface lane types
+    (Driving, Shoulder, Parking, Biking, etc.) and returns the outer
+    boundary of the outermost road-surface lane as the road edge.
+
+    Args:
+      vehicle_transform: carla.Transform of the ego vehicle.
+
+    Returns:
+      edges_list: list of 2 arrays, each 33x3 (x, y, z) in calibrated frame.
+      edge_probs: list of 2 floats (1.0 if edge exists, 0.0 otherwise).
+      Returns (None, None) if ego waypoint not found or junction ahead.
+    """
+    import carla
+
+    road_surface_types = {
+      carla.LaneType.Driving,
+      carla.LaneType.Shoulder,
+      carla.LaneType.Parking,
+      carla.LaneType.Biking,
+      carla.LaneType.Entry,
+      carla.LaneType.Exit,
+      carla.LaneType.OnRamp,
+      carla.LaneType.OffRamp,
+      carla.LaneType.Restricted,
+    }
+
+    loc = vehicle_transform.location
+    ego_wp = self.map.get_waypoint(loc, lane_type=carla.LaneType.Driving)
+    if ego_wp is None:
+      return None, None
+
+    if self._has_junction_ahead(ego_wp, max_dist=100.0, step=2.0):
+      return None, None
+
+    edges_list = [np.zeros((33, 3), dtype=np.float32) for _ in range(2)]
+    edge_probs = [0.0, 0.0]
+
+    # [0] left road edge: traverse left through all road-surface lanes
+    wp = ego_wp
+    while True:
+      left = wp.get_left_lane()
+      if left is None or left.lane_type not in road_surface_types:
+        break
+      # Only check direction for Driving lanes; Shoulder etc. have unreliable forward vectors
+      if left.lane_type == carla.LaneType.Driving and not self._is_same_direction(wp, left):
+        break
+      wp = left
+    left_edge_wps = self._sample_waypoints(wp, max_dist=100.0, step=2.0)
+    left_edge = self._compute_boundary(left_edge_wps, vehicle_transform, side='left')
+    interp = self._interpolate_at_x_idxs(left_edge)
+    if interp is not None:
+      edges_list[0] = interp
+      edge_probs[0] = 1.0
+
+    # [1] right road edge: traverse right through all road-surface lanes
+    wp = ego_wp
+    while True:
+      right = wp.get_right_lane()
+      if right is None or right.lane_type not in road_surface_types:
+        break
+      if right.lane_type == carla.LaneType.Driving and not self._is_same_direction(wp, right):
+        break
+      wp = right
+    right_edge_wps = self._sample_waypoints(wp, max_dist=100.0, step=2.0)
+    right_edge = self._compute_boundary(right_edge_wps, vehicle_transform, side='right')
+    interp = self._interpolate_at_x_idxs(right_edge)
+    if interp is not None:
+      edges_list[1] = interp
+      edge_probs[1] = 1.0
+
+    return edges_list, edge_probs
+
+  def _is_same_direction(self, wp_a, wp_b):
+    """Check if two waypoints have the same driving direction (forward vector dot product > 0)."""
+    fwd_a = wp_a.transform.get_forward_vector()
+    fwd_b = wp_b.transform.get_forward_vector()
+    return (fwd_a.x * fwd_b.x + fwd_a.y * fwd_b.y + fwd_a.z * fwd_b.z) > 0
 
   def _has_junction_ahead(self, start_wp, max_dist=100.0, step=2.0):
     """Check if there's a junction within max_dist meters ahead."""

@@ -5,6 +5,7 @@ Output format per frame:
   lane_lines: [4, 33, 3] float32
   lane_lines_prob: [4] float32
   road_edges: [2, 33, 3] float32
+  road_edges_prob: [2] float32
   lead: [3, 6, 4] float32
   lead_prob: [3] float32
   pose: [6] float32
@@ -50,7 +51,7 @@ class DataRecorder:
     os.makedirs(output_dir, exist_ok=True)
     print(f"[DataRecorder] Saving to {output_dir} (skip={skip_frames})")
 
-  def record(self, rgb, lane_gt, lead_gt, pose_gt, road_transform_gt):
+  def record(self, rgb, lane_gt, lead_gt, pose_gt, road_transform_gt, road_edges_gt=None):
     """Record one frame of training data.
 
     Args:
@@ -62,6 +63,9 @@ class DataRecorder:
                 lead_data: [3, 6, 4], lead_probs: [3].
       pose_gt: [6] float32 pose increments.
       road_transform_gt: [6] float32 road transform.
+      road_edges_gt: tuple of (edges_list, edge_probs) from LaneGroundTruth.get_road_edges().
+                      edges_list: list of 2 arrays [33, 3], edge_probs: list of 2 floats.
+                      Can be None or (None, None) if GT unavailable.
 
     Returns:
       True if frame was saved, False if skipped.
@@ -85,8 +89,8 @@ class DataRecorder:
     # Unpack lead GT
     lead_data, lead_probs = lead_gt
 
-    # Road edges placeholder (Phase 1: zeros)
-    road_edges = np.zeros((2, 33, 3), dtype=np.float32)
+    # Road edges GT
+    road_edges, road_edge_probs = self._unpack_road_edges(road_edges_gt)
 
     # Save compressed npz
     filename = f"{self.saved_count:06d}.npz"
@@ -97,6 +101,7 @@ class DataRecorder:
       lane_lines=lane_lines,
       lane_lines_prob=lane_probs,
       road_edges=road_edges,
+      road_edges_prob=road_edge_probs,
       lead=lead_data,
       lead_prob=lead_probs,
       pose=pose_gt,
@@ -104,7 +109,7 @@ class DataRecorder:
       camera_height=np.float32(self.camera_height),
       camera_pitch=np.float32(self.camera_pitch),
       camera_yaw=np.float32(self.camera_yaw),
-      v_ego=np.float32(0.0),  # updated below if provided via meta
+      v_ego=np.float32(0.0),
       town=np.array(self.town),
     )
 
@@ -117,7 +122,7 @@ class DataRecorder:
 
     return True
 
-  def record_with_vego(self, rgb, lane_gt, lead_gt, pose_gt, road_transform_gt, v_ego):
+  def record_with_vego(self, rgb, lane_gt, lead_gt, pose_gt, road_transform_gt, v_ego, road_edges_gt=None):
     """Record one frame with explicit v_ego metadata.
 
     Same as record() but includes v_ego in the saved data.
@@ -138,7 +143,7 @@ class DataRecorder:
 
     lead_data, lead_probs = lead_gt
 
-    road_edges = np.zeros((2, 33, 3), dtype=np.float32)
+    road_edges, road_edge_probs = self._unpack_road_edges(road_edges_gt)
 
     filename = f"{self.saved_count:06d}.npz"
     filepath = os.path.join(self.output_dir, filename)
@@ -148,6 +153,7 @@ class DataRecorder:
       lane_lines=lane_lines,
       lane_lines_prob=lane_probs,
       road_edges=road_edges,
+      road_edges_prob=road_edge_probs,
       lead=lead_data,
       lead_prob=lead_probs,
       pose=pose_gt,
@@ -167,6 +173,17 @@ class DataRecorder:
       print(f"[DataRecorder] Saved {self.saved_count} frames ({fps:.1f} frames/s)")
 
     return True
+
+  @staticmethod
+  def _unpack_road_edges(road_edges_gt):
+    """Unpack road edges GT into arrays, falling back to zeros if unavailable."""
+    if road_edges_gt is not None and road_edges_gt[0] is not None:
+      road_edges = np.stack(road_edges_gt[0], axis=0).astype(np.float32)  # [2, 33, 3]
+      road_edge_probs = np.array(road_edges_gt[1], dtype=np.float32)      # [2]
+    else:
+      road_edges = np.zeros((2, 33, 3), dtype=np.float32)
+      road_edge_probs = np.zeros(2, dtype=np.float32)
+    return road_edges, road_edge_probs
 
   def close(self):
     """Print recording statistics."""

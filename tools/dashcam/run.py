@@ -323,11 +323,13 @@ def main():
         v_ego = world.get_vehicle_speed()
 
         rec_lane_gt = lane_gt_extractor.get_lane_lines(veh_transform)
+        rec_road_edges_gt = lane_gt_extractor.get_road_edges(veh_transform)
         rec_lead_gt = lead_gt_extractor.get_lead_vehicles(veh_transform, v_ego)
         rec_pose, rec_road_transform = pose_gt_extractor.update(veh_transform)
 
         recorder.record_with_vego(display_rgb, rec_lane_gt, rec_lead_gt,
-                                  rec_pose, rec_road_transform, v_ego)
+                                  rec_pose, rec_road_transform, v_ego,
+                                  road_edges_gt=rec_road_edges_gt)
 
       # Lane GT evaluation (non-recording path)
       gt_lines = None
