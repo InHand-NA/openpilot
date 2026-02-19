@@ -19,10 +19,10 @@
 
 ### 1.1 openpilot supercombo 模型架构概述
 
-openpilot 的驾驶模型采用**双网络架构**（`selfdrive/modeld/modeld.py`）：
+openpilot 的驾驶模型采用**双网络架构**（`selfdrive/modeld/modeld.py`），ONNX 文件位于 `selfdrive/modeld/models/`：
 
-1. **视觉网络（Vision Network）**：接收双目相机图像（窄角 + 广角），输出车道线、前车、视觉里程计等感知结果，以及一个 512 维的 `hidden_state` 特征向量。
-2. **策略网络（Policy Network）**：接收视觉网络的 `hidden_state`、驾驶意图脉冲（`desire_pulse`）和交通规则信号，输出行驶轨迹规划（`plan`）和意图状态（`desire_state`）。
+1. **视觉网络（`driving_vision.onnx`）**：23M 参数，45MB（float16）。接收双目相机图像（窄角 `img` + 广角 `big_img`），backbone 为 **ConvNeXt 变体**（双路深度卷积），输出车道线、前车、视觉里程计等感知结果，以及一个 512 维的 `hidden_state` 特征向量。输出 **1576D**。
+2. **策略网络（`driving_policy.onnx`）**：6.9M 参数，14MB（float16）。接收视觉网络的 `hidden_state`（25 帧缓冲）、驾驶意图脉冲（`desire_pulse`）和交通规则信号，使用 **1 层 GPT 风格 Transformer** 融合时序信息，输出行驶轨迹规划（`plan`）和意图状态（`desire_state`）。输出 **1000D**。
 
 两个网络分别以独立的 `.pkl` 文件存储（`selfdrive/modeld/modeld.py:67-68`）：
 ```
@@ -274,43 +274,164 @@ def get_RadarState_from_vision(lead_msg, v_ego, model_v_ego):
 
 ## 第4章：网络架构设计
 
-### 4.1 架构选型
+### 4.1 openpilot 视觉网络实际架构（ONNX 分析）
 
-不再使用 openpilot 的双网络架构（视觉 + 策略），改用**单一视觉网络 + 多任务输出头**：
+基于 `selfdrive/modeld/models/driving_vision.onnx` 的逆向分析，openpilot 视觉网络的实际架构如下：
 
 ```
-Input: 512×256 YUV (2 frames)    ← 纯图像输入，无需高度参数
+Input: img [1,12,128,256] (uint8) + big_img [1,12,128,256] (uint8)
+       ↓ Cast(uint8→fp16)
+       ↓ Concat(axis=1) → [1, 24, 128, 256]
        ↓
-  ┌─────────────────────────────────────┐
-  │ Backbone: EfficientNet-B0           │
-  │         / MobileNetV3-Small         │
-  └─────────────┬───────────────────────┘
-                ↓
-  ┌─────────────────────────────────────┐
-  │ Temporal Fusion: ConvGRU /          │
-  │   帧差拼接 + 1×1 Conv              │
-  └─────────────┬───────────────────────┘
-                ↓
+  ┌──────────────────────────────────────────────────┐
+  │ ConvNeXt Backbone (_en)                          │
+  │                                                  │
+  │  Stem: Conv3×3 s2 → GELU → DWConv3×3 s2 → GELU │
+  │        → Conv1×1 → GELU       [1,64,32,64]      │
+  │                                                  │
+  │  Stage 0: 64ch,  2 blocks     [1,64,32,64]      │
+  │  Stage 1: 128ch, 2 blocks     [1,128,16,32]     │
+  │  Stage 2: 256ch, 6 blocks     [1,256,8,16]      │
+  │  Stage 3: 512ch, 2 blocks     [1,512,4,8]       │
+  │                                                  │
+  │  Final Conv: DWConv3×3 → SE(1024→64→1024)→ GELU │
+  │  Head: GlobalAvgPool → FC(1024→2048)             │
+  └──────────────────┬───────────────────────────────┘
+                     ↓ 2048D
+  ┌──────────────────┼──────────────────────────────┐
+  │                  │                              │
+  ↓                  ↓                              ↓
+policy           no_bottleneck                 summarizer
+Summarizer       Summarizer                    (2048→512)
+(2048→512)       (2048→512)                    L2 Norm
+  ↓                  ↓                              ↓
+Hydra ResBlock   Hydra ResBlock                hidden_state
+  ↓                  ↓                          = 512D
+  ↓                  ↓
+┌─────────┐    ┌───────────┐
+│lead 144 │    │meta    55 │
+│lead_p  3│    │desire  32 │
+│ll_prob  8│    │road_t  12│
+│r_edges264│    │pose    12│
+│l_lines528│    │w_euler  6│
+└─────────┘    └───────────┘
+  = 947D          = 117D
+
+Output: Concat → [1, 1576]  (947 + 117 + 512)
+```
+
+**关键架构特征**：
+
+1. **双目输入融合**：窄角 `img` 和广角 `big_img` 在通道维直接 Concat（24ch），共享同一个 backbone
+2. **ConvNeXt Block 设计**：每个 block 包含**双路并行深度卷积**（3×3 局部 + 7×7 大感受野），这是 openpilot 对标准 ConvNeXt 的自定义改进
+3. **SE 注意力**：仅在 final_conv 处使用一个 Squeeze-and-Excitation block（1024→64→1024）
+4. **Summarizer + Hydra 输出头**：2048D 特征经过独立的 Summarizer（FC 2048→512 + ResBlock + L2 Norm）压缩后，再分支到多个 Hydra Head
+5. **无 BatchNorm**：推理时已折叠，backbone 使用 GELU 激活，输出头使用 ReLU
+6. **全 float16**：所有参数 float16 存储
+
+### 4.2 卡车模型架构设计
+
+#### 4.2.1 从 openpilot 视觉网络简化
+
+卡车模型基于 openpilot 视觉网络架构进行**针对性简化**，而非从零设计：
+
+```
+Input: img [1,12,128,256] (单目)    ← 纯图像输入，无需高度参数
+       ↓ Cast → [1, 12, 128, 256]
+       ↓
+  ┌──────────────────────────────────────────────────┐
+  │ ConvNeXt Backbone (精简版)                        │
+  │                                                  │
+  │  与 openpilot 相同的 Stem + 4 Stage 结构          │
+  │  可选：减少 Stage 2 的 block 数(6→3)降低计算量    │
+  │  可选：通道数减半(64→32,128→64,256→128,512→256)  │
+  │                                                  │
+  │  Final Conv + SE → GlobalAvgPool → FC → 1024D    │
+  └──────────────────┬───────────────────────────────┘
+                     ↓
+              Summarizer (1024→512)
+              + ResBlock + ReLU
+                     ↓
   ┌──────┬──────┬──────┬──────┬──────┬──────┬──────┐
   │Lane  │Lead  │Meta  │Pose  │Road  │Road  │Desire│
   │Lines │      │(FCW) │      │Trans │Edges │Pred  │
+  │ 528  │ 144  │ 10   │ 12   │ 12   │ 264  │  32  │
   └──────┘──────┘──────┘──────┘  ↑   └──────┘──────┘
                                  │
                           z 分量 = 相机高度估计
                           (供 calibrationd 在线更新)
 ```
 
-### 4.2 Backbone 选项比较
+**与原始视觉网络的差异**：
 
-| 模型 | 参数量 | FLOPS (224×224) | 特点 |
-|------|--------|-----------------|------|
-| MobileNetV3-Small | 2.9M | 56M | NPU 友好，量化后 ~0.7MB |
-| EfficientNet-B0 | 5.3M | 390M | 精度更高，适中开销 |
-| openpilot EfficientNet | ~14M | ~1.5G | 原始精度，不适合 NPU 部署 |
+| 方面 | openpilot 视觉网络 | 卡车精简版 |
+|------|---------------------|-----------|
+| 输入 | 双目 24ch (img + big_img) | 单目 12ch (img only) |
+| Backbone 通道 | 64/128/256/512 | 可减半: 32/64/128/256 |
+| Stage 2 block 数 | 6 | 可减至 3 |
+| FC Head 输出 | 2048D | 1024D |
+| 输出头数 | 3 路 (policy + no_bottleneck + summarizer) | 1 路 (合并的 Summarizer + Hydra) |
+| hidden_state | 512D (传递给策略网络) | 移除（无策略网络） |
+| wide_from_device_euler | 6D | 移除（单目系统不需要） |
+| meta | 55D (全部事件) | 10D (仅 HARD_BRAKE_3/5) |
+| 总输出 | 1576D | ~1002D |
+| 估计参数量 | 23M | ~5-8M |
 
-**建议**：起步使用 **EfficientNet-B0**，确保感知精度满足告警需求后，再通过知识蒸馏压缩到 MobileNetV3-Small 用于 NPU 部署。
+#### 4.2.2 Backbone 规模选项
 
-输入分辨率保持 openpilot 的 `MEDMODEL_INPUT_SIZE = (512, 256)`（`common/transformations/model.py:10`），YUV 格式（NV12），双帧拼接后通道维度为 `2 × 6 = 12`（YUV 各 2 通道 × 2 帧）。
+基于 openpilot ConvNeXt 架构的三种规模方案：
+
+| 方案 | 通道配置 | Stage 2 blocks | 估计参数量 | 适用场景 |
+|------|----------|----------------|-----------|---------|
+| **Full**（直接沿用） | 64/128/256/512 | 6 | ~15M | 精度优先，GPU 推理 |
+| **Medium**（推荐起步） | 48/96/192/384 | 4 | ~8M | 精度与效率平衡 |
+| **Small**（NPU 部署） | 32/64/128/256 | 3 | ~3M | NPU 部署，INT8 后 < 3MB |
+
+**建议策略**：
+1. 起步使用 **Full** 方案训练，确保感知精度达标
+2. 验证通过后，通过**知识蒸馏**将 Full → Small，用于 NPU 部署
+3. 如 Small 方案精度不足，可退回 Medium 方案
+
+#### 4.2.3 ConvNeXt Block 详细结构
+
+openpilot 的 ConvNeXt Block 与标准 ConvNeXt 的区别在于**双路深度卷积**设计：
+
+```python
+# openpilot ConvNeXt Block（从 ONNX 逆向）
+class DualDWConvNeXtBlock(nn.Module):
+    """双路深度卷积 ConvNeXt Block"""
+    def __init__(self, dim, expand_ratio=3):
+        super().__init__()
+        # 双路并行深度卷积（多尺度感受野）
+        self.dw_conv_3x3 = nn.Conv2d(dim, dim, 3, padding=1, groups=dim)  # 局部特征
+        self.dw_conv_7x7 = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)  # 大感受野
+
+        # Pointwise expand + project
+        self.pw_expand = nn.Conv2d(dim, dim * expand_ratio, 1)
+        self.act = nn.GELU()
+        self.pw_project = nn.Conv2d(dim * expand_ratio, dim, 1)
+
+        # LayerScale (可学习的残差缩放)
+        self.layer_scale = nn.Parameter(torch.ones(dim, 1, 1) * 1e-6)
+
+    def forward(self, x):
+        residual = x
+        # 双路深度卷积 → 相加
+        x = self.dw_conv_3x3(x) + self.dw_conv_7x7(x)
+        x = self.pw_expand(x)
+        x = self.act(x)
+        x = self.pw_project(x)
+        x = x * self.layer_scale
+        return x + residual
+```
+
+#### 4.2.4 输入格式
+
+实际模型输入（从 ONNX 确认）：
+- 形状：`[1, 12, 128, 256]`，uint8
+- 12 通道 = 2 帧 × 6 通道（YUV420 拆分为通道维度）
+- 空间分辨率 128×256 对应 `MEDMODEL_INPUT_SIZE = (512, 256)` 经 YUV420 转换后的结果
+- 双目输入时两路 concat 为 24ch；卡车单目输入保持 12ch
 
 ### 4.3 高度自估计（模型从图像推断安装高度）
 
@@ -375,38 +496,102 @@ openpilot 的高度估计数据流：
 
 ### 4.4 时序建模
 
-保留 openpilot 的 **2 帧输入设计**（`ModelConstants.N_FRAMES = 2`），使用轻量级时序融合：
+**openpilot 实际方案（从 ONNX 确认）**：直接将 2 帧在通道维拼接为 12ch（每帧 6ch YUV），输入同一个 backbone。无 ConvGRU、无显式时序模块——时序信息完全通过多帧通道拼接隐式编码。
 
-**方案 A：帧差拼接（推荐起步方案）**
-```
-frame_t-1, frame_t → concat → [B, 12, H, W] → backbone
-```
-最简单高效，隐式编码运动信息。openpilot 原始模型也使用类似的多帧拼接方式。
+卡车模型**直接沿用此方案**：
 
-**方案 B：ConvGRU（精度提升后考虑）**
 ```
-frame_t-1 → backbone → features_t-1 ─┐
-frame_t   → backbone → features_t   ──┼→ ConvGRU → fused_features
+frame_t-1 (6ch YUV) + frame_t (6ch YUV) → concat → [B, 12, 128, 256] → backbone
 ```
-显式建模时序依赖，对高速场景的运动估计更准确。
 
-**重要简化**：openpilot 原始设计中策略网络使用 `hidden_state`（512D）在帧间循环传递，这服务于控制决策的时序连贯性。卡车告警系统不需要此机制，每帧独立推理即可。
+这是最简单高效的时序融合方式，且已被 openpilot 验证有效。网络通过学习帧间差异隐式获取运动信息（速度、光流等）。
+
+**策略网络的时序机制不再需要**：openpilot 策略网络通过 `hidden_state`（512D）在 25 帧间传递（GPT 风格 Transformer + `features_buffer [1,25,512]`），服务于控制决策的时序连贯性。卡车告警系统不需要策略网络，因此这套 Transformer 时序机制整体移除，每帧独立推理即可。
 
 ### 4.5 输出头设计
 
-每个输出头独立解码，遵循 openpilot 的 MDN（Mixture Density Network）范式：
+#### 4.5.1 openpilot 实际输出头结构（ONNX 分析）
 
-| 输出头 | 解码方式 | 原始输出维度 | 解析后维度 | 说明 |
-|--------|----------|-------------|------------|------|
-| lane_lines | MDN (mean + log_std) | 4×33×2×2 = 528 | 4×33×2 mean + 4 std | Laplace 分布 |
-| lane_lines_prob | BCE sigmoid | 8 (raw logits) | 4 (取奇数索引) | 二分类概率 |
-| lead | MDN (MHP=2, sel=3) | ~200 | 3×6×4 mean + std | 多假设混合 |
-| lead_prob | BCE sigmoid | 6 | 3 概率 | 前车存在性 |
-| meta_fcw | BCE sigmoid | 10 | 10 | HARD_BRAKE_3/5 各 5 时间点 |
-| pose | MDN | 12 | 6 mean + 6 std | 视觉里程计 |
-| road_transform | MDN | 12 | 6 mean + 6 std | 路面几何 |
-| road_edges | MDN | 2×33×2×2 = 264 | 2×33×2 mean + 2 std | 路缘线 |
-| desire_pred | CE softmax | 32 | 4×8 概率分布 | 意图预测 |
+openpilot 视觉网络的输出头采用 **Summarizer + Hydra** 模式，而非简单的独立 FC：
+
+```python
+# 每个输出头的实际结构（从 ONNX 逆向）
+class HydraHead(nn.Module):
+    """Hydra 输出头：投影 → ResBlock → 最终投影"""
+    def __init__(self, in_dim, hidden_dim, out_dim):
+        super().__init__()
+        self.in_layer = nn.Linear(in_dim, hidden_dim)  # 投影到 head 内部维度
+        self.res_block_a = nn.Sequential(               # ResBlock
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim))
+        self.res_block_b = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim))
+        self.final_layer = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, x):
+        x = F.relu(self.in_layer(x))
+        x = x + self.res_block_a(x)   # 残差
+        x = x + self.res_block_b(x)   # 残差
+        return self.final_layer(F.relu(x))
+```
+
+```python
+# Summarizer：压缩 backbone 输出到固定维度
+class Summarizer(nn.Module):
+    """2048D → 512D 压缩器 + L2 归一化"""
+    def __init__(self):
+        super().__init__()
+        self.fc_in = nn.Linear(2048, 512)
+        self.res_block = ...  # 2 层 ResBlock (512→1024→512)
+        self.fc_mu = nn.Linear(512, 512)
+
+    def forward(self, x):
+        x = F.relu(self.fc_in(x))
+        x = self.res_block(x)
+        x = self.fc_mu(F.relu(x))
+        return F.normalize(x, dim=-1)  # L2 归一化
+```
+
+openpilot 将输出头分为三路（共享 backbone 2048D 特征）：
+
+| 路径 | Summarizer 维度 | Hydra Heads | 总输出 |
+|------|-----------------|-------------|--------|
+| `policy` | 2048→512 | lead(144), lead_prob(3), lane_lines_prob(8), road_edges(264), lane_lines(528) | 947D |
+| `no_bottleneck_policy` | 2048→512 | meta(55), desire_pred(32), road_transform(12), pose(12), wide_from_device_euler(6) | 117D |
+| `summarizer`（顶层） | 2048→512 + L2 Norm | — | 512D (hidden_state) |
+
+每个 Hydra Head 的内部隐藏维度（从 ONNX 确认）：
+
+| Head | in_dim → hidden_dim → out_dim |
+|------|-------------------------------|
+| lead | 512 → 64 → 144 |
+| lead_prob | 512 → 16 → 3 |
+| lane_lines_prob | 512 → 16 → 8 |
+| road_edges | 512 → 32 → 264 |
+| lane_lines | 512 → 64 → 528 |
+| meta | 512 → 64 → 55 |
+| desire_pred | 512 → 32 → 32 |
+| road_transform | 512 → 32 → 12 |
+| pose | 512 → 32 → 12 |
+| wide_from_device_euler | 512 → 32 → 6 |
+
+#### 4.5.2 卡车模型输出头设计
+
+沿用 Summarizer + Hydra 模式，合并为**单路**（无需三路分离，因为不需要 hidden_state 传递给策略网络）：
+
+| Head | hidden_dim | 输出维度 | 解析方式 | 说明 |
+|------|------------|----------|----------|------|
+| lane_lines | 64 | 528 | MDN (mean + log_std) | 4 条车道线 y/z 坐标 |
+| lane_lines_prob | 16 | 8 | BCE sigmoid | 车道线存在概率 |
+| lead | 64 | 144 | MDN (MHP) | 前车轨迹 (x,y,v,a) |
+| lead_prob | 16 | 3 | BCE sigmoid | 前车存在概率 |
+| meta_fcw | 32 | 10 | BCE sigmoid | HARD_BRAKE_3/5 各 5 时间点 |
+| pose | 32 | 12 | MDN | 视觉里程计 |
+| road_transform | 32 | 12 | MDN | 路面几何/高度估计 |
+| road_edges | 32 | 264 | MDN | 路缘线 |
+| desire_pred | 32 | 32 | CE softmax | 意图预测 |
 
 ---
 
@@ -673,11 +858,11 @@ FP32 训练 → PTQ (Post-Training Quantization) INT8 → QAT (量化感知训�
 
 | 指标 | 目标值 | 说明 |
 |------|--------|------|
-| 模型大小（INT8） | < 3 MB | NPU 存储约束 |
+| 模型大小（INT8） | < 5 MB (Small) / < 10 MB (Medium) | NPU 存储约束 |
 | 推理延迟（NPU） | < 30 ms @ 20 FPS | 实时性要求 |
 | 推理延迟（CPU） | < 100 ms | 降级运行 |
-| 输入分辨率 | 512×256 YUV | 与 openpilot 一致 |
-| 输出维度 | ~1016D | 精简后 |
+| 输入 | [1, 12, 128, 256] uint8 | 2 帧 YUV，与 openpilot 一致 |
+| 输出维度 | ~1013D | 精简后（去除 hidden_state 和 wide_from_device_euler） |
 | 精度要求（LDW） | 车道线 y MAE < 0.3m (0-60m) | 核心指标 |
 | 精度要求（FCW） | lead dRel 误差 < 10% (0-100m) | 核心指标 |
 
@@ -688,11 +873,11 @@ Camera (YUV)
     ↓
 Warp (calibration RPY) ← liveCalibration (rpyCalib)
     ↓
-Model Input: [512×256 YUV × 2 frames]    ← 纯图像输入，无需高度参数
+Model Input: [1, 12, 128, 256] uint8    ← 2帧×6ch YUV，纯图像无需高度参数
     ↓
 ┌───────────────────────────────────┐
 │  Model Inference (NPU/CPU)        │
-│  Backbone → Temporal → Heads      │
+│  ConvNeXt → Summarizer → Hydra   │
 └──────────────┬────────────────────┘
                ↓
          Parse Outputs ──→ road_transform.z ──→ calibrationd
@@ -710,10 +895,11 @@ LDW Alert      hardBrake   TTC Check
 
 ### 8.4 NPU 适配注意事项
 
-1. **算子兼容性**：确认目标 NPU 支持所有使用的算子（特别是 ConvGRU/GRU）
-2. **内存布局**：NPU 通常偏好 NHWC 或特定对齐的 NCHW
-3. **动态 shape**：避免动态 shape，所有输入输出形状固定
-4. **后处理**：sigmoid/softmax 等激活函数尽量在 NPU 上完成
+1. **算子兼容性**：ConvNeXt 使用的算子（DWConv、GELU、SE Block）需确认 NPU 支持。GELU 的 Tanh 近似可能需要替换为 ReLU/HardSwish
+2. **7×7 深度卷积**：部分 NPU 对大 kernel DWConv 支持不佳，可能需要拆分为多个 3×3
+3. **内存布局**：NPU 通常偏好 NHWC 或特定对齐的 NCHW
+4. **动态 shape**：模型已是全静态 shape，无需额外处理
+5. **后处理**：sigmoid/softmax 等激活函数尽量在 NPU 上完成
 
 ---
 
@@ -825,11 +1011,11 @@ class TruckAlertManager:
 
 | 阶段 | 时间 | 目标 | 关键交付 |
 |------|------|------|----------|
-| **M1: 基础搭建** | 1-2月 | 数据管线 + 网络骨架 | Carla 多高度数据采集脚本；精简版网络定义（PyTorch）；训练框架搭建 |
+| **M1: 基础搭建** | 1-2月 | 数据管线 + 网络骨架 | Carla 多高度数据采集脚本；基于 ConvNeXt 的精简版网络定义（PyTorch）；训练框架搭建 |
 | **M2: 仿真训练** | 2-4月 | Carla 数据训练达标 | LDW 车道线 MAE < 0.3m (0-60m)；FCW lead 检测 precision > 80% |
 | **M3: 知识蒸馏** | 4-5月 | Teacher → Student 蒸馏 | 乘用车高度精度接近 teacher（>90%）；多高度精度保持 |
 | **M4: 真实数据** | 5-7月 | 卡车实采数据微调 | LDW MAE < 0.5m（真实场景）；FCW lead 误差 < 15% |
-| **M5: 部署优化** | 7-8月 | INT8 量化 + NPU 适配 | 模型 < 3MB；NPU 推理 < 30ms；量化精度损失 < 5% |
+| **M5: 部署优化** | 7-8月 | INT8 量化 + NPU 适配 | Small 方案模型 < 5MB；NPU 推理 < 30ms；量化精度损失 < 5% |
 | **M6: 系统集成** | 8-9月 | 完整 LDW/FCW 系统 | 端到端系统测试；误报率 < 1次/100km；漏报率 < 5% |
 
 ### 验证标准
@@ -841,7 +1027,7 @@ class TruckAlertManager:
 | FCW lead dRel 误差 | < 15% (Carla) | < 15% (真实) | < 15% (真实) |
 | FCW 漏报率 | - | - | < 5% |
 | 推理延迟 (NPU) | - | - | < 30ms |
-| 模型大小 (INT8) | - | - | < 3MB |
+| 模型大小 (INT8) | - | - | < 5MB (Small) |
 
 ---
 
@@ -879,6 +1065,10 @@ class TruckAlertManager:
 | `common/transformations/camera.py` | 75-80 | 坐标系变换矩阵 |
 | `tools/dashcam/run.py` | 68-69 | --camera-height 参数 |
 | `tools/dashcam/run.py` | 89-90 | --eval-lanes 评估 |
+| `selfdrive/modeld/models/driving_vision.onnx` | — | 视觉网络 ONNX (23M params, 45MB fp16) |
+| `selfdrive/modeld/models/driving_policy.onnx` | — | 策略网络 ONNX (6.9M params, 14MB fp16) |
+| `selfdrive/modeld/models/driving_vision_metadata.pkl` | — | 视觉网络输入输出元数据 |
+| `selfdrive/modeld/models/driving_policy_metadata.pkl` | — | 策略网络输入输出元数据 |
 
 ## 附录 B：模型输出维度验证
 
