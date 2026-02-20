@@ -386,43 +386,36 @@ class LaneGroundTruth:
 
     return result
 
-  def _truncate_at_crest(self, points, descent_threshold=1.0):
+  def _truncate_at_crest(self, points):
     """Truncate interpolated points beyond the hill crest.
 
-    On uphills, the road surface beyond the crest is occluded and not visible
-    to the camera. Points past the crest are set to NaN.
+    On uphills where the road rises above the camera (z < 0 in z-down),
+    the crest geometrically occludes all points beyond it. Proof:
+      - Crest at (x_c, z_c), target at (x_p, z_p), with z_c < z_p < 0, x_p > x_c
+      - Line of sight z at x_c: z_los = z_p * x_c / x_p > z_p > z_c
+      - Crest is above the line of sight → occlusion guaranteed.
 
-    In calibrated frame (z-down), the crest is where z reaches its minimum
-    (highest 3D point). Only truncates when there is a significant elevation
-    change (>= descent_threshold) both before and after the crest.
-
-    Args:
-      points: 33x3 array (x, y, z) in calibrated frame (z-down).
-      descent_threshold: minimum elevation change (meters) to detect a real crest.
+    No arbitrary threshold needed: z < 0 is a hard geometric condition
+    that never triggers on flat roads (z ≈ camera_height > 0) or downhills.
     """
     z = points[:, 2]
     valid = ~np.isnan(z)
-    if np.sum(valid) < 3:
+    if np.sum(valid) < 2:
       return
 
     valid_idx = np.where(valid)[0]
     valid_z = z[valid_idx]
 
-    # Running minimum of z (tracks the highest 3D point seen along the path)
-    running_min = np.minimum.accumulate(valid_z)
-    descent = valid_z - running_min
+    # Crest = minimum z (highest 3D point)
+    crest_local = np.argmin(valid_z)
 
-    # First point that has descended significantly below the crest
-    beyond = descent >= descent_threshold
-    if not np.any(beyond):
+    # Only truncate if crest is above the camera
+    # Fixme: 实际上这个场景下并不是所有点都一定可见，这里采用不精确的处理方式保留了所有点。
+    if valid_z[crest_local] >= 0:
       return
 
-    first_beyond = np.argmax(beyond)
-    crest_local = np.argmin(valid_z[:first_beyond + 1])
-
-    # Only truncate if road actually rose before the crest
-    z_max_before = np.max(valid_z[:crest_local + 1]) if crest_local > 0 else valid_z[0]
-    if z_max_before - valid_z[crest_local] < descent_threshold:
+    # Nothing after crest to truncate
+    if crest_local >= len(valid_z) - 1:
       return
 
     # NaN out everything after the crest

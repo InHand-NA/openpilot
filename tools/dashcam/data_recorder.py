@@ -87,7 +87,7 @@ class DataRecorder:
     road_edges, road_edge_probs = self._unpack_road_edges(road_edges_gt)
 
     # Save compressed npz
-    filename = f"{self.saved_count:06d}.npz"
+    filename = f"{self.frame_idx:06d}.npz"
     filepath = os.path.join(self.output_dir, filename)
 
     np.savez_compressed(filepath,
@@ -134,7 +134,7 @@ class DataRecorder:
 
     road_edges, road_edge_probs = self._unpack_road_edges(road_edges_gt)
 
-    filename = f"{self.saved_count:06d}.npz"
+    filename = f"{self.frame_idx:06d}.npz"
     filepath = os.path.join(self.output_dir, filename)
 
     np.savez_compressed(filepath,
