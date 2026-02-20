@@ -381,4 +381,51 @@ class LaneGroundTruth:
     result[:, 1] = np.interp(self.x_idxs, xs, pts[:, 1], left=np.nan, right=np.nan)
     result[:, 2] = np.interp(self.x_idxs, xs, pts[:, 2], left=np.nan, right=np.nan)
 
+    # Truncate beyond hill crest (not visible to camera)
+    self._truncate_at_crest(result)
+
     return result
+
+  def _truncate_at_crest(self, points, descent_threshold=1.0):
+    """Truncate interpolated points beyond the hill crest.
+
+    On uphills, the road surface beyond the crest is occluded and not visible
+    to the camera. Points past the crest are set to NaN.
+
+    In calibrated frame (z-down), the crest is where z reaches its minimum
+    (highest 3D point). Only truncates when there is a significant elevation
+    change (>= descent_threshold) both before and after the crest.
+
+    Args:
+      points: 33x3 array (x, y, z) in calibrated frame (z-down).
+      descent_threshold: minimum elevation change (meters) to detect a real crest.
+    """
+    z = points[:, 2]
+    valid = ~np.isnan(z)
+    if np.sum(valid) < 3:
+      return
+
+    valid_idx = np.where(valid)[0]
+    valid_z = z[valid_idx]
+
+    # Running minimum of z (tracks the highest 3D point seen along the path)
+    running_min = np.minimum.accumulate(valid_z)
+    descent = valid_z - running_min
+
+    # First point that has descended significantly below the crest
+    beyond = descent >= descent_threshold
+    if not np.any(beyond):
+      return
+
+    first_beyond = np.argmax(beyond)
+    crest_local = np.argmin(valid_z[:first_beyond + 1])
+
+    # Only truncate if road actually rose before the crest
+    z_max_before = np.max(valid_z[:crest_local + 1]) if crest_local > 0 else valid_z[0]
+    if z_max_before - valid_z[crest_local] < descent_threshold:
+      return
+
+    # NaN out everything after the crest
+    crest_global = valid_idx[crest_local]
+    points[crest_global + 1:, 1] = np.nan
+    points[crest_global + 1:, 2] = np.nan
