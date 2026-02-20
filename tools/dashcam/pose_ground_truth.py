@@ -1,7 +1,11 @@
 """Ground truth pose (ego motion) and road transform extraction from Carla.
 
-Computes frame-to-frame ego motion increments and road transform
-(camera height as z-component) from Carla vehicle transforms.
+Computes ego velocity and angular velocity from consecutive Carla frames,
+matching openpilot's cameraOdometry message semantics:
+  pose[0:3] = translational velocity (m/s) in calibrated frame [forward, right, down]
+  pose[3:6] = angular velocity (rad/s) in calibrated frame [roll, pitch, yaw]
+
+road_transform[2] = camera height above road surface (meters).
 """
 
 from math import cos, radians, sin
@@ -25,7 +29,7 @@ class PoseGroundTruth:
       dt: time delta between frames in seconds.
 
     Returns:
-      pose: [6] float32 -- translation(x,y,z) + rotation(roll,pitch,yaw) increments
+      pose: [6] float32 -- translational velocity (m/s) + angular velocity (rad/s)
       road_transform: [6] float32 -- [0,0,camera_height, 0,0,0]
     """
     road_transform = np.zeros(6, dtype=np.float32)
@@ -36,27 +40,22 @@ class PoseGroundTruth:
       pose = np.zeros(6, dtype=np.float32)
       return pose, road_transform
 
-    # Translation: world-frame displacement, then rotate into previous frame's body coords
+    # Translation: world-frame displacement, yaw-only rotation into calibrated frame
     dx = vehicle_transform.location.x - self.prev_transform.location.x
     dy = vehicle_transform.location.y - self.prev_transform.location.y
     dz = vehicle_transform.location.z - self.prev_transform.location.z
 
-    # Use previous frame's rotation to express displacement in ego body frame
+    # Use previous frame's yaw only (gravity-aligned calibrated frame)
     yaw = radians(self.prev_transform.rotation.yaw)
-    pitch = radians(self.prev_transform.rotation.pitch)
-    roll = radians(self.prev_transform.rotation.roll)
-
     cy, sy = cos(yaw), sin(yaw)
-    cp, sp = cos(pitch), sin(pitch)
-    cr, sr = cos(roll), sin(roll)
 
-    # R^T @ [dx, dy, dz] (body frame: x=forward, y=left in UE4, z=up in UE4)
-    lx = (cy * cp) * dx + (sy * cp) * dy + (-sp) * dz
-    ly = (cy * sp * sr - sy * cr) * dx + (sy * sp * sr + cy * cr) * dy + (cp * sr) * dz
-    lz = (cy * sp * cr + sy * sr) * dx + (sy * sp * cr - cy * sr) * dy + (cp * cr) * dz
+    # Rz(yaw)^T @ [dx, dy, dz]
+    cal_x = cy * dx + sy * dy
+    cal_y = -sy * dx + cy * dy
+    cal_z = dz  # world z-up preserved
 
-    # Convert to openpilot convention (z-down)
-    trans = np.array([lx, ly, -lz], dtype=np.float32)
+    # Convert to openpilot convention (z-down) and displacement → velocity
+    trans = np.array([cal_x, cal_y, -cal_z], dtype=np.float32) / dt
 
     # Rotation increments (in radians)
     d_roll = radians(vehicle_transform.rotation.roll - self.prev_transform.rotation.roll)
@@ -69,7 +68,8 @@ class PoseGroundTruth:
     elif d_yaw < -np.pi:
       d_yaw += 2 * np.pi
 
-    rot = np.array([d_roll, -d_pitch, -d_yaw], dtype=np.float32)
+    # Convert angle increments → angular velocity (rad/s)
+    rot = np.array([d_roll, -d_pitch, -d_yaw], dtype=np.float32) / dt
 
     pose = np.concatenate([trans, rot])
 

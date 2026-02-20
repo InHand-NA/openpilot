@@ -13,6 +13,7 @@ Output format per frame:
   camera_height: float
   camera_pitch: float (rad)
   camera_yaw: float (rad)
+  rpyCalib: [3] float32 (per-frame [roll, -pitch, -yaw] including vehicle tilt)
   v_ego: float (m/s)
   town: str
 """
@@ -115,10 +116,11 @@ class DataRecorder:
 
     return True
 
-  def record_with_vego(self, rgb, lane_gt, lead_gt, pose_gt, road_transform_gt, v_ego, road_edges_gt=None):
-    """Record one frame with explicit v_ego metadata.
+  def record_with_vego(self, rgb, lane_gt, lead_gt, pose_gt, road_transform_gt, v_ego,
+                       road_edges_gt=None, rpyCalib=None):
+    """Record one frame with explicit v_ego and per-frame rpyCalib.
 
-    Same as record() but includes v_ego in the saved data.
+    Same as record() but includes v_ego and rpyCalib in the saved data.
     """
     self.frame_idx += 1
 
@@ -148,6 +150,7 @@ class DataRecorder:
       camera_height=np.float32(self.camera_height),
       camera_pitch=np.float32(self.camera_pitch),
       camera_yaw=np.float32(self.camera_yaw),
+      rpyCalib=np.asarray(rpyCalib, dtype=np.float32),
       v_ego=np.float32(v_ego),
       town=np.array(self.town),
     )

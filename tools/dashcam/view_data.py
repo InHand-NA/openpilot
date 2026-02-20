@@ -409,10 +409,8 @@ def main():
     frame_rgb = data['frame_rgb']   # (H, W, 3) RGB
     img = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-    camera_pitch = float(data.get('camera_pitch', 0))
-    camera_yaw = float(data.get('camera_yaw', 0))
     camera_height = float(data.get('camera_height', 1.2))
-    rpyCalib = np.array([0.0, -camera_pitch, -camera_yaw])
+    rpyCalib = np.array(data['rpyCalib'], dtype=np.float64)
 
     # Quality warnings
     warnings = _check_warnings(data)

@@ -311,19 +311,14 @@ class LaneGroundTruth:
     return np.array(points, dtype=np.float32) if points else np.empty((0, 3), dtype=np.float32)
 
   def _world_to_calibrated(self, wx, wy, wz, vehicle_transform):
-    """Convert world point to calibrated frame (x=forward, y=right, z=down).
+    """Convert world point to gravity-aligned calibrated frame (x=forward, y=right, z=down).
 
     Steps:
-      1. Compute relative position in world frame.
-      2. Apply inverse vehicle rotation (R^T) to get body frame.
-      3. Subtract camera offset in body frame.
+      1. Compute camera world position using full vehicle rotation (camera is physically on the tilted car).
+      2. Compute delta from camera to target point in world frame.
+      3. Apply yaw-only rotation (gravity-aligned: no pitch/roll).
       4. Flip z axis (Carla z-up -> openpilot z-down).
     """
-    dx = wx - vehicle_transform.location.x
-    dy = wy - vehicle_transform.location.y
-    dz = wz - vehicle_transform.location.z
-
-    # Vehicle rotation (UE4 convention: yaw=Z, pitch=Y, roll=X)
     yaw = radians(vehicle_transform.rotation.yaw)
     pitch = radians(vehicle_transform.rotation.pitch)
     roll = radians(vehicle_transform.rotation.roll)
@@ -332,17 +327,26 @@ class LaneGroundTruth:
     cp, sp = cos(pitch), sin(pitch)
     cr, sr = cos(roll), sin(roll)
 
-    # R = Rz(yaw) @ Ry(pitch) @ Rx(roll), local = R^T @ [dx, dy, dz]
-    lx = (cy * cp) * dx + (sy * cp) * dy + (-sp) * dz
-    ly = (cy * sp * sr - sy * cr) * dx + (sy * sp * sr + cy * cr) * dy + (cp * sr) * dz
-    lz = (cy * sp * cr + sy * sr) * dx + (sy * sp * cr - cy * sr) * dy + (cp * cr) * dz
+    # Camera world position: vehicle_pos + R_full @ [cam_x, 0, cam_h]
+    # R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    cam_x = self.camera_offset_x
+    cam_h = self.camera_height
+    cam_wx = vehicle_transform.location.x + (cy * cp) * cam_x + (cy * sp * cr + sy * sr) * cam_h
+    cam_wy = vehicle_transform.location.y + (sy * cp) * cam_x + (sy * sp * cr - cy * sr) * cam_h
+    cam_wz = vehicle_transform.location.z + (-sp) * cam_x + (cp * cr) * cam_h
 
-    # Subtract camera offset in body frame
-    lx -= self.camera_offset_x
-    lz -= self.camera_height
+    # Delta from camera to target in world frame
+    dx = wx - cam_wx
+    dy = wy - cam_wy
+    dz = wz - cam_wz
+
+    # Yaw-only rotation: Rz(yaw)^T @ [dx, dy, dz]
+    cal_x = cy * dx + sy * dy
+    cal_y = -sy * dx + cy * dy
+    cal_z = dz  # world z-up preserved
 
     # Convert z-up (UE4/Carla) to z-down (openpilot calibrated)
-    return (lx, ly, -lz)
+    return (cal_x, cal_y, -cal_z)
 
   def _interpolate_at_x_idxs(self, boundary_points):
     """Interpolate boundary points at X_IDXS distances.

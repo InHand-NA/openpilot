@@ -85,7 +85,7 @@ def main():
   parser.add_argument('--road-only', action='store_true',
                       help='Single narrow camera mode (modeld uses fcam intrinsics for main input)')
   parser.add_argument('--height-comp', action='store_true',
-                      help='Enable lane line height compensation')
+                      help='Enable lane line height compensation, do not use this functionality')
   parser.add_argument('--eval-lanes', action='store_true',
                       help='Enable lane line ground truth evaluation')
   parser.add_argument('--eval-interval', type=int, default=1,
@@ -328,9 +328,19 @@ def main():
         rec_lead_gt = lead_gt_extractor.get_lead_vehicles(veh_transform, v_ego)
         rec_pose, rec_road_transform = pose_gt_extractor.update(veh_transform)
 
+        # Per-frame rpyCalib: camera mounting angles + vehicle tilt
+        veh_pitch_rad = np.deg2rad(veh_transform.rotation.pitch)
+        veh_roll_rad = np.deg2rad(veh_transform.rotation.roll)
+        frame_rpyCalib = np.array([
+          veh_roll_rad,
+          -(np.deg2rad(pitch_deg) + veh_pitch_rad),
+          -np.deg2rad(yaw_deg),
+        ], dtype=np.float32)
+
         recorder.record_with_vego(display_rgb, rec_lane_gt, rec_lead_gt,
                                   rec_pose, rec_road_transform, v_ego,
-                                  road_edges_gt=rec_road_edges_gt)
+                                  road_edges_gt=rec_road_edges_gt,
+                                  rpyCalib=frame_rpyCalib)
 
       # Lane GT evaluation (non-recording path)
       gt_lines = None

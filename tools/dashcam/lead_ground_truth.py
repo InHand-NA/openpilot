@@ -151,14 +151,10 @@ class LeadGroundTruth:
     return lead_data, lead_probs
 
   def _world_to_calibrated(self, wx, wy, wz, vehicle_transform):
-    """Convert world point to calibrated frame (x=forward, y=right, z=down).
+    """Convert world point to gravity-aligned calibrated frame (x=forward, y=right, z=down).
 
     Same coordinate transform as LaneGroundTruth._world_to_calibrated.
     """
-    dx = wx - vehicle_transform.location.x
-    dy = wy - vehicle_transform.location.y
-    dz = wz - vehicle_transform.location.z
-
     yaw = radians(vehicle_transform.rotation.yaw)
     pitch = radians(vehicle_transform.rotation.pitch)
     roll = radians(vehicle_transform.rotation.roll)
@@ -167,32 +163,36 @@ class LeadGroundTruth:
     cp, sp = cos(pitch), sin(pitch)
     cr, sr = cos(roll), sin(roll)
 
-    # R = Rz(yaw) @ Ry(pitch) @ Rx(roll), local = R^T @ [dx, dy, dz]
-    lx = (cy * cp) * dx + (sy * cp) * dy + (-sp) * dz
-    ly = (cy * sp * sr - sy * cr) * dx + (sy * sp * sr + cy * cr) * dy + (cp * sr) * dz
-    lz = (cy * sp * cr + sy * sr) * dx + (sy * sp * cr - cy * sr) * dy + (cp * cr) * dz
+    # Camera world position: vehicle_pos + R_full @ [cam_x, 0, cam_h]
+    cam_x = self.camera_offset_x
+    cam_h = self.camera_height
+    cam_wx = vehicle_transform.location.x + (cy * cp) * cam_x + (cy * sp * cr + sy * sr) * cam_h
+    cam_wy = vehicle_transform.location.y + (sy * cp) * cam_x + (sy * sp * cr - cy * sr) * cam_h
+    cam_wz = vehicle_transform.location.z + (-sp) * cam_x + (cp * cr) * cam_h
 
-    lx -= self.camera_offset_x
-    lz -= self.camera_height
+    # Delta from camera to target in world frame
+    dx = wx - cam_wx
+    dy = wy - cam_wy
+    dz = wz - cam_wz
 
-    return (lx, ly, -lz)
+    # Yaw-only rotation: Rz(yaw)^T @ [dx, dy, dz]
+    cal_x = cy * dx + sy * dy
+    cal_y = -sy * dx + cy * dy
+    cal_z = dz
+
+    return (cal_x, cal_y, -cal_z)
 
   def _velocity_to_calibrated(self, vx, vy, vz, vehicle_transform):
-    """Convert world-frame velocity vector to calibrated frame.
+    """Convert world-frame velocity vector to gravity-aligned calibrated frame.
 
-    Only applies rotation (no translation offset for velocities).
+    Only applies yaw rotation (no pitch/roll, no translation offset).
     """
     yaw = radians(vehicle_transform.rotation.yaw)
-    pitch = radians(vehicle_transform.rotation.pitch)
-    roll = radians(vehicle_transform.rotation.roll)
-
     cy, sy = cos(yaw), sin(yaw)
-    cp, sp = cos(pitch), sin(pitch)
-    cr, sr = cos(roll), sin(roll)
 
-    # R^T @ [vx, vy, vz]
-    lx = (cy * cp) * vx + (sy * cp) * vy + (-sp) * vz
-    ly = (cy * sp * sr - sy * cr) * vx + (sy * sp * sr + cy * cr) * vy + (cp * sr) * vz
-    lz = (cy * sp * cr + sy * sr) * vx + (sy * sp * cr - cy * sr) * vy + (cp * cr) * vz
+    # Rz(yaw)^T @ [vx, vy, vz]
+    cal_vx = cy * vx + sy * vy
+    cal_vy = -sy * vx + cy * vy
+    cal_vz = vz
 
-    return (lx, ly, -lz)
+    return (cal_vx, cal_vy, -cal_vz)
