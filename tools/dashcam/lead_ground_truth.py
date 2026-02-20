@@ -28,7 +28,7 @@ class LeadGroundTruth:
   # Validity constraints matching openpilot downstream processing
   MIN_FORWARD_DIST = 2.0    # meters — closer vehicles are mostly occluded
   MAX_FORWARD_DIST = 200.0  # meters — beyond model's useful range
-  MAX_LATERAL_DIST = 10.0   # meters — exclude irrelevant far-lateral vehicles
+  MAX_LATERAL_DIST = 4.0    # meters — exclude vehicles in adjacent lanes
   ACCEL_CLIP_MIN = -10.0    # m/s² — matches long_mpc.py clipping
   ACCEL_CLIP_MAX = 5.0      # m/s² — matches long_mpc.py clipping
 
@@ -82,7 +82,7 @@ class LeadGroundTruth:
       if cal_x < self.MIN_FORWARD_DIST or cal_x > self.MAX_FORWARD_DIST:
         continue
 
-      # 2. Lateral hard limit — exclude irrelevant far-lateral vehicles
+      # 2. Lateral distance — exclude vehicles in adjacent lanes
       if abs(cal_y) > self.MAX_LATERAL_DIST:
         continue
 
@@ -196,3 +196,4 @@ class LeadGroundTruth:
     cal_vz = vz
 
     return (cal_vx, cal_vy, -cal_vz)
+
