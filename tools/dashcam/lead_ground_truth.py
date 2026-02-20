@@ -28,7 +28,8 @@ class LeadGroundTruth:
   # Validity constraints matching openpilot downstream processing
   MIN_FORWARD_DIST = 2.0    # meters — closer vehicles are mostly occluded
   MAX_FORWARD_DIST = 200.0  # meters — beyond model's useful range
-  MAX_LATERAL_DIST = 4.0    # meters — exclude vehicles in adjacent lanes
+  MAX_LATERAL_DIST = 4.0    # meters — coarse lateral filter for candidate collection
+  EGO_LANE_HALF_WIDTH = 2.0 # meters — fine lateral filter for lead selection per time offset
   ACCEL_CLIP_MIN = -10.0    # m/s² — matches long_mpc.py clipping
   ACCEL_CLIP_MAX = 5.0      # m/s² — matches long_mpc.py clipping
 
@@ -110,7 +111,7 @@ class LeadGroundTruth:
 
       forward_vehicles.append({
         'x': cal_x, 'y': cal_y, 'z': cal_z,
-        'v_rel': v_rel, 'vx': vx, 'ax': ax,
+        'v_rel': v_rel, 'vx': vx, 'vy': vy, 'ax': ax,
         'dist': cal_x,
       })
 
@@ -120,16 +121,17 @@ class LeadGroundTruth:
     # Sort by forward distance
     forward_vehicles.sort(key=lambda v: v['dist'])
 
-    # For each selection offset, find the closest vehicle at that future time
+    # For each selection offset, find the closest vehicle that will be in ego lane at that time.
+    # This captures both same-lane leads (t=0) and cut-in vehicles from adjacent lanes (t=2s/4s).
     for sel_idx, t_offset in enumerate(LEAD_T_OFFSETS):
-      # Find the closest vehicle that would be ahead at t_offset
       best = None
+      best_future_x = float('inf')
       for v in forward_vehicles:
-        # Predict position at t_offset using constant velocity
         future_x = v['x'] + v['v_rel'] * t_offset
-        if future_x > 0:
+        future_y = v['y'] + v['vy'] * t_offset
+        if future_x > 0 and abs(future_y) < self.EGO_LANE_HALF_WIDTH and future_x < best_future_x:
           best = v
-          break
+          best_future_x = future_x
 
       if best is None:
         continue
@@ -141,7 +143,7 @@ class LeadGroundTruth:
       # regardless of which t_offset was used for vehicle selection.
       for t_idx, t in enumerate(LEAD_T_IDXS):
         pred_x = best['x'] + best['v_rel'] * t + 0.5 * best['ax'] * t ** 2
-        pred_y = best['y']  # assume lateral position stays constant
+        pred_y = best['y'] + best['vy'] * t
         pred_v = max(0.0, best['vx'] + best['ax'] * t)  # absolute speed, non-negative
         lead_data[sel_idx, t_idx, 0] = pred_x       # x: forward distance (relative to ego)
         lead_data[sel_idx, t_idx, 1] = pred_y       # y: lateral offset
