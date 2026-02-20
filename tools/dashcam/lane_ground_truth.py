@@ -275,7 +275,7 @@ class LaneGroundTruth:
     # Assemble: backwards (reversed to maintain spatial order) + forward
     wps = list(reversed(back_wps))
 
-    # Sample forwards
+    # Sample forwards (stop at junction boundary — no lane markings inside)
     wp = start_wp
     total_dist = 0.0
     while total_dist < max_dist:
@@ -284,6 +284,8 @@ class LaneGroundTruth:
       if not next_wps:
         break
       wp = next_wps[0]
+      if wp.is_junction:
+        break
       total_dist += step
     return wps
 
