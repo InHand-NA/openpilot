@@ -15,7 +15,8 @@ class DashcamCarlaWorld:
   def __init__(self, host='127.0.0.1', port=2000, town='Town04_Opt',
                spawn_point=16, random_spawn=False, camera_pitch_deg=5.0, camera_yaw_deg=3.0,
                camera_height=1.13, high_quality=False, num_npc=20,
-               wide_road_only=False, road_only=False):
+               wide_road_only=False, road_only=False,
+               speed_range=(20.0, 70.0), speed_interval=(8.0, 20.0)):
     import carla
 
     client = carla.Client(host, port)
@@ -129,8 +130,12 @@ class DashcamCarlaWorld:
     self.tm.set_respawn_dormant_vehicles(True)
     self.tm.set_boundaries_respawn_dormant_vehicles(25.0, 100.0)
 
+    # Dynamic speed control
+    self.speed_range = speed_range
+    self.speed_interval = speed_interval
+    speed_kmh = random.uniform(*self.speed_range)
+
     # Enable autopilot with retry
-    speed_kmh = 35.0 * 1.60934
     max_retries = 3
     for attempt in range(max_retries):
       self.vehicle.set_autopilot(True, self.tm.get_port())
@@ -167,6 +172,8 @@ class DashcamCarlaWorld:
 
     self.tick_count = 0
     self.tick_batch_start = time.monotonic()
+    interval = random.uniform(*self.speed_interval)
+    self._next_speed_change_tick = int(interval / self.sim_delta)
 
   def _carla_image_to_rgb(self, image):
     rgb = np.frombuffer(image.raw_data, dtype=np.dtype("uint8"))
@@ -267,10 +274,20 @@ class DashcamCarlaWorld:
     v = self.vehicle.get_velocity()
     return np.sqrt(v.x**2 + v.y**2 + v.z**2)
 
+  def _update_speed(self):
+    """Periodically change ego target speed for diverse training data."""
+    if self.tick_count < self._next_speed_change_tick:
+      return
+    new_speed = random.uniform(*self.speed_range)
+    self.tm.set_desired_speed(self.vehicle, new_speed)
+    interval = random.uniform(*self.speed_interval)
+    self._next_speed_change_tick = self.tick_count + int(interval / self.sim_delta)
+
   def tick(self):
     """Advance simulation by one step."""
     self.world.tick()
     self.tick_count += 1
+    self._update_speed()
     delta = self.world.get_settings().fixed_delta_seconds
     batch = max(1, int(2.0 / delta))  # ~2s of sim time per log
     if self.tick_count % batch == 0:

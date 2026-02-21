@@ -96,6 +96,9 @@ def main():
                       help='Enable training data recording, save to specified directory')
   parser.add_argument('--record-skip', type=int, default=1,
                       help='Save every N-th frame when recording (default: 1)')
+  parser.add_argument('--speed-range', type=float, nargs=2, default=[20.0, 70.0],
+                      metavar=('MIN', 'MAX'),
+                      help='Ego target speed range in km/h (default: 20 70)')
   parser.add_argument('--record-only', action='store_true',
                       help='Record mode: disable modeld and visualization, only collect GT data')
   args = parser.parse_args()
@@ -188,7 +191,8 @@ def main():
     camera_pitch_deg=pitch_deg, camera_yaw_deg=yaw_deg,
     camera_height=camera_height,
     high_quality=args.high_quality, num_npc=args.num_npc,
-    wide_road_only=args.wide_road_only, road_only=args.road_only)
+    wide_road_only=args.wide_road_only, road_only=args.road_only,
+    speed_range=tuple(args.speed_range))
 
   # Lane GT evaluation
   gt_extractor = None
