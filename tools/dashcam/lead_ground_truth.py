@@ -30,6 +30,8 @@ class LeadGroundTruth:
   MAX_FORWARD_DIST = 200.0  # meters — beyond model's useful range
   MAX_LATERAL_DIST = 4.0    # meters — coarse lateral filter for candidate collection
   EGO_LANE_HALF_WIDTH = 2.0 # meters — fine lateral filter for lead selection per time offset
+  MIN_HEIGHT = -1.0         # meters (cal_z, z-down) — allow uphill vehicles slightly above camera
+  MAX_HEIGHT = 5.0          # meters (cal_z, z-down) — reject overpass vehicles far above
   ACCEL_CLIP_MIN = -10.0    # m/s² — matches long_mpc.py clipping
   ACCEL_CLIP_MAX = 5.0      # m/s² — matches long_mpc.py clipping
 
@@ -87,7 +89,11 @@ class LeadGroundTruth:
       if abs(cal_y) > self.MAX_LATERAL_DIST:
         continue
 
-      # 3. Image visibility — vehicle center must project within camera FOV
+      # 3. Height constraint — exclude vehicles on overpasses or underpasses
+      if cal_z < self.MIN_HEIGHT or cal_z > self.MAX_HEIGHT:
+        continue
+
+      # 4. Image visibility — vehicle center must project within camera FOV
       #    Simplified projection (calibrated ≈ device frame):
       #    view_x = cal_y, view_y = cal_z, view_z = cal_x
       u = self.focal_length * (cal_y / cal_x) + self.cx
