@@ -342,10 +342,20 @@ def main():
           -np.deg2rad(yaw_deg),
         ], dtype=np.float32)
 
+        world_pose = np.array([
+          veh_transform.location.x,
+          veh_transform.location.y,
+          veh_transform.location.z,
+          veh_transform.rotation.roll,
+          veh_transform.rotation.pitch,
+          veh_transform.rotation.yaw,
+        ], dtype=np.float32)
+
         recorder.record_with_vego(display_rgb, rec_lane_gt, rec_lead_gt,
                                   rec_pose, rec_road_transform, v_ego,
                                   road_edges_gt=rec_road_edges_gt,
-                                  rpyCalib=frame_rpyCalib)
+                                  rpyCalib=frame_rpyCalib,
+                                  world_pose=world_pose)
 
       # Lane GT evaluation (non-recording path)
       gt_lines = None
