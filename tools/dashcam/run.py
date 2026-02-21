@@ -215,13 +215,15 @@ def main():
     lead_gt_extractor = LeadGroundTruth(world.get_world(), world.get_vehicle(),
                                          camera_offset_x=0.8, camera_height=camera_height)
     pose_gt_extractor = PoseGroundTruth(camera_offset_x=0.8, camera_height=camera_height)
+    clip_metadata = world.get_clip_metadata(args.town)
     recorder = DataRecorder(
       output_dir=args.record,
       town=args.town,
       camera_height=camera_height,
       camera_pitch=np.deg2rad(pitch_deg),
       camera_yaw=np.deg2rad(yaw_deg),
-      skip_frames=args.record_skip)
+      skip_frames=args.record_skip,
+      metadata=clip_metadata)
     print("[RECORD] GT extractors initialized (lane + lead + pose)")
 
   # Camera intrinsics and visualizer (skip in record-only mode)

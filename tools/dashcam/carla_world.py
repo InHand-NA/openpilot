@@ -30,14 +30,17 @@ class DashcamCarlaWorld:
     settings.fixed_delta_seconds = 0.025
     settings.actor_active_distance = 150.0
     world.apply_settings(settings)
+    self.weather_preset = "ClearSunset"
     world.set_weather(carla.WeatherParameters.ClearSunset)
 
     self.world = world
+    self.sim_delta = settings.fixed_delta_seconds
     world_map = world.get_map()
     blueprint_library = world.get_blueprint_library()
 
     # Spawn ego vehicle
     vehicle_bp = blueprint_library.filter('vehicle.tesla.*')[1]
+    self.vehicle_type = vehicle_bp.id
     vehicle_bp.set_attribute('role_name', 'hero')
     spawn_points = world_map.get_spawn_points()
     if random_spawn:
@@ -68,7 +71,11 @@ class DashcamCarlaWorld:
 
     self.carla_objects = []
 
-    # Camera transform
+    # Camera transform (extrinsics relative to vehicle origin)
+    self.camera_offset_x = 0.8
+    self.camera_height = camera_height
+    self.camera_pitch_deg = camera_pitch_deg
+    self.camera_yaw_deg = camera_yaw_deg
     transform = carla.Transform(
       carla.Location(x=0.8, z=camera_height),
       carla.Rotation(pitch=camera_pitch_deg, yaw=camera_yaw_deg))
@@ -84,27 +91,37 @@ class DashcamCarlaWorld:
       blueprint.set_attribute('image_size_x', str(W))
       blueprint.set_attribute('image_size_y', str(H))
       blueprint.set_attribute('fov', str(fov))
-      blueprint.set_attribute('sensor_tick', str(1 / 20))
+      blueprint.set_attribute('sensor_tick', str(1.0 / sensor_fps))
       if not high_quality:
         blueprint.set_attribute('enable_postprocess_effects', 'False')
       camera = world.spawn_actor(blueprint, transform, attach_to=self.vehicle)
       camera.listen(callback)
       return camera
 
+    sensor_fps = 20.0
+    def cam_info(fov):
+      focal = (W / 2.0) / np.tan(np.radians(fov / 2.0))
+      return {"fov_deg": fov, "width": W, "height": H, "focal_length": round(focal, 1), "fps": sensor_fps}
+
     self.wide_road_only = wide_road_only
     self.road_only = road_only
+    self.cameras_info = {}
     if wide_road_only:
       self.road_camera = None
       self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)
       self.carla_objects = [self.wide_road_camera, self.vehicle]
+      self.cameras_info["wide_road"] = cam_info(120)
     elif road_only:
       self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
       self.wide_road_camera = None
       self.carla_objects = [self.road_camera, self.vehicle]
+      self.cameras_info["road"] = cam_info(40)
     else:
       self.road_camera = create_camera(fov=40, callback=self._cam_callback_road)
       self.wide_road_camera = create_camera(fov=120, callback=self._cam_callback_wide)
       self.carla_objects = [self.road_camera, self.wide_road_camera, self.vehicle]
+      self.cameras_info["road"] = cam_info(40)
+      self.cameras_info["wide_road"] = cam_info(120)
 
     # Traffic manager
     self.tm = client.get_trafficmanager()
@@ -188,6 +205,58 @@ class DashcamCarlaWorld:
   def get_vehicle(self):
     """Return the ego vehicle actor."""
     return self.vehicle
+
+  def get_clip_metadata(self, town):
+    """Return clip-level metadata dict for JSON serialization."""
+    weather = self.world.get_weather()
+    sp = self.spawn_point
+    return {
+      "town": town,
+      "weather": {
+        "preset": self.weather_preset,
+        "sun_altitude_angle": weather.sun_altitude_angle,
+        "sun_azimuth_angle": weather.sun_azimuth_angle,
+        "cloudiness": weather.cloudiness,
+        "precipitation": weather.precipitation,
+        "fog_density": weather.fog_density,
+      },
+      "vehicle": {
+        "type": self.vehicle_type,
+        "spawn_location": {
+          "x": sp.location.x,
+          "y": sp.location.y,
+          "z": sp.location.z,
+        },
+        "spawn_rotation": {
+          "pitch": sp.rotation.pitch,
+          "yaw": sp.rotation.yaw,
+          "roll": sp.rotation.roll,
+        },
+      },
+      "cameras": {
+        name: {
+          "fov_deg": info["fov_deg"],
+          "image_width": info["width"],
+          "image_height": info["height"],
+          "focal_length": info["focal_length"],
+          "fps": info["fps"],
+          "extrinsics": {
+            "x": self.camera_offset_x,
+            "y": 0.0,
+            "z": self.camera_height,
+            "pitch_deg": self.camera_pitch_deg,
+            "yaw_deg": self.camera_yaw_deg,
+            "roll_deg": 0.0,
+          },
+        }
+        for name, info in self.cameras_info.items()
+      },
+      "simulation": {
+        "fixed_delta_seconds": self.sim_delta,
+        "fps": 1.0 / self.sim_delta,
+        "num_npc_vehicles": len(self.npc_vehicles),
+      },
+    }
 
   def get_vehicle_transform(self):
     """Return the vehicle's carla.Transform."""

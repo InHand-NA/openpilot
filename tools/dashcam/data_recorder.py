@@ -18,6 +18,7 @@ Output format per frame:
   town: str
 """
 
+import json
 import os
 import time
 
@@ -27,7 +28,8 @@ import numpy as np
 class DataRecorder:
   """Record training data frames to disk as .npz files."""
 
-  def __init__(self, output_dir, town, camera_height, camera_pitch=0.0, camera_yaw=0.0, skip_frames=1):
+  def __init__(self, output_dir, town, camera_height, camera_pitch=0.0, camera_yaw=0.0,
+               skip_frames=1, metadata=None):
     """
     Args:
       output_dir: directory to save .npz files.
@@ -36,6 +38,7 @@ class DataRecorder:
       camera_pitch: camera pitch in radians.
       camera_yaw: camera yaw in radians.
       skip_frames: save every N-th frame (1 = save all).
+      metadata: dict of clip-level metadata to save as clip_info.json.
     """
     self.output_dir = output_dir
     self.town = town
@@ -50,6 +53,11 @@ class DataRecorder:
     self.start_time = time.monotonic()
 
     os.makedirs(output_dir, exist_ok=True)
+    if metadata is not None:
+      info_path = os.path.join(output_dir, "clip_info.json")
+      with open(info_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+      print("[DataRecorder] Saved clip_info.json")
     print(f"[DataRecorder] Saving to {output_dir} (skip={skip_frames})")
 
   def record(self, rgb, lane_gt, lead_gt, pose_gt, road_transform_gt, road_edges_gt=None):
