@@ -13,7 +13,7 @@ class DashcamCarlaWorld:
   """Standalone Carla world manager, no openpilot runtime dependency."""
 
   def __init__(self, host='127.0.0.1', port=2000, town='Town04_Opt',
-               spawn_point=16, camera_pitch_deg=5.0, camera_yaw_deg=3.0,
+               spawn_point=16, random_spawn=False, camera_pitch_deg=5.0, camera_yaw_deg=3.0,
                camera_height=1.13, high_quality=False, num_npc=20,
                wide_road_only=False, road_only=False):
     import carla
@@ -40,10 +40,25 @@ class DashcamCarlaWorld:
     vehicle_bp = blueprint_library.filter('vehicle.tesla.*')[1]
     vehicle_bp.set_attribute('role_name', 'hero')
     spawn_points = world_map.get_spawn_points()
-    assert len(spawn_points) > spawn_point, \
-      f'No spawn point {spawn_point}, try 0-{len(spawn_points)-1}'
-    self.spawn_point = spawn_points[spawn_point]
-    self.vehicle = world.spawn_actor(vehicle_bp, self.spawn_point)
+    if random_spawn:
+      waypoints = world_map.generate_waypoints(2.0)
+      random.shuffle(waypoints)
+      self.spawn_point = None
+      for wp in waypoints:
+        sp = carla.Transform(wp.transform.location + carla.Location(z=0.5), wp.transform.rotation)
+        vehicle = world.try_spawn_actor(vehicle_bp, sp)
+        if vehicle is not None:
+          self.spawn_point = sp
+          self.vehicle = vehicle
+          print(f"[RandomSpawn] Spawned at road={wp.road_id} lane={wp.lane_id} "
+                + f"loc=({sp.location.x:.1f}, {sp.location.y:.1f}, {sp.location.z:.1f})")
+          break
+      assert self.spawn_point is not None, "Failed to spawn at any random waypoint"
+    else:
+      assert len(spawn_points) > spawn_point, \
+        f'No spawn point {spawn_point}, try 0-{len(spawn_points)-1}'
+      self.spawn_point = spawn_points[spawn_point]
+      self.vehicle = world.spawn_actor(vehicle_bp, self.spawn_point)
 
     physics_control = self.vehicle.get_physics_control()
     physics_control.mass = 2326

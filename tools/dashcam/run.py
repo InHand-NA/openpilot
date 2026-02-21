@@ -61,6 +61,8 @@ def main():
   parser.add_argument('--port', type=int, default=2000)
   parser.add_argument('--town', default='Town04_Opt')
   parser.add_argument('--spawn-point', type=int, default=16)
+  parser.add_argument('--random-spawn', action='store_true',
+                      help='Spawn ego at a random waypoint (overrides --spawn-point)')
   parser.add_argument('--camera-pitch', type=float, default=5.0,
                       help='Camera pitch in degrees')
   parser.add_argument('--camera-yaw', type=float, default=3.0,
@@ -182,7 +184,7 @@ def main():
   from openpilot.tools.dashcam.carla_world import DashcamCarlaWorld
   world = DashcamCarlaWorld(
     host=args.host, port=args.port, town=args.town,
-    spawn_point=args.spawn_point,
+    spawn_point=args.spawn_point, random_spawn=args.random_spawn,
     camera_pitch_deg=pitch_deg, camera_yaw_deg=yaw_deg,
     camera_height=camera_height,
     high_quality=args.high_quality, num_npc=args.num_npc,
