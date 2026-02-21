@@ -48,12 +48,14 @@ class LeadGroundTruth:
     self.cx = image_w / 2.0
     self.cy = image_h / 2.0
 
-  def get_lead_vehicles(self, vehicle_transform, ego_velocity):
+  def get_lead_vehicles(self, vehicle_transform, ego_velocity, road_edges=None):
     """Extract up to 3 lead vehicle GT in calibrated frame.
 
     Args:
       vehicle_transform: carla.Transform of the ego vehicle.
       ego_velocity: scalar speed of ego vehicle in m/s.
+      road_edges: (edges_list, edge_probs) from LaneGroundTruth, used to reject
+                  vehicles separated from ego by a road edge (e.g. highway median).
 
     Returns:
       lead_data: [3, 6, 4] float32 -- 3 selections x 6 time points x 4 dims (x, y, v_abs, a)
@@ -61,6 +63,9 @@ class LeadGroundTruth:
     """
     lead_data = np.zeros((3, 6, 4), dtype=np.float32)
     lead_probs = np.zeros(3, dtype=np.float32)
+
+    # Build road edge polylines for separation check
+    edge_polylines = self._build_edge_polylines(road_edges)
 
     # Get all vehicles in the world, exclude ego
     actors = self.carla_world.get_actors().filter('vehicle.*')
@@ -93,7 +98,11 @@ class LeadGroundTruth:
       if cal_z < self.MIN_HEIGHT or cal_z > self.MAX_HEIGHT:
         continue
 
-      # 4. Image visibility — vehicle center must project within camera FOV
+      # 4. Road edge separation — exclude vehicles on the other side of a road edge
+      if self._separated_by_edge(cal_x, cal_y, edge_polylines):
+        continue
+
+      # 5. Image visibility — vehicle center must project within camera FOV
       #    Simplified projection (calibrated ≈ device frame):
       #    view_x = cal_y, view_y = cal_z, view_z = cal_x
       u = self.focal_length * (cal_y / cal_x) + self.cx
@@ -204,4 +213,41 @@ class LeadGroundTruth:
     cal_vz = vz
 
     return (cal_vx, cal_vy, -cal_vz)
+
+  @staticmethod
+  def _build_edge_polylines(road_edges):
+    """Build (x, y) polylines for each valid road edge."""
+    if road_edges is None or road_edges[0] is None:
+      return []
+    edges_list, edge_probs = road_edges
+    polylines = []
+    for edge, prob in zip(edges_list, edge_probs, strict=True):
+      if prob < 0.5:
+        continue
+      valid = ~np.isnan(edge[:, 0]) & ~np.isnan(edge[:, 1])
+      if np.sum(valid) < 2:
+        continue
+      ex = edge[valid, 0]
+      ey = edge[valid, 1]
+      order = np.argsort(ex)
+      polylines.append((ex[order], ey[order]))
+    return polylines
+
+  @staticmethod
+  def _separated_by_edge(cal_x, cal_y, edge_polylines):
+    """Check if the line segment from ego (0,0) to NPC (cal_x, cal_y) crosses any road edge polyline."""
+    for ex, ey in edge_polylines:
+      for i in range(len(ex) - 1):
+        # Cross product test for segment intersection
+        # Segment A: (0, 0) → (cal_x, cal_y)
+        # Segment B: (ex[i], ey[i]) → (ex[i+1], ey[i+1])
+        bx0, by0 = float(ex[i]), float(ey[i])
+        bx1, by1 = float(ex[i + 1]), float(ey[i + 1])
+        d1 = (bx1 - bx0) * (0.0 - by0) - (by1 - by0) * (0.0 - bx0)
+        d2 = (bx1 - bx0) * (cal_y - by0) - (by1 - by0) * (cal_x - bx0)
+        d3 = cal_x * (by0 - 0.0) - cal_y * (bx0 - 0.0)
+        d4 = cal_x * (by1 - 0.0) - cal_y * (bx1 - 0.0)
+        if d1 * d2 < 0 and d3 * d4 < 0:
+          return True
+    return False
 
