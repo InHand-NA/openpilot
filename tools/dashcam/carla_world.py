@@ -253,7 +253,7 @@ class DashcamCarlaWorld:
       },
       "simulation": {
         "fixed_delta_seconds": self.sim_delta,
-        "fps": 1.0 / self.sim_delta,
+        "tick_rate": 1.0 / self.sim_delta,
         "num_npc_vehicles": len(self.npc_vehicles),
       },
     }
