@@ -240,6 +240,19 @@ class LaneGroundTruth:
     fwd_b = wp_b.transform.get_forward_vector()
     return (fwd_a.x * fwd_b.x + fwd_a.y * fwd_b.y + fwd_a.z * fwd_b.z) > 0
 
+  def _pick_straightest(self, current_wp, candidates):
+    """Pick the candidate waypoint most aligned with current direction (prefer straight-through)."""
+    fwd = current_wp.transform.get_forward_vector()
+    best_wp = candidates[0]
+    best_dot = -2.0
+    for c in candidates:
+      c_fwd = c.transform.get_forward_vector()
+      dot = fwd.x * c_fwd.x + fwd.y * c_fwd.y + fwd.z * c_fwd.z
+      if dot > best_dot:
+        best_dot = dot
+        best_wp = c
+    return best_wp
+
   def _has_junction_ahead(self, start_wp, max_dist=100.0, step=2.0):
     """Check if there's a junction within max_dist meters ahead."""
     wp = start_wp
@@ -275,7 +288,7 @@ class LaneGroundTruth:
     # Assemble: backwards (reversed to maintain spatial order) + forward
     wps = list(reversed(back_wps))
 
-    # Sample forwards (stop at junction boundary — no lane markings inside)
+    # Sample forwards (traverse junctions by following straightest path)
     wp = start_wp
     total_dist = 0.0
     while total_dist < max_dist:
@@ -283,9 +296,7 @@ class LaneGroundTruth:
       next_wps = wp.next(step)
       if not next_wps:
         break
-      wp = next_wps[0]
-      if wp.is_junction:
-        break
+      wp = next_wps[0] if len(next_wps) == 1 else self._pick_straightest(wp, next_wps)
       total_dist += step
     return wps
 
