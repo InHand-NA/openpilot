@@ -659,28 +659,86 @@ openpilot 将输出头分为三路（共享 backbone 2048D 特征）：
 
 #### 5.2.3 数据采集
 
-利用已有的 `tools/dashcam/` 基础设施：
+利用已有的 `tools/dashcam/` 基础设施，数据采集管线已基本就绪。
 
-**已有能力**（`tools/dashcam/run.py`）：
-- Carla 仿真器对接，支持多 Town 和天气条件
-- VisionIPC 相机数据传输管线
-- `--camera-height` 参数支持（`run.py:68-69`）
-- `--road-only` 单窄角相机模式（`run.py:85-86`），与卡车单目 fcam 方案完全对应
-- `--eval-lanes` 车道线评估（`run.py:89-90`）
-- `lane_ground_truth.py` 提供精确车道线 GT
-- `lane_evaluator.py` 提供评估指标
+##### 采集能力总览
 
-**需扩展的能力**：
-- 使用 `--road-only --camera-height 2.0/2.4/2.8` 采集单目 fcam 卡车视角数据
-- 在多种高度之间随机采样，构建多高度混合数据集
-- 提取 Carla 前车 actor 位置作为 lead GT（Carla 提供所有 actor 的 3D 位置和速度）
-- 保存模型输入（YUV 帧 + 标定参数）和 GT 标签到训练数据格式
+**Carla 仿真管理**（`carla_world.py` — `DashcamCarlaWorld` 类）：
+- 同步仿真模式，固定时间步 0.025s（40 Hz tick），相机传感器 20 FPS
+- 相机分辨率 1928×1208（标准 openpilot 格式），窄角 FOV=40°（`--road-only`）或双目 40°+120°
+- Ego 车辆动态速度控制：`--speed-range MIN MAX`（默认 20~140 km/h），每 8~20 秒随机切换目标速度，TM 自动处理加减速过渡，产生多样化的速度场景
+- `--random-spawn` 随机出生点，`--num-npc` NPC 车辆数量控制
 
-**数据量目标**：~50k 帧，覆盖：
-- 高度：1.2m, 1.8m, 2.0m, 2.4m, 2.8m（5 个档位，均匀采样）
-- Town：Town01-Town07（不同道路结构）
-- 天气：晴天/阴天/雨天/雾天
-- 时段：白天/黄昏/夜间
+**训练数据录制**（`run.py` + `data_recorder.py`）：
+- `--record <dir>` 启用录制，自动启用 `--road-only` 和 `--fast`（跳过帧率限制，最大化采集速度）
+- `--record-only` 纯录制模式：跳过 modeld 和可视化，仅采集 GT 数据，吞吐量最高
+- `--record-skip N` 帧跳跃采样（默认 1 = 每帧保存）
+- 每帧保存为独立 NPZ 压缩文件（`000001.npz`, `000002.npz`, ...），附带 `clip_info.json` 剪辑元数据
+
+**Ground Truth 提取器**：
+- `lane_ground_truth.py`：从 Carla HD Map 提取 4 条车道线 + 2 条路沿的精确 3D 坐标，在 X_IDXS（33 个前向距离点）处样条插值，含山顶截断处理
+- `lead_ground_truth.py`：从 Carla actor 列表提取前车 GT，3 个时间偏移选择（0/2/4s）× 6 个预测时间步（0~10s）× 4 维状态（x, y, v, a），使用匀加速模型预测未来轨迹
+- `pose_ground_truth.py`：从 Carla ego 变换计算帧间速度和角速度（校准坐标系）
+- `lane_evaluator.py`：车道线检测精度在线评估
+
+**验证与可视化工具**：
+- `view_npz.py`：加载 NPZ，warp 到 512×256 模型输入空间，叠加车道线/路沿/前车标注，支持交互浏览和批量导出 PNG
+- `verify_pose.py`：验证 pose 与 v_ego 一致性、轨迹积分精度、校准坐标系正确性
+- `warp_example.py`：演示 rpyCalib 对图像 warp 的影响
+
+##### NPZ 训练数据格式
+
+每帧 NPZ 文件包含以下字段：
+
+| 字段 | 形状 | 类型 | 说明 |
+|------|------|------|------|
+| `frame_rgb` | [1208, 1928, 3] | uint8 | 原始 RGB 图像 |
+| `lane_lines` | [4, 33, 3] | float32 | 车道线 GT：4 条线 × 33 个 X_IDXS 距离 × (x, y, z) |
+| `lane_lines_prob` | [4] | float32 | 车道线存在概率（0.0 或 1.0） |
+| `road_edges` | [2, 33, 3] | float32 | 路沿 GT：2 条边 × 33 点 × (x, y, z) |
+| `road_edges_prob` | [2] | float32 | 路沿存在概率 |
+| `lead` | [3, 6, 4] | float32 | 前车 GT：3 选择 × 6 时间步 × (x_dist, y_offset, v_abs, accel) |
+| `lead_prob` | [3] | float32 | 前车存在概率 |
+| `pose` | [6] | float32 | 帧间运动：[v_fwd, v_lat, v_vert, w_roll, w_pitch, w_yaw] (m/s, rad/s) |
+| `road_transform` | [6] | float32 | 路面变换：[0, 0, camera_height, 0, 0, 0] |
+| `rpyCalib` | [3] | float32 | 每帧标定角 [roll, -(pitch+车辆俯仰), -yaw]，单位 rad |
+| `v_ego` | scalar | float32 | 车速 (m/s) |
+| `world_pose` | [6] | float32 | Carla 世界坐标 [x, y, z, roll°, pitch°, yaw°] |
+| `camera_height` | scalar | float32 | 相机安装高度 (m) |
+| `camera_pitch` | scalar | float32 | 相机安装俯仰角 (rad) |
+| `camera_yaw` | scalar | float32 | 相机安装偏航角 (rad) |
+| `town` | scalar | str | Carla 地图名 |
+
+> **GT 与模型输出的维度差异**：GT 中 `lane_lines` 为 [4, 33, 3]（含 x 坐标），`road_edges` 为 [2, 33, 3]；而模型输出仅为 [4, 33, 2]（y, z）和 [2, 33, 2]（y, z），x 维度来自固定的 `X_IDXS`。训练时需对齐：GT 的 x 维度可用于验证采样点正确性，损失函数仅计算 y/z 分量。
+
+##### 典型采集命令
+
+```bash
+# 单次录制（窄角相机，高度 2.4m，理想安装）
+python tools/dashcam/run.py --record data/train/town04_h2.4 \
+  --record-only --camera-height 2.4 --perfect-cam --max-frames 2000
+
+# 指定速度范围和 NPC 数
+python tools/dashcam/run.py --record data/train/town04_slow \
+  --record-only --camera-height 2.0 --speed-range 20 60 --num-npc 30
+
+# 随机出生点，全速度范围
+python tools/dashcam/run.py --record data/train/town04_rand \
+  --record-only --random-spawn --camera-height 1.8 --max-frames 5000
+
+# 验证录制数据
+python tools/dashcam/view_npz.py data/train/town04_h2.4/
+python tools/dashcam/verify_pose.py data/train/town04_h2.4/ --plot
+```
+
+##### 数据量目标
+
+~50k 帧，覆盖以下维度：
+- **高度**：1.2m, 1.8m, 2.0m, 2.4m, 2.8m（5 个档位，均匀采样）
+- **速度**：20~140 km/h 动态变化（默认 `--speed-range`），涵盖低速、巡航、高速场景
+- **Town**：Town01-Town07（不同道路结构）
+- **天气**：晴天/阴天/雨天/雾天
+- **时段**：白天/黄昏/夜间
 
 #### 5.2.4 训练重点：多高度精度
 
@@ -1254,8 +1312,21 @@ class TruckAlertManager:
 | `common/transformations/camera.py` | 49-53 | 相机硬件参数（fcam focal=2648, ecam focal=567） |
 | `common/transformations/camera.py` | 55-69 | DEVICE_CAMERAS 映射 |
 | `common/transformations/camera.py` | 75-80 | 坐标系变换矩阵 |
-| `tools/dashcam/run.py` | 68-69 | --camera-height 参数 |
-| `tools/dashcam/run.py` | 89-90 | --eval-lanes 评估 |
+| `tools/dashcam/run.py` | 70-71 | --camera-height 参数 |
+| `tools/dashcam/run.py` | 87-88 | --road-only 单窄角相机模式 |
+| `tools/dashcam/run.py` | 91-92 | --eval-lanes 评估 |
+| `tools/dashcam/run.py` | 95-96 | --record 训练数据录制 |
+| `tools/dashcam/run.py` | 99-101 | --speed-range 动态车速范围 |
+| `tools/dashcam/run.py` | 102-103 | --record-only 纯录制模式 |
+| `tools/dashcam/carla_world.py` | 15-19 | DashcamCarlaWorld 构造函数（含 speed_range, speed_interval） |
+| `tools/dashcam/carla_world.py` | 277-284 | _update_speed() 动态速度控制 |
+| `tools/dashcam/data_recorder.py` | — | DataRecorder：NPZ 训练数据保存 |
+| `tools/dashcam/lane_ground_truth.py` | — | 车道线/路沿 GT 提取（Carla HD Map） |
+| `tools/dashcam/lead_ground_truth.py` | — | 前车 GT 提取（Carla actor，[3,6,4] 格式） |
+| `tools/dashcam/pose_ground_truth.py` | — | 视觉里程计 GT（帧间速度/角速度） |
+| `tools/dashcam/view_npz.py` | — | NPZ 可视化工具（warp + GT 叠加） |
+| `tools/dashcam/verify_pose.py` | — | pose 精度验证（v_ego 一致性、轨迹积分） |
+| `tools/dashcam/warp_example.py` | — | rpyCalib warp 变换演示 |
 | `selfdrive/modeld/models/driving_vision.onnx` | — | 视觉网络 ONNX (23M params, 45MB fp16) |
 | `selfdrive/modeld/models/driving_policy.onnx` | — | 策略网络 ONNX (6.9M params, 14MB fp16) |
 | `selfdrive/modeld/models/driving_vision_metadata.pkl` | — | 视觉网络输入输出元数据 |
