@@ -98,7 +98,7 @@ def main():
                       help='Save every N-th frame when recording (default: 1)')
   parser.add_argument('--speed-range', type=float, nargs=2, default=[20.0, 140.0],
                       metavar=('MIN', 'MAX'),
-                      help='Ego target speed range in km/h (default: 20 70)')
+                      help='Ego target speed range in km/h (default: 20 140)')
   parser.add_argument('--record-only', action='store_true',
                       help='Record mode: disable modeld and visualization, only collect GT data')
   args = parser.parse_args()
