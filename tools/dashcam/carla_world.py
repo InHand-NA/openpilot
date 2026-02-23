@@ -16,7 +16,7 @@ class DashcamCarlaWorld:
                spawn_point=16, random_spawn=False, camera_pitch_deg=5.0, camera_yaw_deg=3.0,
                camera_height=1.13, high_quality=False, num_npc=20,
                wide_road_only=False, road_only=False,
-               speed_range=(20.0, 70.0), speed_interval=(8.0, 20.0)):
+               speed_range=(20.0, 140.0), speed_interval=(8.0, 20.0)):
     import carla
 
     client = carla.Client(host, port)

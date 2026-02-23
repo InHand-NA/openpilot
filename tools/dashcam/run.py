@@ -96,7 +96,7 @@ def main():
                       help='Enable training data recording, save to specified directory')
   parser.add_argument('--record-skip', type=int, default=1,
                       help='Save every N-th frame when recording (default: 1)')
-  parser.add_argument('--speed-range', type=float, nargs=2, default=[20.0, 70.0],
+  parser.add_argument('--speed-range', type=float, nargs=2, default=[20.0, 140.0],
                       metavar=('MIN', 'MAX'),
                       help='Ego target speed range in km/h (default: 20 70)')
   parser.add_argument('--record-only', action='store_true',

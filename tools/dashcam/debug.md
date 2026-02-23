@@ -1,0 +1,190 @@
+
+## 1.2m
+python tools/dashcam/run.py --perfect-cam --high-quality --camera-height 1.2 --eval-lanes
+
+=== Lane Evaluation Summary ===
+  fn: 8.0000
+  fn_rate: 0.0032
+  fp: 0.0000
+  fp_rate: 0.0000
+  near_left_acc_0.3m: 0.9208
+  near_left_acc_0.5m: 0.9656
+  near_left_acc_1.0m: 0.9956
+  near_left_all_mae: 0.3118
+  near_left_all_rmse: 0.5115
+  near_left_far_mae: 0.9229
+  near_left_far_rmse: 0.9893
+  near_left_mid_mae: 0.2411
+  near_left_mid_rmse: 0.2728
+  near_left_near_mae: 0.0712
+  near_left_near_rmse: 0.0777
+  near_right_acc_0.3m: 0.9013
+  near_right_acc_0.5m: 0.9583
+  near_right_acc_1.0m: 0.9956
+  near_right_all_mae: 0.3088
+  near_right_all_rmse: 0.5174
+  near_right_far_mae: 0.9281
+  near_right_far_rmse: 0.9985
+  near_right_mid_mae: 0.2629
+  near_right_mid_rmse: 0.2865
+  near_right_near_mae: 0.0510
+  near_right_near_rmse: 0.0617
+  overall_mae: 0.3104
+  overall_rmse: 0.5170
+  pos_fn: 8.0000
+  pos_fn_rate: 0.0032
+  pos_fp: 31.0000
+  pos_fp_rate: 0.0125
+  pos_precision: 0.9874
+  pos_recall: 0.9967
+  pos_tp: 2439.0000
+  pos_tp_rate: 0.9843
+  precision: 1.0000
+  recall: 0.9968
+  tp: 2470.0000
+  tp_rate: 0.9968
+  width_mae: 0.1029
+  total_frames: 1239
+Done
+
+## 2.4m
+
+python tools/dashcam/run.py --perfect-cam --high-quality --camera-height 2.4 --eval-lanes
+
+=== Lane Evaluation Summary ===
+  fn: 1024.0000
+  fn_rate: 0.4197
+  fp: 0.0000
+  fp_rate: 0.0000
+  near_left_acc_0.3m: 0.2237
+  near_left_acc_0.5m: 0.6292
+  near_left_acc_1.0m: 0.8408
+  near_left_all_mae: 1.6834
+  near_left_all_rmse: 2.6283
+  near_left_far_mae: 4.8815
+  near_left_far_rmse: 5.0665
+  near_left_mid_mae: 1.3229
+  near_left_mid_rmse: 1.4757
+  near_left_near_mae: 0.3871
+  near_left_near_rmse: 0.4109
+  near_right_acc_0.3m: 0.0963
+  near_right_acc_0.5m: 0.2337
+  near_right_acc_1.0m: 0.8553
+  near_right_all_mae: 1.4216
+  near_right_all_rmse: 1.9963
+  near_right_far_mae: 3.6335
+  near_right_far_rmse: 3.7838
+  near_right_mid_mae: 1.1897
+  near_right_mid_rmse: 1.2652
+  near_right_near_mae: 0.5762
+  near_right_near_rmse: 0.5944
+  overall_mae: 1.5616
+  overall_rmse: 2.3598
+  pos_fn: 1024.0000
+  pos_fn_rate: 0.4197
+  pos_fp: 1216.0000
+  pos_fp_rate: 0.4984
+  pos_precision: 0.1412
+  pos_recall: 0.1634
+  pos_tp: 200.0000
+  pos_tp_rate: 0.0820
+  precision: 1.0000
+  recall: 0.5803
+  tp: 1416.0000
+  tp_rate: 0.5803
+  width_mae: 0.8966
+  total_frames: 1220
+Done
+
+## 2.4m高度补偿
+
+=== Lane Evaluation Summary ===
+  fn: 1435.0000
+  fn_rate: 0.5032
+  fp: 0.0000
+  fp_rate: 0.0000
+  near_left_acc_0.3m: 0.2370
+  near_left_acc_0.5m: 0.6322
+  near_left_acc_1.0m: 0.8456
+  near_left_all_mae: 1.7054
+  near_left_all_rmse: 2.6781
+  near_left_far_mae: 5.0201
+  near_left_far_rmse: 5.1998
+  near_left_mid_mae: 1.3626
+  near_left_mid_rmse: 1.5279
+  near_left_near_mae: 0.3810
+  near_left_near_rmse: 0.4049
+  near_right_acc_0.3m: 0.1197
+  near_right_acc_0.5m: 0.2645
+  near_right_acc_1.0m: 0.8172
+  near_right_all_mae: 1.5888
+  near_right_all_rmse: 2.2774
+  near_right_far_mae: 4.1501
+  near_right_far_rmse: 4.3151
+  near_right_mid_mae: 1.3198
+  near_right_mid_rmse: 1.4122
+  near_right_near_mae: 0.5761
+  near_right_near_rmse: 0.5986
+  overall_mae: 1.6879
+  overall_rmse: 2.6155
+  pos_fn: 1435.0000
+  pos_fn_rate: 0.5032
+  pos_fp: 1194.0000
+  pos_fp_rate: 0.4187
+  pos_precision: 0.1574
+  pos_recall: 0.1345
+  pos_tp: 223.0000
+  pos_tp_rate: 0.0782
+  precision: 1.0000
+  recall: 0.4968
+  tp: 1417.0000
+  tp_rate: 0.4968
+  width_mae: 0.8735
+  total_frames: 1426
+Done
+
+## 1.7m
+=== Lane Evaluation Summary ===
+  fn: 8.0000
+  fn_rate: 0.0045
+  fp: 0.0000
+  fp_rate: 0.0000
+  near_left_acc_0.3m: 0.3679
+  near_left_acc_0.5m: 0.9217
+  near_left_acc_1.0m: 0.9805
+  near_left_all_mae: 0.6637
+  near_left_all_rmse: 0.9419
+  near_left_far_mae: 1.6577
+  near_left_far_rmse: 1.7390
+  near_left_mid_mae: 0.3963
+  near_left_mid_rmse: 0.4684
+  near_left_near_mae: 0.3220
+  near_left_near_rmse: 0.3339
+  near_right_acc_0.3m: 0.0718
+  near_right_acc_0.5m: 0.6632
+  near_right_acc_1.0m: 0.8890
+  near_right_all_mae: 0.9590
+  near_right_all_rmse: 1.2520
+  near_right_far_mae: 2.1677
+  near_right_far_rmse: 2.2306
+  near_right_mid_mae: 0.9237
+  near_right_mid_rmse: 0.9524
+  near_right_near_mae: 0.4188
+  near_right_near_rmse: 0.4269
+  overall_mae: 0.8122
+  overall_rmse: 1.1119
+  pos_fn: 8.0000
+  pos_fn_rate: 0.0045
+  pos_fp: 696.0000
+  pos_fp_rate: 0.3893
+  pos_precision: 0.6090
+  pos_recall: 0.9927
+  pos_tp: 1084.0000
+  pos_tp_rate: 0.6063
+  precision: 1.0000
+  recall: 0.9955
+  tp: 1780.0000
+  tp_rate: 0.9955
+  width_mae: 0.6809
+  total_frames: 894
+Done
