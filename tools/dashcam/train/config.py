@@ -11,6 +11,8 @@ class ModelConfig:
   backbone_out_dim: int = 1024  # final DWConv output
   feature_dim: int = 2048  # GAP -> FC output
   bottleneck_dim: int = 512
+  use_relu: bool = False  # V1 single-cam default GELU (backward compatible)
+  uint8_input: bool = False  # V1 single-cam default float32 input (backward compatible)
 
   # Bottleneck Policy head (L2Norm): {name: (raw_dim, hidden_dim, loss_type)}
   head1_outputs: dict = field(
@@ -30,6 +32,13 @@ class ModelConfig:
       'road_transform': (12, 32, 'mdn'),
     }
   )
+
+
+@dataclass
+class DualCameraModelConfig(ModelConfig):
+  in_channels: int = 24  # concat: 2 cameras x 2 frames x 6ch
+  use_relu: bool = True  # match pretrained (ReLU not GELU)
+  uint8_input: bool = True  # model accepts uint8, internal normalization (match openpilot)
 
 
 @dataclass

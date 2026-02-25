@@ -34,8 +34,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
-from openpilot.tools.dashcam.train.config import ModelConfig, TrainConfig
-from openpilot.tools.dashcam.train.dataset import DrivingDataset
+from openpilot.tools.dashcam.train.config import DualCameraModelConfig, ModelConfig, TrainConfig
+from openpilot.tools.dashcam.train.dataset import DrivingDataset, DualCameraDrivingDataset
 from openpilot.tools.dashcam.train.losses import DrivingLoss
 from openpilot.tools.dashcam.train.model import DrivingVisionModel
 
@@ -51,18 +51,33 @@ def get_lr_scheduler(optimizer: torch.optim.Optimizer, cfg: TrainConfig) -> torc
 
 
 def train_one_epoch(
-  model: nn.Module, loader: DataLoader, criterion: DrivingLoss, optimizer: torch.optim.Optimizer, device: torch.device, epoch: int, cfg: TrainConfig
+  model: nn.Module,
+  loader: DataLoader,
+  criterion: DrivingLoss,
+  optimizer: torch.optim.Optimizer,
+  device: torch.device,
+  epoch: int,
+  cfg: TrainConfig,
+  dual_camera: bool = False,
 ) -> float:
   model.train()
   total_loss = 0.0
   n_batches = 0
 
-  for batch_idx, (inputs, targets) in enumerate(loader):
-    inputs = inputs.to(device, non_blocking=True)
-    targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
+  for batch_idx, batch in enumerate(loader):
+    if dual_camera:
+      img, big_img, targets = batch
+      img = img.to(device, non_blocking=True)
+      big_img = big_img.to(device, non_blocking=True)
+      targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
+      preds = model(img, big_img)
+    else:
+      inputs, targets = batch
+      inputs = inputs.to(device, non_blocking=True)
+      targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
+      preds = model(inputs)
 
     optimizer.zero_grad()
-    preds = model(inputs)
     loss, sub_losses = criterion(preds, targets)
     loss.backward()
     nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
@@ -79,17 +94,25 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def validate(model: nn.Module, loader: DataLoader, criterion: DrivingLoss, device: torch.device) -> tuple[float, dict[str, float]]:
+def validate(model: nn.Module, loader: DataLoader, criterion: DrivingLoss, device: torch.device, dual_camera: bool = False) -> tuple[float, dict[str, float]]:
   model.eval()
   total_loss = 0.0
   sub_totals: dict[str, float] = {}
   n_batches = 0
 
-  for inputs, targets in loader:
-    inputs = inputs.to(device, non_blocking=True)
-    targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
+  for batch in loader:
+    if dual_camera:
+      img, big_img, targets = batch
+      img = img.to(device, non_blocking=True)
+      big_img = big_img.to(device, non_blocking=True)
+      targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
+      preds = model(img, big_img)
+    else:
+      inputs, targets = batch
+      inputs = inputs.to(device, non_blocking=True)
+      targets = {k: v.to(device, non_blocking=True) for k, v in targets.items()}
+      preds = model(inputs)
 
-    preds = model(inputs)
     loss, sub_losses = criterion(preds, targets)
 
     total_loss += loss.item()
@@ -169,9 +192,11 @@ def main():
   parser.add_argument('--no-export', action='store_true', help='Skip ONNX export after training')
   parser.add_argument('--early-stop', type=int, default=0, help='Early stopping patience (0=disabled)')
   parser.add_argument('--min-delta', type=float, default=0.001, help='Minimum val_loss improvement to count as progress (default: 0.001)')
+  parser.add_argument('--dual-camera', action='store_true', help='Train dual-camera model (uint8 input, ReLU)')
   args = parser.parse_args()
 
-  model_cfg = ModelConfig()
+  dual_camera = args.dual_camera
+  model_cfg = DualCameraModelConfig() if dual_camera else ModelConfig()
   train_cfg = TrainConfig()
   if args.epochs is not None:
     train_cfg.epochs = args.epochs
@@ -184,7 +209,11 @@ def main():
 
   # Dataset
   print(f"Loading data from: {args.data_dirs}")
-  dataset = DrivingDataset(args.data_dirs)
+  if dual_camera:
+    print("Dual-camera mode: using DualCameraDrivingDataset")
+    dataset = DualCameraDrivingDataset(args.data_dirs)
+  else:
+    dataset = DrivingDataset(args.data_dirs)
   print(f"Total samples: {len(dataset)}")
 
   val_size = max(1, int(len(dataset) * train_cfg.val_split))
@@ -233,8 +262,8 @@ def main():
   print(f"\nStarting training: {train_cfg.epochs} epochs, lr={train_cfg.lr}, bs={train_cfg.batch_size}")
   for epoch in range(start_epoch, train_cfg.epochs):
     t0 = time.monotonic()
-    train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, train_cfg)
-    val_loss, val_subs = validate(model, val_loader, criterion, device)
+    train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, train_cfg, dual_camera=dual_camera)
+    val_loss, val_subs = validate(model, val_loader, criterion, device, dual_camera=dual_camera)
     scheduler.step()
 
     dt = time.monotonic() - t0
@@ -278,12 +307,15 @@ def main():
   # Export ONNX (fp32 + fp16)
   if not args.no_export:
     print("\nExporting ONNX...")
-    from openpilot.tools.dashcam.train.export_onnx import convert_onnx_to_fp16, export_onnx
+    from openpilot.tools.dashcam.train.export_onnx import convert_onnx_to_fp16, export_onnx, export_onnx_dual
 
     onnx_path = os.path.join(args.output_dir, "driving_vision.onnx")
-    export_onnx(model, onnx_path, device)
-    fp16_path = os.path.join(args.output_dir, "driving_vision_fp16.onnx")
-    convert_onnx_to_fp16(onnx_path, fp16_path)
+    if dual_camera:
+      export_onnx_dual(model, onnx_path, device)
+    else:
+      export_onnx(model, onnx_path, device)
+      fp16_path = os.path.join(args.output_dir, "driving_vision_fp16.onnx")
+      convert_onnx_to_fp16(onnx_path, fp16_path)
 
   print("Training complete.")
 

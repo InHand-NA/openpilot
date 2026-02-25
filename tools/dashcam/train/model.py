@@ -88,15 +88,15 @@ class RepConv(nn.Module):
 
 
 class ConvFFN(nn.Module):
-  """Convolutional feed-forward network: DWConv(7x7) -> 1x1(C->mlp_C) -> GELU -> 1x1(mlp_C->C)."""
+  """Convolutional feed-forward network: DWConv(7x7) -> 1x1(C->mlp_C) -> act -> 1x1(mlp_C->C)."""
 
-  def __init__(self, channels: int, mlp_ratio: float = 3.0):
+  def __init__(self, channels: int, mlp_ratio: float = 3.0, use_relu: bool = False):
     super().__init__()
     hidden = int(channels * mlp_ratio)
     self.dw = nn.Conv2d(channels, channels, 7, padding=3, groups=channels, bias=False)
     self.bn = nn.BatchNorm2d(channels)
     self.fc1 = nn.Conv2d(channels, hidden, 1, bias=False)
-    self.act = nn.GELU()
+    self.act = nn.ReLU() if use_relu else nn.GELU()
     self.fc2 = nn.Conv2d(hidden, channels, 1, bias=False)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -108,10 +108,10 @@ class ConvFFN(nn.Module):
 class RepMixerBlock(nn.Module):
   """Single RepMixer block: RepConv + ConvFFN, each with layer_scale and residual."""
 
-  def __init__(self, channels: int, mlp_ratio: float = 3.0, layer_scale_init: float = 1e-5):
+  def __init__(self, channels: int, mlp_ratio: float = 3.0, layer_scale_init: float = 1e-5, use_relu: bool = False):
     super().__init__()
     self.token_mixer = RepConv(channels)
-    self.ffn = ConvFFN(channels, mlp_ratio)
+    self.ffn = ConvFFN(channels, mlp_ratio, use_relu=use_relu)
     self.ls1 = nn.Parameter(layer_scale_init * torch.ones(channels, 1, 1))
     self.ls2 = nn.Parameter(layer_scale_init * torch.ones(channels, 1, 1))
 
@@ -138,10 +138,10 @@ class Downsample(nn.Module):
 class FastViTStage(nn.Module):
   """One stage of FastViT: optional Downsample + N x RepMixerBlock."""
 
-  def __init__(self, in_channels: int, out_channels: int, num_blocks: int, mlp_ratio: float = 3.0, downsample: bool = True):
+  def __init__(self, in_channels: int, out_channels: int, num_blocks: int, mlp_ratio: float = 3.0, downsample: bool = True, use_relu: bool = False):
     super().__init__()
     self.downsample = Downsample(in_channels, out_channels) if downsample else None
-    self.blocks = nn.Sequential(*[RepMixerBlock(out_channels, mlp_ratio) for _ in range(num_blocks)])
+    self.blocks = nn.Sequential(*[RepMixerBlock(out_channels, mlp_ratio, use_relu=use_relu) for _ in range(num_blocks)])
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
     if self.downsample is not None:
@@ -175,18 +175,19 @@ class FastViTBackbone(nn.Module):
   def __init__(self, cfg: ModelConfig):
     super().__init__()
     ch = cfg.stem_channels
+    act_fn = nn.ReLU if cfg.use_relu else nn.GELU
 
-    # Stem: Conv(in->64, s=2) + BN + GELU, DWConv(64, s=2) + BN + GELU, Conv1x1(64->64) + BN + GELU
+    # Stem: Conv(in->64, s=2) + BN + act, DWConv(64, s=2) + BN + act, Conv1x1(64->64) + BN + act
     self.stem = nn.Sequential(
       nn.Conv2d(cfg.in_channels, ch, 3, stride=2, padding=1, bias=False),
       nn.BatchNorm2d(ch),
-      nn.GELU(),
+      act_fn(),
       nn.Conv2d(ch, ch, 3, stride=2, padding=1, groups=ch, bias=False),
       nn.BatchNorm2d(ch),
-      nn.GELU(),
+      act_fn(),
       nn.Conv2d(ch, ch, 1, bias=False),
       nn.BatchNorm2d(ch),
-      nn.GELU(),
+      act_fn(),
     )
 
     # 4 stages
@@ -194,16 +195,16 @@ class FastViTBackbone(nn.Module):
     in_ch = ch
     for i, (out_ch, n_blocks) in enumerate(zip(cfg.stage_channels, cfg.stage_blocks, strict=True)):
       downsample = i > 0  # Stage 0: no downsample (stem already did 4x)
-      stages.append(FastViTStage(in_ch, out_ch, n_blocks, cfg.mlp_ratio, downsample))
+      stages.append(FastViTStage(in_ch, out_ch, n_blocks, cfg.mlp_ratio, downsample, use_relu=cfg.use_relu))
       in_ch = out_ch
     self.stages = nn.Sequential(*stages)
 
-    # Final: DWConv(512->1024) + SE + GELU + GAP + FC(1024->2048)
+    # Final: DWConv(512->1024) + SE + act + GAP + FC(1024->2048)
     final_ch = cfg.stage_channels[-1]
     self.final_dw = nn.Conv2d(final_ch, cfg.backbone_out_dim, 1, bias=False)
     self.final_bn = nn.BatchNorm2d(cfg.backbone_out_dim)
     self.se = SEBlock(cfg.backbone_out_dim)
-    self.act = nn.GELU()
+    self.act = act_fn()
     self.fc = nn.Linear(cfg.backbone_out_dim, cfg.feature_dim)
 
   def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -250,12 +251,18 @@ class OutputHead(nn.Module):
 
 
 class DrivingVisionModel(nn.Module):
-  """Single-camera driving vision model.
+  """Driving vision model supporting single-camera and dual-camera modes.
 
   Architecture:
     backbone -> feature (B, 2048)
     head1 (bottleneck, L2-normalized): lane_lines, lane_lines_prob, road_edges, lead, lead_prob
     head2 (no bottleneck): pose, road_transform
+
+  Dual-camera mode (cfg.uint8_input=True):
+    forward(img, big_img) — uint8 inputs, internal normalization, channel concat
+
+  Single-camera mode (cfg.uint8_input=False):
+    forward(img) — float32 pre-normalized input
 
   Args:
     cfg: ModelConfig with architecture hyperparameters
@@ -296,7 +303,16 @@ class DrivingVisionModel(nn.Module):
     )
     self.head2_outputs = nn.ModuleDict({name: OutputHead(bd, hidden, out_dim) for name, (out_dim, hidden, _) in cfg.head2_outputs.items()})
 
-  def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+  def forward(self, img: torch.Tensor, big_img: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    if self.cfg.uint8_input:
+      # Dual-camera mode: uint8 input with internal normalization (match openpilot)
+      x = img.float() / 128.0 - 1.0
+      if big_img is not None:
+        x = torch.cat([x, big_img.float() / 128.0 - 1.0], dim=1)
+    else:
+      # Single-camera mode: float32 pre-normalized input (V1 compatible)
+      x = torch.cat([img, big_img], dim=1) if big_img is not None else img
+
     feat = self.backbone(x)  # (B, 2048)
 
     # Head 1: Bottleneck with L2 normalization

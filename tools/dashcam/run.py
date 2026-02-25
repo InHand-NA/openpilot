@@ -61,48 +61,32 @@ def main():
   parser.add_argument('--port', type=int, default=2000)
   parser.add_argument('--town', default='Town04_Opt')
   parser.add_argument('--spawn-point', type=int, default=16)
-  parser.add_argument('--random-spawn', action='store_true',
-                      help='Spawn ego at a random waypoint (overrides --spawn-point)')
-  parser.add_argument('--camera-pitch', type=float, default=5.0,
-                      help='Camera pitch in degrees')
-  parser.add_argument('--camera-yaw', type=float, default=3.0,
-                      help='Camera yaw in degrees')
-  parser.add_argument('--camera-height', type=float, default=1.13,
-                      help='Camera height in meters')
-  parser.add_argument('--perfect-cam', action='store_true',
-                      help='Use pitch=0, yaw=0 (ideal mounting)')
-  parser.add_argument('--online-calib', action='store_true',
-                      help='Use online calibration (calibrationd subprocess)')
+  parser.add_argument('--random-spawn', action='store_true', help='Spawn ego at a random waypoint (overrides --spawn-point)')
+  parser.add_argument('--camera-pitch', type=float, default=5.0, help='Camera pitch in degrees')
+  parser.add_argument('--camera-yaw', type=float, default=3.0, help='Camera yaw in degrees')
+  parser.add_argument('--camera-height', type=float, default=1.13, help='Camera height in meters')
+  parser.add_argument('--perfect-cam', action='store_true', help='Use pitch=0, yaw=0 (ideal mounting)')
+  parser.add_argument('--online-calib', action='store_true', help='Use online calibration (calibrationd subprocess)')
   parser.add_argument('--num-npc', type=int, default=20)
   parser.add_argument('--high-quality', action='store_true')
   parser.add_argument('--no-display', action='store_true')
-  parser.add_argument('--save-video', type=str, default='',
-                      help='Save visualization to mp4 file')
-  parser.add_argument('--max-frames', type=int, default=0,
-                      help='Stop after N frames (0 = unlimited)')
-  parser.add_argument('--fast', action='store_true',
-                      help='Run as fast as possible, bypass frame rate limiter')
-  parser.add_argument('--wide-road-only', action='store_true',
-                      help='Single wide camera mode (modeld uses ecam intrinsics for both inputs)')
-  parser.add_argument('--road-only', action='store_true',
-                      help='Single narrow camera mode (modeld uses fcam intrinsics for main input)')
-  parser.add_argument('--height-comp', action='store_true',
-                      help='Enable lane line height compensation, do not use this functionality')
-  parser.add_argument('--eval-lanes', action='store_true',
-                      help='Enable lane line ground truth evaluation')
-  parser.add_argument('--eval-interval', type=int, default=1,
-                      help='GT evaluation interval in frames (default: every frame)')
-  parser.add_argument('--record', type=str, default='',
-                      help='Enable training data recording, save to specified directory')
-  parser.add_argument('--record-skip', type=int, default=1,
-                      help='Save every N-th frame when recording (default: 1)')
-  parser.add_argument('--speed-range', type=float, nargs=2, default=[20.0, 140.0],
-                      metavar=('MIN', 'MAX'),
-                      help='Ego target speed range in km/h (default: 20 140)')
-  parser.add_argument('--record-only', action='store_true',
-                      help='Record mode: disable modeld and visualization, only collect GT data')
-  parser.add_argument('--custom-model', type=str, default='',
-                      help='Path to custom ONNX model (bypasses modeld, uses onnxruntime)')
+  parser.add_argument('--save-video', type=str, default='', help='Save visualization to mp4 file')
+  parser.add_argument('--max-frames', type=int, default=0, help='Stop after N frames (0 = unlimited)')
+  parser.add_argument('--fast', action='store_true', help='Run as fast as possible, bypass frame rate limiter')
+  parser.add_argument('--wide-road-only', action='store_true', help='Single wide camera mode (modeld uses ecam intrinsics for both inputs)')
+  parser.add_argument('--road-only', action='store_true', help='Single narrow camera mode (modeld uses fcam intrinsics for main input)')
+  parser.add_argument('--height-comp', action='store_true', help='Enable lane line height compensation, do not use this functionality')
+  parser.add_argument('--eval-lanes', action='store_true', help='Enable lane line ground truth evaluation')
+  parser.add_argument('--eval-interval', type=int, default=1, help='GT evaluation interval in frames (default: every frame)')
+  parser.add_argument('--record', type=str, default='', help='Enable training data recording, save to specified directory')
+  parser.add_argument('--record-skip', type=int, default=1, help='Save every N-th frame when recording (default: 1)')
+  parser.add_argument(
+    '--speed-range', type=float, nargs=2, default=[20.0, 140.0], metavar=('MIN', 'MAX'), help='Ego target speed range in km/h (default: 20 140)'
+  )
+  parser.add_argument('--record-only', action='store_true', help='Record mode: disable modeld and visualization, only collect GT data')
+  parser.add_argument('--custom-model', type=str, default='', help='Path to custom ONNX model (bypasses modeld, uses onnxruntime)')
+  parser.add_argument('--record-modeld', type=str, default='', help='Record dual-camera data with modeld labels to specified directory')
+  parser.add_argument('--custom-modeld', type=str, default='', help='Custom tinygrad pkl model (launches custom_modeld subprocess)')
   args = parser.parse_args()
 
   if args.wide_road_only and args.road_only:
@@ -125,6 +109,19 @@ def main():
     if not args.road_only and not args.wide_road_only:
       args.road_only = True
     print(f"[CustomModel] Using custom ONNX model: {args.custom_model}")
+
+  # Dual-camera recording with modeld labels
+  record_modeld = bool(args.record_modeld)
+  if record_modeld:
+    args.fast = True
+    # Don't force road_only — dual-camera needs both streams
+    print(f"[RECORD-MODELD] Dual-camera recording with modeld labels -> {args.record_modeld}")
+
+  # Custom modeld mode (tinygrad pkl subprocess)
+  custom_modeld_mode = bool(args.custom_modeld)
+  if custom_modeld_mode:
+    # Don't force road_only — custom_modeld handles dual streams
+    print(f"[CustomModeld] Using custom tinygrad pkl: {args.custom_modeld}")
 
   # Camera pose
   if args.perfect_cam:
@@ -153,10 +150,14 @@ def main():
   pm = None
   sm = None
 
-  if not record_only and not custom_model_mode:
+  # Standard modeld mode
+  use_standard_modeld = not record_only and not custom_model_mode and not custom_modeld_mode
+
+  if use_standard_modeld or record_modeld:
     params = Params()
 
     from opendbc.car.car_helpers import get_demo_car_params
+
     CP = get_demo_car_params()
     params.put("CarParams", CP.to_bytes())
 
@@ -174,15 +175,71 @@ def main():
 
     modeld_env = {**os.environ, 'DEV': 'CUDA', 'PYOPENCL_CTX': ''}
     print(f"Starting modeld subprocess (DEV={modeld_env['DEV']})...")
-    modeld_proc = subprocess.Popen(
-      [sys.executable, '-m', 'selfdrive.modeld.modeld'],
-      env=modeld_env)
+    modeld_proc = subprocess.Popen([sys.executable, '-m', 'selfdrive.modeld.modeld'], env=modeld_env)
 
     if args.online_calib:
       print("Starting calibrationd subprocess...")
-      calibrationd_proc = subprocess.Popen(
-        [sys.executable, '-m', 'openpilot.tools.dashcam.calibrationd'],
-        env={**os.environ})
+      calibrationd_proc = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.dashcam.calibrationd'], env={**os.environ})
+
+    sub_topics = ['modelV2', 'liveCalibration']
+    if record_modeld:
+      sub_topics.append('cameraOdometry')
+    pub_services = ['carState', 'deviceState']
+    if not args.online_calib:
+      pub_services.append('liveCalibration')
+    pm = messaging.PubMaster(pub_services)
+    sm = messaging.SubMaster(sub_topics)
+
+  # Custom modeld mode: launch custom_modeld subprocess
+  if custom_modeld_mode:
+    params = Params()
+
+    from opendbc.car.car_helpers import get_demo_car_params
+
+    CP = get_demo_car_params()
+    params.put("CarParams", CP.to_bytes())
+
+    calib_msg = messaging.new_message('liveCalibration')
+    if args.online_calib:
+      calib_msg.liveCalibration.validBlocks = 0
+      calib_msg.liveCalibration.rpyCalib = [0.0, 0.0, 0.0]
+    else:
+      calib_msg.liveCalibration.validBlocks = 20
+      calib_msg.liveCalibration.rpyCalib = rpyCalib.tolist()
+    params.put("CalibrationParams", calib_msg.to_bytes())
+
+    print("Creating VisionIPC server...")
+    camerad = DashcamCamerad(wide_road_only=args.wide_road_only, road_only=args.road_only)
+
+    # Find metadata pkl alongside the model pkl
+    pkl_path = args.custom_modeld
+    pkl_base = os.path.splitext(pkl_path)[0]
+    # Try: same_dir/*_metadata.pkl or strip _tinygrad_xxx suffix
+    metadata_candidates = [
+      pkl_base.rsplit('_tinygrad', 1)[0] + '_metadata.pkl',
+      pkl_base + '_metadata.pkl',
+    ]
+    metadata_path = ''
+    for c in metadata_candidates:
+      if os.path.exists(c):
+        metadata_path = c
+        break
+    if not metadata_path:
+      raise FileNotFoundError(f"Cannot find metadata pkl for {pkl_path}. Tried: {metadata_candidates}")
+
+    modeld_env = {
+      **os.environ,
+      'DEV': 'CUDA',
+      'PYOPENCL_CTX': '',
+      'CUSTOM_MODEL_PKL': os.path.abspath(pkl_path),
+      'CUSTOM_MODEL_METADATA': os.path.abspath(metadata_path),
+    }
+    print(f"Starting custom_modeld subprocess (pkl={pkl_path}, metadata={metadata_path})...")
+    modeld_proc = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.dashcam.custom_modeld'], env=modeld_env)
+
+    if args.online_calib:
+      print("Starting calibrationd subprocess...")
+      calibrationd_proc = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.dashcam.calibrationd'], env={**os.environ})
 
     pub_services = ['carState', 'deviceState']
     if not args.online_calib:
@@ -194,20 +251,29 @@ def main():
   inference = None
   if custom_model_mode:
     from openpilot.tools.dashcam.infer import CustomModelInference
+
     dc = DEVICE_CAMERAS[("pc", "unknown")]
     inference = CustomModelInference(args.custom_model, dc.fcam.intrinsics)
 
   # 6. Connect to Carla
   print("Connecting to Carla...")
   from openpilot.tools.dashcam.carla_world import DashcamCarlaWorld
+
   world = DashcamCarlaWorld(
-    host=args.host, port=args.port, town=args.town,
-    spawn_point=args.spawn_point, random_spawn=args.random_spawn,
-    camera_pitch_deg=pitch_deg, camera_yaw_deg=yaw_deg,
+    host=args.host,
+    port=args.port,
+    town=args.town,
+    spawn_point=args.spawn_point,
+    random_spawn=args.random_spawn,
+    camera_pitch_deg=pitch_deg,
+    camera_yaw_deg=yaw_deg,
     camera_height=camera_height,
-    high_quality=args.high_quality, num_npc=args.num_npc,
-    wide_road_only=args.wide_road_only, road_only=args.road_only,
-    speed_range=tuple(args.speed_range))
+    high_quality=args.high_quality,
+    num_npc=args.num_npc,
+    wide_road_only=args.wide_road_only,
+    road_only=args.road_only,
+    speed_range=tuple(args.speed_range),
+  )
 
   # Lane GT evaluation
   gt_extractor = None
@@ -215,9 +281,24 @@ def main():
   if args.eval_lanes:
     from openpilot.tools.dashcam.lane_evaluator import LaneEvaluator
     from openpilot.tools.dashcam.lane_ground_truth import LaneGroundTruth
+
     gt_extractor = LaneGroundTruth(world.get_map(), camera_offset_x=0.8, camera_height=camera_height)
     evaluator = LaneEvaluator()
     print(f"Lane GT evaluation enabled (interval={args.eval_interval})")
+
+  # Dual-camera recording with modeld labels
+  dual_recorder = None
+  label_extractor = None
+  if record_modeld:
+    from openpilot.tools.dashcam.dual_data_recorder import DualCameraDataRecorder
+    from openpilot.tools.dashcam.modeld_label_extractor import ModeldLabelExtractor
+
+    label_extractor = ModeldLabelExtractor()
+    clip_metadata = world.get_clip_metadata(args.town)
+    dual_recorder = DualCameraDataRecorder(
+      output_dir=args.record_modeld, town=args.town, camera_height=camera_height, label_source='modeld', skip_frames=args.record_skip, metadata=clip_metadata
+    )
+    print("[RECORD-MODELD] Label extractor + dual recorder initialized")
 
   # Training data recording
   recorder = None
@@ -231,8 +312,7 @@ def main():
     from openpilot.tools.dashcam.pose_ground_truth import PoseGroundTruth
 
     lane_gt_extractor = LaneGroundTruth(world.get_map(), camera_offset_x=0.8, camera_height=camera_height)
-    lead_gt_extractor = LeadGroundTruth(world.get_world(), world.get_vehicle(),
-                                         camera_offset_x=0.8, camera_height=camera_height)
+    lead_gt_extractor = LeadGroundTruth(world.get_world(), world.get_vehicle(), camera_offset_x=0.8, camera_height=camera_height)
     pose_gt_extractor = PoseGroundTruth(camera_offset_x=0.8, camera_height=camera_height)
     clip_metadata = world.get_clip_metadata(args.town)
     recorder = DataRecorder(
@@ -242,7 +322,8 @@ def main():
       camera_pitch=np.deg2rad(pitch_deg),
       camera_yaw=np.deg2rad(yaw_deg),
       skip_frames=args.record_skip,
-      metadata=clip_metadata)
+      metadata=clip_metadata,
+    )
     print("[RECORD] GT extractors initialized (lane + lead + pose)")
 
   # Camera intrinsics and visualizer (skip in record-only mode)
@@ -255,21 +336,25 @@ def main():
     vis_intrinsics = dc.ecam.intrinsics if args.wide_road_only else dc.fcam.intrinsics
 
     from openpilot.tools.dashcam.visualizer import Visualizer
+
     visualizer = Visualizer(
       save_video_path=args.save_video,
       no_display=args.no_display,
       source_fps=20.0,
       actual_height=camera_height if args.height_comp else 0.0,
-      show_bev=custom_model_mode)
+      show_bev=custom_model_mode or custom_modeld_mode,
+    )
 
   # Signal handler
   running = True
+
   def signal_handler(sig, frame):
     nonlocal running
     if not running:
       sys.exit(1)  # Force exit on second signal
     running = False
     print("\nShutting down...")
+
   signal.signal(signal.SIGINT, signal_handler)
   signal.signal(signal.SIGTERM, signal_handler)
 
@@ -313,7 +398,7 @@ def main():
           continue
         display_rgb = road_rgb
 
-      # Send frames to modeld via VisionIPC (skip in record-only and custom-model modes)
+      # Send frames to modeld via VisionIPC (skip in record-only and custom-model ONNX modes)
       if not record_only and not custom_model_mode:
         if args.wide_road_only:
           yuv_wide = camerad.rgb_to_yuv(wide_rgb)
@@ -355,33 +440,74 @@ def main():
         rec_lane_gt = lane_gt_extractor.get_lane_lines(veh_transform)
         rec_road_edges_gt = lane_gt_extractor.get_road_edges(veh_transform)
         rec_road_edges_gt = lane_gt_extractor.filter_road_edges(rec_lane_gt, rec_road_edges_gt)
-        rec_lead_gt = lead_gt_extractor.get_lead_vehicles(veh_transform, v_ego,
-                                                          road_edges=rec_road_edges_gt)
+        rec_lead_gt = lead_gt_extractor.get_lead_vehicles(veh_transform, v_ego, road_edges=rec_road_edges_gt)
         rec_pose, rec_road_transform = pose_gt_extractor.update(veh_transform)
 
         # Per-frame rpyCalib: camera mounting angles + vehicle tilt
         veh_pitch_rad = np.deg2rad(veh_transform.rotation.pitch)
         veh_roll_rad = np.deg2rad(veh_transform.rotation.roll)
-        frame_rpyCalib = np.array([
-          veh_roll_rad,
-          -(np.deg2rad(pitch_deg) + veh_pitch_rad),
-          -np.deg2rad(yaw_deg),
-        ], dtype=np.float32)
+        frame_rpyCalib = np.array(
+          [
+            veh_roll_rad,
+            -(np.deg2rad(pitch_deg) + veh_pitch_rad),
+            -np.deg2rad(yaw_deg),
+          ],
+          dtype=np.float32,
+        )
 
-        world_pose = np.array([
-          veh_transform.location.x,
-          veh_transform.location.y,
-          veh_transform.location.z,
-          veh_transform.rotation.roll,
-          veh_transform.rotation.pitch,
-          veh_transform.rotation.yaw,
-        ], dtype=np.float32)
+        world_pose = np.array(
+          [
+            veh_transform.location.x,
+            veh_transform.location.y,
+            veh_transform.location.z,
+            veh_transform.rotation.roll,
+            veh_transform.rotation.pitch,
+            veh_transform.rotation.yaw,
+          ],
+          dtype=np.float32,
+        )
 
-        recorder.record_with_vego(display_rgb, rec_lane_gt, rec_lead_gt,
-                                  rec_pose, rec_road_transform, v_ego,
-                                  road_edges_gt=rec_road_edges_gt,
-                                  rpyCalib=frame_rpyCalib,
-                                  world_pose=world_pose)
+        recorder.record_with_vego(
+          display_rgb,
+          rec_lane_gt,
+          rec_lead_gt,
+          rec_pose,
+          rec_road_transform,
+          v_ego,
+          road_edges_gt=rec_road_edges_gt,
+          rpyCalib=frame_rpyCalib,
+          world_pose=world_pose,
+        )
+
+      # Dual-camera recording with modeld labels
+      if dual_recorder is not None and sm is not None:
+        if sm.seen['modelV2']:
+          cam_odom = sm['cameraOdometry'] if sm.seen.get('cameraOdometry', False) else None
+          labels = label_extractor.extract(sm['modelV2'], cam_odom)
+          if labels is not None and road_rgb is not None and wide_rgb is not None:
+            veh_transform = world.get_vehicle_transform()
+            veh_pitch_rad = np.deg2rad(veh_transform.rotation.pitch)
+            veh_roll_rad = np.deg2rad(veh_transform.rotation.roll)
+            frame_rpyCalib_dual = np.array(
+              [
+                veh_roll_rad,
+                -(np.deg2rad(pitch_deg) + veh_pitch_rad),
+                -np.deg2rad(yaw_deg),
+              ],
+              dtype=np.float32,
+            )
+            world_pose_dual = np.array(
+              [
+                veh_transform.location.x,
+                veh_transform.location.y,
+                veh_transform.location.z,
+                veh_transform.rotation.roll,
+                veh_transform.rotation.pitch,
+                veh_transform.rotation.yaw,
+              ],
+              dtype=np.float32,
+            )
+            dual_recorder.record(road_rgb, wide_rgb, labels, rpyCalib=frame_rpyCalib_dual, v_ego=world.get_vehicle_speed(), world_pose=world_pose_dual)
 
       # Lane GT evaluation (non-recording path)
       gt_lines = None
@@ -431,11 +557,20 @@ def main():
           model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
 
         ok = visualizer.draw(
-          display_rgb, model_msg, vis_intrinsics,
-          cur_rpyCalib, cur_height,
-          world.get_vehicle_speed(), cur_cal_status,
-          cur_valid_blocks, cur_cal_perc, fps,
-          gt_lines=gt_lines, gt_probs=gt_probs, eval_metrics=eval_metrics)
+          display_rgb,
+          model_msg,
+          vis_intrinsics,
+          cur_rpyCalib,
+          cur_height,
+          world.get_vehicle_speed(),
+          cur_cal_status,
+          cur_valid_blocks,
+          cur_cal_perc,
+          fps,
+          gt_lines=gt_lines,
+          gt_probs=gt_probs,
+          eval_metrics=eval_metrics,
+        )
 
         if not ok:
           break
@@ -448,19 +583,29 @@ def main():
         speed = world.get_vehicle_speed()
         if record_only:
           saved = recorder.saved_count if recorder else 0
-          print(f"[RECORD] frame={tick_count//TICKS_PER_FRAME} speed={speed:.1f}m/s "
-                + f"fps={fps:.1f} saved={saved}")
+          print(f"[RECORD] frame={tick_count // TICKS_PER_FRAME} speed={speed:.1f}m/s " + f"fps={fps:.1f} saved={saved}")
         elif custom_model_mode:
           has_output = custom_model_msg is not None
-          print(f"[CustomModel] frame={tick_count//TICKS_PER_FRAME} speed={speed:.1f}m/s "
-                + f"fps={fps:.1f} output={'active' if has_output else 'buffering'}")
+          print(
+            f"[CustomModel] frame={tick_count // TICKS_PER_FRAME} speed={speed:.1f}m/s " + f"fps={fps:.1f} output={'active' if has_output else 'buffering'}"
+          )
+        elif custom_modeld_mode:
+          modeld_status = 'connected' if sm.seen['modelV2'] else 'waiting...'
+          dual_saved = dual_recorder.saved_count if dual_recorder else '-'
+          print(f"[CustomModeld] frame={tick_count // TICKS_PER_FRAME} speed={speed:.1f}m/s " + f"fps={fps:.1f} modeld={modeld_status} saved={dual_saved}")
+        elif record_modeld:
+          modeld_status = 'connected' if sm.seen['modelV2'] else 'waiting...'
+          dual_saved = dual_recorder.saved_count if dual_recorder else 0
+          print(f"[RECORD-MODELD] frame={tick_count // TICKS_PER_FRAME} speed={speed:.1f}m/s " + f"fps={fps:.1f} modeld={modeld_status} saved={dual_saved}")
         else:
           modeld_status = 'connected' if sm.seen['modelV2'] else 'waiting...'
           calib_status = 'connected' if sm.seen['liveCalibration'] else 'waiting...'
           pitch_d, yaw_d = np.degrees(cur_rpyCalib[1]), np.degrees(cur_rpyCalib[2])
-          print(f"[DASHCAM] frame={tick_count//TICKS_PER_FRAME} speed={speed:.1f}m/s "
-                + f"pitch={pitch_d:.2f}\u00b0 yaw={yaw_d:.2f}\u00b0 fps={fps:.1f} modeld={modeld_status} "
-                + f"calib={calib_status} calPerc={cur_cal_perc}% blocks={cur_valid_blocks}/{5} status={cur_cal_status}")
+          print(
+            f"[DASHCAM] frame={tick_count // TICKS_PER_FRAME} speed={speed:.1f}m/s "
+            + f"pitch={pitch_d:.2f}\u00b0 yaw={yaw_d:.2f}\u00b0 fps={fps:.1f} modeld={modeld_status} "
+            + f"calib={calib_status} calPerc={cur_cal_perc}% blocks={cur_valid_blocks}/{5} status={cur_cal_status}"
+          )
 
       # Frame rate limiter: sleep until next 50ms boundary for real-time playback
       if not args.fast:
@@ -477,6 +622,8 @@ def main():
   finally:
     if recorder is not None:
       recorder.close()
+    if dual_recorder is not None:
+      dual_recorder.close()
     if evaluator is not None and evaluator.history:
       summary = evaluator.get_summary()
       print("\n=== Lane Evaluation Summary ===")

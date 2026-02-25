@@ -8,27 +8,87 @@ Steps:
   4. Validate with onnxruntime
   5. Optionally convert to fp16
 
+Dual-camera mode (--dual-camera):
+  - FlatOutputWrapper: concat 7 outputs into single flat tensor (match tinygrad pkl format)
+  - Embeds output_slices in ONNX metadata_props (base64 pickle)
+  - Two inputs: img + big_img (uint8)
+
 Usage:
-  # Export fp32 only
+  # Single-camera (V1 compatible)
   python tools/dashcam/train/export_onnx.py --checkpoint checkpoints/best.pt --output driving_vision.onnx
+
+  # Dual-camera (flat output + metadata)
+  python tools/dashcam/train/export_onnx.py --checkpoint checkpoints/best.pt --output driving_vision.onnx --dual-camera
 
   # Export fp32 + fp16
   python tools/dashcam/train/export_onnx.py --checkpoint checkpoints/best.pt --output driving_vision.onnx --fp16
 """
 
 import argparse
+import codecs
 import os
+import pickle
 
 import numpy as np
 import onnx
 import torch
+import torch.nn as nn
 from onnx import numpy_helper
 
-from openpilot.tools.dashcam.train.config import ModelConfig
+from openpilot.tools.dashcam.train.config import DualCameraModelConfig, ModelConfig
 from openpilot.tools.dashcam.train.model import DrivingVisionModel
 
 
 OUTPUT_NAMES = ['lane_lines', 'lane_lines_prob', 'road_edges', 'lead', 'lead_prob', 'pose', 'road_transform']
+
+# Output sizes for each head (flattened)
+MODEL_OUTPUT_SIZES = {
+  'lane_lines': 528,
+  'lane_lines_prob': 8,
+  'road_edges': 264,
+  'lead': 144,
+  'lead_prob': 3,
+  'pose': 12,
+  'road_transform': 12,
+}
+
+
+class FlatOutputWrapper(nn.Module):
+  """Wrap DrivingVisionModel to concat dict outputs into a single flat tensor.
+
+  Matches tinygrad pkl format: single 'outputs' tensor of shape (B, 971).
+  """
+
+  OUTPUT_ORDER = OUTPUT_NAMES
+
+  def __init__(self, model: DrivingVisionModel):
+    super().__init__()
+    self.model = model
+
+  def forward(self, img: torch.Tensor, big_img: torch.Tensor | None = None) -> torch.Tensor:
+    outs = self.model(img, big_img)
+    return torch.cat([outs[k] for k in self.OUTPUT_ORDER], dim=-1)
+
+
+def compute_output_slices() -> dict[str, slice]:
+  """Compute output_slices mapping from output names to flat tensor slices."""
+  output_slices = {}
+  offset = 0
+  for name in OUTPUT_NAMES:
+    size = MODEL_OUTPUT_SIZES[name]
+    output_slices[name] = slice(offset, offset + size)
+    offset += size
+  return output_slices
+
+
+def embed_output_slices_metadata(onnx_path: str):
+  """Embed output_slices as base64 pickle in ONNX metadata_props."""
+  output_slices = compute_output_slices()
+  onnx_model = onnx.load(onnx_path)
+  encoded = codecs.encode(pickle.dumps(output_slices), 'base64').decode()
+  onnx_model.metadata_props.add(key='output_slices', value=encoded)
+  onnx.save(onnx_model, onnx_path)
+  print(f"  Embedded output_slices metadata: {list(output_slices.keys())}")
 
 
 def convert_onnx_to_fp16(input_path: str, output_path: str):
@@ -94,7 +154,7 @@ def convert_onnx_to_fp16(input_path: str, output_path: str):
 
 
 def export_onnx(model: DrivingVisionModel, output_path: str, device: torch.device | None = None):
-  """Export model to ONNX.
+  """Export single-camera model to ONNX (V1 format: 7 named outputs).
 
   Args:
     model: trained DrivingVisionModel (will be modified in-place for fusion)
@@ -144,21 +204,90 @@ def export_onnx(model: DrivingVisionModel, output_path: str, device: torch.devic
     print("onnxruntime not installed, skipping validation.")
 
 
+def export_onnx_dual(model: DrivingVisionModel, output_path: str, device: torch.device | None = None):
+  """Export dual-camera model to ONNX (flat output + output_slices metadata).
+
+  - Two uint8 inputs: img (1, 12, 128, 256), big_img (1, 12, 128, 256)
+  - Single flat output: outputs (1, 971)
+  - output_slices embedded in metadata_props
+
+  Args:
+    model: trained DrivingVisionModel with uint8_input=True
+    output_path: path for the .onnx file
+    device: device to run export on
+  """
+  if device is None:
+    device = torch.device('cpu')
+
+  model = model.to(device)
+  model.eval()
+  model.fuse_repconv()
+
+  wrapper = FlatOutputWrapper(model).to(device)
+  wrapper.eval()
+
+  # uint8 dummy inputs (each camera: 12ch = 2 frames x 6ch YUV420)
+  dummy_img = torch.randint(0, 256, (1, 12, 128, 256), dtype=torch.uint8, device=device)
+  dummy_big_img = torch.randint(0, 256, (1, 12, 128, 256), dtype=torch.uint8, device=device)
+
+  torch.onnx.export(
+    wrapper,
+    (dummy_img, dummy_big_img),
+    output_path,
+    input_names=['img', 'big_img'],
+    output_names=['outputs'],
+    opset_version=17,
+    dynamic_axes={'img': {0: 'batch'}, 'big_img': {0: 'batch'}, 'outputs': {0: 'batch'}},
+  )
+  print(f"Dual-camera ONNX exported: {output_path}")
+
+  # Embed output_slices metadata
+  embed_output_slices_metadata(output_path)
+
+  # Validate with onnxruntime
+  try:
+    import onnxruntime as ort
+
+    sess = ort.InferenceSession(output_path)
+    ort_outputs = sess.run(None, {'img': dummy_img.cpu().numpy(), 'big_img': dummy_big_img.cpu().numpy()})
+
+    with torch.no_grad():
+      pt_output = wrapper(dummy_img, dummy_big_img)
+
+    pt_np = pt_output.cpu().numpy()
+    ort_np = ort_outputs[0]
+    max_diff = np.max(np.abs(pt_np - ort_np))
+    print(f"  outputs: max_diff={max_diff:.6e} shape={ort_np.shape}")
+    if max_diff > 1e-4:
+      print("    WARNING: large difference")
+
+    print("ONNX validation passed.")
+  except ImportError:
+    print("onnxruntime not installed, skipping validation.")
+
+
 def main():
   parser = argparse.ArgumentParser(description='Export model to ONNX')
   parser.add_argument('--checkpoint', required=True, help='Path to checkpoint .pt file')
   parser.add_argument('--output', default='driving_vision.onnx', help='Output ONNX path')
   parser.add_argument('--fp16', action='store_true', help='Also export fp16 version')
+  parser.add_argument('--dual-camera', action='store_true', help='Export dual-camera model (flat output + metadata)')
   args = parser.parse_args()
 
-  model_cfg = ModelConfig()
+  if args.dual_camera:
+    model_cfg = DualCameraModelConfig()
+  else:
+    model_cfg = ModelConfig()
   model = DrivingVisionModel(model_cfg)
 
   ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
   model.load_state_dict(ckpt['model_state_dict'])
   print(f"Loaded checkpoint: {args.checkpoint} (epoch {ckpt.get('epoch', '?')})")
 
-  export_onnx(model, args.output, torch.device('cpu'))
+  if args.dual_camera:
+    export_onnx_dual(model, args.output, torch.device('cpu'))
+  else:
+    export_onnx(model, args.output, torch.device('cpu'))
 
   if args.fp16:
     base, ext = os.path.splitext(args.output)
