@@ -213,8 +213,9 @@ def compensate_lane_lines_for_height(lane_lines_xyz, lane_line_probs, actual_hei
 class Visualizer:
   """Draw perception results on camera images, optionally save video."""
 
-  def __init__(self, save_video_path='', no_display=False, source_fps=20.0, actual_height=0.0):
+  def __init__(self, save_video_path='', no_display=False, source_fps=20.0, actual_height=0.0, show_bev=False):
     self.actual_height = actual_height
+    self.show_bev = show_bev or actual_height > 0
     self._model_height = 0.0
     self._delta_height = 0.0
     # Stored for BEV rendering (set each frame by _draw_lane_lines)
@@ -287,7 +288,7 @@ class Visualizer:
     display = zoomed[y0:y0 + UI_H, x0:x0 + UI_W]
 
     # Draw HUD on final display (after crop, so it's always visible)
-    if self.actual_height > 0:
+    if self.show_bev:
       self._draw_bev_panel(display)
     self._draw_info_panel(display, model_msg, vehicle_speed, rpyCalib,
                           cal_status, valid_blocks, cal_perc, camera_height, fps)

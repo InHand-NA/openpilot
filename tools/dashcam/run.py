@@ -259,7 +259,8 @@ def main():
       save_video_path=args.save_video,
       no_display=args.no_display,
       source_fps=20.0,
-      actual_height=camera_height if args.height_comp else 0.0)
+      actual_height=camera_height if args.height_comp else 0.0,
+      show_bev=custom_model_mode)
 
   # Signal handler
   running = True
