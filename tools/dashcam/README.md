@@ -400,7 +400,7 @@ python tools/dashcam/warp_example.py data/training/carla_001/000100.npz
 | `train/losses.py` | 损失函数（GaussianNLL + BCEWithLogits + 组合加权 + 逐点 mask） |
 | `train/train.py` | 训练脚本（AdamW + CosineAnnealing + warmup + 早停 + CSV 日志） |
 | `train/monitor.py` | 训练监控工具（实时指标查看、训练曲线绘制） |
-| `train/export_onnx.py` | ONNX 导出（RepConv 重参数化 + onnxruntime 验证） |
+| `train/export_onnx.py` | ONNX 导出（RepConv 重参数化 + onnxruntime 验证 + fp16 转换） |
 
 ### 环境准备
 
@@ -480,7 +480,7 @@ python tools/dashcam/train/train.py \
 7. 每 epoch 记录指标到 CSV 日志（`training_log.csv`）
 8. 每 5 epoch 保存 checkpoint，持续跟踪最佳验证 loss
 9. 可选早停：val_loss 连续 N epoch 无改善则终止
-10. 训练完成自动导出 ONNX
+10. 训练完成自动导出 ONNX（fp32 + fp16 两个版本）
 
 ### 损失函数
 
@@ -505,7 +505,8 @@ checkpoints/
 ├── ...
 ├── best.pt                     # 最佳验证 loss
 ├── final.pt                    # 最终 epoch
-├── driving_vision.onnx         # 自动导出的 ONNX 模型
+├── driving_vision.onnx         # fp32 ONNX 模型（~76MB）
+├── driving_vision_fp16.onnx    # fp16 ONNX 模型（~38MB）
 ├── training_log.csv            # 逐 epoch 指标日志
 └── training_log_curves.png     # 训练曲线图（monitor.py --plot 生成）
 ```
@@ -577,19 +578,36 @@ Best val_loss: -3.8500
 
 ### ONNX 导出
 
-训练结束会自动导出 ONNX。也可手动导出：
+训练结束会自动导出 fp32 和 fp16 两个版本的 ONNX 模型。也可手动导出：
 
 ```bash
+# 仅导出 fp32
 python tools/dashcam/train/export_onnx.py \
   --checkpoint checkpoints/best.pt \
   --output driving_vision.onnx
+
+# 同时导出 fp32 + fp16
+python tools/dashcam/train/export_onnx.py \
+  --checkpoint checkpoints/best.pt \
+  --output driving_vision.onnx \
+  --fp16
 ```
 
 导出过程：
 1. 加载 checkpoint，切换为 eval 模式
 2. 执行 RepConv 重参数化（将训练时的 DWConv+BN+Identity 三分支融合为单个 DWConv）
-3. 用 `torch.onnx.export` 导出（opset 17，支持动态 batch）
+3. 用 `torch.onnx.export` 导出 fp32 模型（opset 17，支持动态 batch）
 4. 使用 onnxruntime 验证 PyTorch 与 ONNX 输出一致性
+5. 若指定 `--fp16`，将 fp32 权重转换为 fp16，输入/输出保持 fp32 兼容（通过 Cast 节点自动转换）
+
+**fp32 vs fp16 对比**：
+
+| 版本 | 文件大小 | 精度 | 用途 |
+|------|---------|------|------|
+| fp32 | ~76MB | 完整精度 | 调试、评估、精度对比基准 |
+| fp16 | ~38MB | 半精度 | 部署推理（体积减半，推理更快，精度损失极小） |
+
+> openpilot 预训练的 `driving_vision.onnx` 使用 fp16 存储（~45MB）。fp16 转换仅影响权重存储精度，模型的输入和输出接口保持 fp32 不变，下游代码无需修改。
 
 ---
 
@@ -627,7 +645,7 @@ python tools/dashcam/train/monitor.py checkpoints/training_log.csv --live
 
 # 6. 训练完成后查看曲线和导出结果
 python tools/dashcam/train/monitor.py checkpoints/training_log.csv --plot
-ls checkpoints/driving_vision.onnx  # ONNX 模型
+ls -lh checkpoints/driving_vision*.onnx  # fp32 (~76MB) + fp16 (~38MB)
 ```
 
 ### 扩大数据规模

@@ -273,13 +273,15 @@ def main():
 
   csv_logger.close()
 
-  # Export ONNX
+  # Export ONNX (fp32 + fp16)
   if not args.no_export:
     print("\nExporting ONNX...")
-    from openpilot.tools.dashcam.train.export_onnx import export_onnx
+    from openpilot.tools.dashcam.train.export_onnx import convert_onnx_to_fp16, export_onnx
 
     onnx_path = os.path.join(args.output_dir, "driving_vision.onnx")
     export_onnx(model, onnx_path, device)
+    fp16_path = os.path.join(args.output_dir, "driving_vision_fp16.onnx")
+    convert_onnx_to_fp16(onnx_path, fp16_path)
 
   print("Training complete.")
 
