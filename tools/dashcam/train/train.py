@@ -139,14 +139,15 @@ class CSVLogger:
 class EarlyStopping:
   """Stop training when val_loss doesn't improve for `patience` epochs."""
 
-  def __init__(self, patience: int):
+  def __init__(self, patience: int, min_delta: float = 0.0):
     self.patience = patience
+    self.min_delta = min_delta
     self.best_loss = float('inf')
     self.wait = 0
 
   def step(self, val_loss: float) -> bool:
     """Returns True if training should stop."""
-    if val_loss < self.best_loss:
+    if val_loss < self.best_loss - self.min_delta:
       self.best_loss = val_loss
       self.wait = 0
     else:
@@ -167,6 +168,7 @@ def main():
   parser.add_argument('--resume', type=str, default=None, help='Resume from checkpoint path')
   parser.add_argument('--no-export', action='store_true', help='Skip ONNX export after training')
   parser.add_argument('--early-stop', type=int, default=0, help='Early stopping patience (0=disabled)')
+  parser.add_argument('--min-delta', type=float, default=0.001, help='Minimum val_loss improvement to count as progress (default: 0.001)')
   args = parser.parse_args()
 
   model_cfg = ModelConfig()
@@ -223,9 +225,9 @@ def main():
   print(f"Metrics log: {csv_path}")
 
   # Early stopping
-  early_stop = EarlyStopping(args.early_stop) if args.early_stop > 0 else None
+  early_stop = EarlyStopping(args.early_stop, args.min_delta) if args.early_stop > 0 else None
   if early_stop:
-    print(f"Early stopping: patience={args.early_stop} epochs")
+    print(f"Early stopping: patience={args.early_stop} epochs, min_delta={args.min_delta}")
 
   # Training loop
   print(f"\nStarting training: {train_cfg.epochs} epochs, lr={train_cfg.lr}, bs={train_cfg.batch_size}")
