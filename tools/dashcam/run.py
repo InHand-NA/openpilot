@@ -101,6 +101,8 @@ def main():
                       help='Ego target speed range in km/h (default: 20 140)')
   parser.add_argument('--record-only', action='store_true',
                       help='Record mode: disable modeld and visualization, only collect GT data')
+  parser.add_argument('--custom-model', type=str, default='',
+                      help='Path to custom ONNX model (bypasses modeld, uses onnxruntime)')
   args = parser.parse_args()
 
   if args.wide_road_only and args.road_only:
@@ -117,6 +119,12 @@ def main():
     if record_only:
       args.no_display = True
       print("[RECORD] Record-only mode: modeld and visualization disabled")
+
+  custom_model_mode = bool(args.custom_model)
+  if custom_model_mode:
+    if not args.road_only and not args.wide_road_only:
+      args.road_only = True
+    print(f"[CustomModel] Using custom ONNX model: {args.custom_model}")
 
   # Camera pose
   if args.perfect_cam:
@@ -145,7 +153,7 @@ def main():
   pm = None
   sm = None
 
-  if not record_only:
+  if not record_only and not custom_model_mode:
     params = Params()
 
     from opendbc.car.car_helpers import get_demo_car_params
@@ -181,6 +189,13 @@ def main():
       pub_services.append('liveCalibration')
     pm = messaging.PubMaster(pub_services)
     sm = messaging.SubMaster(['modelV2', 'liveCalibration'])
+
+  # Custom model inference (in-process ONNX, bypasses modeld)
+  inference = None
+  if custom_model_mode:
+    from openpilot.tools.dashcam.infer import CustomModelInference
+    dc = DEVICE_CAMERAS[("pc", "unknown")]
+    inference = CustomModelInference(args.custom_model, dc.fcam.intrinsics)
 
   # 6. Connect to Carla
   print("Connecting to Carla...")
@@ -297,8 +312,8 @@ def main():
           continue
         display_rgb = road_rgb
 
-      # Send frames to modeld via VisionIPC (skip in record-only mode)
-      if not record_only:
+      # Send frames to modeld via VisionIPC (skip in record-only and custom-model modes)
+      if not record_only and not custom_model_mode:
         if args.wide_road_only:
           yuv_wide = camerad.rgb_to_yuv(wide_rgb)
           camerad.cam_send_yuv_wide_road(yuv_wide)
@@ -324,6 +339,12 @@ def main():
 
         # Non-blocking receive modelV2 and liveCalibration
         sm.update(0)
+
+      # Custom model inference (in-process ONNX)
+      custom_model_msg = None
+      if custom_model_mode:
+        result = inference.process_frame(display_rgb, rpyCalib)
+        custom_model_msg = result.modelV2 if result is not None else None
 
       # Training data recording
       if recorder is not None:
@@ -385,22 +406,29 @@ def main():
         fps_start = now
 
       if not record_only:
-        # Get current calibration from liveCalibration message
-        if sm.seen['liveCalibration']:
-          cur_rpyCalib = np.array(sm['liveCalibration'].rpyCalib)
-          cur_height = float(sm['liveCalibration'].height[0]) if len(sm['liveCalibration'].height) > 0 else camera_height
-          cur_valid_blocks = sm['liveCalibration'].validBlocks
-          cur_cal_status = str(sm['liveCalibration'].calStatus)
-          cur_cal_perc = int(sm['liveCalibration'].calPerc)
-        else:
+        # Get current calibration and model output
+        if custom_model_mode:
           cur_rpyCalib = rpyCalib
           cur_height = camera_height
-          cur_valid_blocks = 0
-          cur_cal_status = 'uncalibrated'
-          cur_cal_perc = 0
+          cur_valid_blocks = 20
+          cur_cal_status = 'calibrated'
+          cur_cal_perc = 100
+          model_msg = custom_model_msg
+        else:
+          if sm.seen['liveCalibration']:
+            cur_rpyCalib = np.array(sm['liveCalibration'].rpyCalib)
+            cur_height = float(sm['liveCalibration'].height[0]) if len(sm['liveCalibration'].height) > 0 else camera_height
+            cur_valid_blocks = sm['liveCalibration'].validBlocks
+            cur_cal_status = str(sm['liveCalibration'].calStatus)
+            cur_cal_perc = int(sm['liveCalibration'].calPerc)
+          else:
+            cur_rpyCalib = rpyCalib
+            cur_height = camera_height
+            cur_valid_blocks = 0
+            cur_cal_status = 'uncalibrated'
+            cur_cal_perc = 0
+          model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
 
-        # Visualize (show last received model data, or None if never received)
-        model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
         ok = visualizer.draw(
           display_rgb, model_msg, vis_intrinsics,
           cur_rpyCalib, cur_height,
@@ -421,6 +449,10 @@ def main():
           saved = recorder.saved_count if recorder else 0
           print(f"[RECORD] frame={tick_count//TICKS_PER_FRAME} speed={speed:.1f}m/s "
                 + f"fps={fps:.1f} saved={saved}")
+        elif custom_model_mode:
+          has_output = custom_model_msg is not None
+          print(f"[CustomModel] frame={tick_count//TICKS_PER_FRAME} speed={speed:.1f}m/s "
+                + f"fps={fps:.1f} output={'active' if has_output else 'buffering'}")
         else:
           modeld_status = 'connected' if sm.seen['modelV2'] else 'waiting...'
           calib_status = 'connected' if sm.seen['liveCalibration'] else 'waiting...'

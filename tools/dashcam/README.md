@@ -36,6 +36,19 @@ dashcam 是一个将 openpilot 感知管线（modeld + calibrationd）接入 Car
 
 **消息流**：Carla 帧 → VisionIPC → modeld 推理 → modelV2 感知输出 → visualizer 渲染叠加 → 显示/录制
 
+**自训练模型模式**（`--custom-model`）：绕过 modeld/VisionIPC/cereal，在主进程内直接用 onnxruntime 对 RGB 帧执行 ONNX 推理，结果转为 modelV2 消息后传递给 visualizer 渲染。
+
+```
+Carla RGB 帧 (1208×1928)
+  → warp_image (512×256)
+  → YUV420 6ch (6×128×256)
+  → 帧对拼接 (12×128×256)
+  → onnxruntime 推理
+  → MDN/BCE 解码
+  → cereal modelV2 消息
+  → visualizer 渲染
+```
+
 ## 文件说明
 
 | 文件 | 说明 |
@@ -50,6 +63,7 @@ dashcam 是一个将 openpilot 感知管线（modeld + calibrationd）接入 Car
 | `lead_ground_truth.py` | 前车真值提取：检测前方车辆并生成时序预测轨迹 |
 | `pose_ground_truth.py` | 自车运动真值：计算帧间平移速度和角速度 |
 | `view_npz.py` | NPZ 可视化工具：在 warp 图像上叠加所有 GT 标注 |
+| `infer.py` | 自训练 ONNX 模型进程内推理：warp → YUV420 → onnxruntime → modelV2 消息 |
 | `warp_example.py` | Warp 示例：演示训练时原始图像到模型输入空间的透视变换 |
 | `collect_multi_height.sh` | 批量数据采集：遍历多相机高度和多地图 |
 | `start_carla.sh` | 启动 Carla 0.9.16 Docker 容器（NVIDIA GPU、Epic 画质） |
@@ -118,6 +132,7 @@ python tools/dashcam/run.py --perfect-cam --high-quality
 | `--max-frames` | `0` | 最大帧数（0=无限） |
 | `--wide-road-only` | - | 单广角相机模式（仅 WIDE_ROAD 流，modeld 用 ecam intrinsics） |
 | `--road-only` | - | 单窄角相机模式（仅 ROAD 流，modeld 用 fcam intrinsics） |
+| `--custom-model` | `''` | 自训练 ONNX 模型路径（绕过 modeld，进程内 onnxruntime 推理） |
 
 ## 使用示例
 
@@ -142,6 +157,15 @@ python tools/dashcam/run.py --perfect-cam --wide-road-only
 
 # 单窄角相机模式（仅 ROAD 流）
 python tools/dashcam/run.py --perfect-cam --road-only
+
+# 使用自训练 ONNX 模型（绕过 modeld，进程内推理）
+python tools/dashcam/run.py --perfect-cam --road-only --high-quality \
+  --custom-model checkpoints/driving_vision.onnx
+
+# 自训练模型 + 录制视频
+python tools/dashcam/run.py --perfect-cam --high-quality \
+  --custom-model checkpoints/driving_vision.onnx \
+  --save-video custom_output.mp4 --max-frames 500
 ```
 
 ## 在线标定系统
@@ -609,6 +633,52 @@ python tools/dashcam/train/export_onnx.py \
 
 > openpilot 预训练的 `driving_vision.onnx` 使用 fp16 存储（~45MB）。fp16 转换仅影响权重存储精度，模型的输入和输出接口保持 fp32 不变，下游代码无需修改。
 
+### 自训练模型推理
+
+使用 `--custom-model` 可在 Carla 仿真中直接运行自训练的 ONNX 模型，无需 modeld 子进程、VisionIPC 或 cereal 消息传递：
+
+```bash
+# 启动 Carla
+./tools/dashcam/start_carla.sh
+
+# 使用自训练模型运行（fp32 或 fp16 均可）
+python tools/dashcam/run.py \
+  --perfect-cam --road-only --high-quality \
+  --custom-model checkpoints/driving_vision.onnx
+
+# 无头模式录制视频
+python tools/dashcam/run.py \
+  --perfect-cam --road-only --high-quality --no-display \
+  --custom-model checkpoints/driving_vision_fp16.onnx \
+  --save-video output.mp4 --max-frames 500
+```
+
+**工作原理**：
+
+1. `--custom-model` 自动启用 `--road-only` 单摄像头模式
+2. 跳过 Params/camerad/modeld/calibrationd/PubMaster/SubMaster 初始化
+3. 每帧在主进程内执行完整推理管线（`infer.py:CustomModelInference`）：
+   - `warp_image()` 将原始 RGB 透视变换到模型输入空间 (512×256)
+   - `rgb_to_yuv420_6ch()` 转换为 6 通道 YUV420
+   - 与上一帧拼接为 (12, 128, 256) 时序输入
+   - onnxruntime 执行 ONNX 推理（GPU 优先，自动 fallback CPU）
+   - MDN/BCE 解码 7 个输出张量
+   - 构建 cereal modelV2 消息
+4. 第一帧返回 None（需要两帧做时序配对），第二帧起正常渲染
+5. visualizer 接收 modelV2 消息，渲染车道线、路边沿、前车检测
+
+**输出解码**：
+
+| 输出张量 | 原始维度 | reshape | 解码方式 | 结果 |
+|---------|---------|---------|---------|------|
+| `lane_lines` | 528 | (4, 33, 4) | MDN: μ=[:,:,:2], σ=exp([:,:,2:]) | μ(4,33,2), σ(4,33,2) |
+| `lane_lines_prob` | 8 | (4, 2) | sigmoid, 取 [:,1] | prob(4,) |
+| `road_edges` | 264 | (2, 33, 4) | MDN 同上 | μ(2,33,2), σ(2,33,2) |
+| `lead` | 144 | (3, 6, 8) | MDN: μ=[:,:,:4], σ=exp([:,:,4:]) | μ(3,6,4), σ(3,6,4) |
+| `lead_prob` | 3 | (3,) | sigmoid | prob(3,) |
+| `pose` | 12 | (12,) | MDN: μ=[:6], σ=exp([6:]) | μ(6,), σ(6,) |
+| `road_transform` | 12 | (12,) | MDN 同上 | μ(6,), σ(6,) |
+
 ---
 
 ## 完整工作流示例
@@ -646,6 +716,11 @@ python tools/dashcam/train/monitor.py checkpoints/training_log.csv --live
 # 6. 训练完成后查看曲线和导出结果
 python tools/dashcam/train/monitor.py checkpoints/training_log.csv --plot
 ls -lh checkpoints/driving_vision*.onnx  # fp32 (~76MB) + fp16 (~38MB)
+
+# 7. 用自训练模型在 Carla 中验证效果
+python tools/dashcam/run.py \
+  --perfect-cam --road-only --high-quality \
+  --custom-model checkpoints/driving_vision.onnx
 ```
 
 ### 扩大数据规模
