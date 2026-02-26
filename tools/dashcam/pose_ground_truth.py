@@ -6,6 +6,11 @@ matching openpilot's cameraOdometry message semantics:
   pose[3:6] = angular velocity (rad/s) in calibrated frame [roll, pitch, yaw]
 
 road_transform[2] = camera height above road surface (meters).
+
+wide_from_device_euler: euler angles [roll, pitch, yaw] (rad) of wide camera
+  relative to the device (narrow camera) frame.
+  In CARLA, both cameras are rigidly co-mounted with the same orientation,
+  so this is a constant determined by the spawn parameters.
 """
 
 from math import cos, radians, sin
@@ -14,15 +19,28 @@ import numpy as np
 
 
 class PoseGroundTruth:
-  """Extract pose and road_transform ground truth from consecutive Carla frames."""
+  """Extract pose, road_transform, and wide_from_device_euler GT from Carla frames."""
 
-  def __init__(self, camera_offset_x=0.8, camera_height=1.13):
+  def __init__(self, camera_offset_x=0.8, camera_height=1.13,
+               wide_from_device_euler: np.ndarray | None = None):
+    """
+    Args:
+      camera_offset_x: forward offset of camera from vehicle center (m)
+      camera_height: camera height above road surface (m)
+      wide_from_device_euler: [3] float32 euler angles (roll, pitch, yaw) in rad
+        representing rotation from device (narrow cam) frame to wide cam frame.
+        Default is zeros (cameras share same orientation in CARLA).
+    """
     self.camera_offset_x = camera_offset_x
     self.camera_height = camera_height
     self.prev_transform = None
+    if wide_from_device_euler is None:
+      self._wide_from_device_euler = np.zeros(3, dtype=np.float32)
+    else:
+      self._wide_from_device_euler = np.asarray(wide_from_device_euler, dtype=np.float32)
 
   def update(self, vehicle_transform, dt=0.05):
-    """Compute inter-frame pose change and road_transform.
+    """Compute inter-frame pose change, road_transform, and wide_from_device_euler.
 
     Args:
       vehicle_transform: carla.Transform of the ego vehicle this frame.
@@ -31,6 +49,7 @@ class PoseGroundTruth:
     Returns:
       pose: [6] float32 -- translational velocity (m/s) + angular velocity (rad/s)
       road_transform: [6] float32 -- [0,0,camera_height, 0,0,0]
+      wide_from_device_euler: [3] float32 -- constant relative rotation of wide cam
     """
     road_transform = np.zeros(6, dtype=np.float32)
     road_transform[2] = self.camera_height
@@ -38,7 +57,7 @@ class PoseGroundTruth:
     if self.prev_transform is None:
       self.prev_transform = vehicle_transform
       pose = np.zeros(6, dtype=np.float32)
-      return pose, road_transform
+      return pose, road_transform, self._wide_from_device_euler.copy()
 
     # Translation: world-frame displacement, yaw-only rotation into calibrated frame
     dx = vehicle_transform.location.x - self.prev_transform.location.x
@@ -74,4 +93,4 @@ class PoseGroundTruth:
     pose = np.concatenate([trans, rot])
 
     self.prev_transform = vehicle_transform
-    return pose, road_transform
+    return pose, road_transform, self._wide_from_device_euler.copy()

@@ -95,6 +95,7 @@ class DualCameraDataRecorder:
       lead_prob=labels['lead_prob'],
       pose=labels['pose'],
       road_transform=labels['road_transform'],
+      wide_from_device_euler=labels.get('wide_from_device_euler', np.zeros(3, dtype=np.float32)),
       rpyCalib=np.asarray(rpyCalib, dtype=np.float32),
       camera_height=np.float32(self.camera_height),
       v_ego=np.float32(v_ego),

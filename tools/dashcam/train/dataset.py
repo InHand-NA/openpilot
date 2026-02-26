@@ -112,6 +112,7 @@ def extract_targets(npz_data: dict) -> dict[str, np.ndarray]:
     lead_prob: (3,)
     pose: (6,)
     road_transform: (6,)
+    wide_from_device_euler: (3,) — relative rotation of wide cam; zeros if missing
   """
   targets = {}
 
@@ -138,6 +139,12 @@ def extract_targets(npz_data: dict) -> dict[str, np.ndarray]:
   # Pose and road_transform
   targets['pose'] = npz_data['pose'].astype(np.float32)  # (6,)
   targets['road_transform'] = npz_data['road_transform'].astype(np.float32)  # (6,)
+
+  # wide_from_device_euler: optional field (zeros if not in older datasets)
+  if 'wide_from_device_euler' in npz_data:
+    targets['wide_from_device_euler'] = npz_data['wide_from_device_euler'].astype(np.float32)  # (3,)
+  else:
+    targets['wide_from_device_euler'] = np.zeros(3, dtype=np.float32)
 
   return targets
 
@@ -264,6 +271,11 @@ class CachedDualCameraDrivingDataset(Dataset):
                 'road_edges', 'road_edges_valid', 'road_edges_prob',
                 'lead', 'lead_prob', 'pose', 'road_transform')
     }
+    # wide_from_device_euler: optional (zeros if not in older cache files)
+    if 'wide_from_device_euler' in curr:
+      targets['wide_from_device_euler'] = curr['wide_from_device_euler']
+    else:
+      targets['wide_from_device_euler'] = np.zeros(3, dtype=np.float32)
 
     return (
       torch.from_numpy(road),   # uint8 (12, 128, 256)

@@ -86,8 +86,14 @@ class ModeldLabelExtractor:
       rt_trans = np.array(odom.roadTransformTrans, dtype=np.float32)
       # road_transform: first 3 dims from roadTransformTrans, last 3 zero-padded
       labels['road_transform'] = np.concatenate([rt_trans[:3], np.zeros(3, dtype=np.float32)])  # (6,)
+      # wide_from_device_euler: euler angles of wide camera relative to device frame
+      if hasattr(odom, 'wideFromDeviceEuler'):
+        labels['wide_from_device_euler'] = np.array(odom.wideFromDeviceEuler, dtype=np.float32)  # (3,)
+      else:
+        labels['wide_from_device_euler'] = np.zeros(3, dtype=np.float32)
     else:
       labels['pose'] = np.zeros(6, dtype=np.float32)
       labels['road_transform'] = np.zeros(6, dtype=np.float32)
+      labels['wide_from_device_euler'] = np.zeros(3, dtype=np.float32)
 
     return labels

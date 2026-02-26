@@ -51,13 +51,14 @@ class GaussianNLLLoss(nn.Module):
 class DrivingLoss(nn.Module):
   """Combined loss for all output heads.
 
-  lane_lines:      GaussianNLL, masked by (lane_lines_prob > 0.5) AND per-point valid
-  lane_lines_prob: BCEWithLogitsLoss
-  road_edges:      GaussianNLL, masked by (road_edges_prob > 0.5) AND per-point valid
-  lead:            GaussianNLL, masked by lead_prob > 0.5
-  lead_prob:       BCEWithLogitsLoss
-  pose:            GaussianNLL (no mask)
-  road_transform:  GaussianNLL (no mask)
+  lane_lines:             GaussianNLL, masked by (lane_lines_prob > 0.5) AND per-point valid
+  lane_lines_prob:        BCEWithLogitsLoss
+  road_edges:             GaussianNLL, masked by (road_edges_prob > 0.5) AND per-point valid
+  lead:                   GaussianNLL, masked by lead_prob > 0.5
+  lead_prob:              BCEWithLogitsLoss
+  pose:                   GaussianNLL (no mask)
+  road_transform:         GaussianNLL (no mask)
+  wide_from_device_euler: GaussianNLL (no mask); only when pred has this key
   """
 
   def __init__(self, model_cfg: ModelConfig | None = None, train_cfg: TrainConfig | None = None):
@@ -121,6 +122,11 @@ class DrivingLoss(nn.Module):
 
     # --- road_transform: MDN, no mask ---
     losses['road_transform'] = self.gnll(preds['road_transform'], targets['road_transform'])
+
+    # --- wide_from_device_euler: MDN, no mask (optional; only when pred has key) ---
+    if 'wide_from_device_euler' in preds and 'wide_from_device_euler' in targets:
+      # pred: (B, 6) → 3 mu + 3 sigma, target: (B, 3)
+      losses['wide_from_device_euler'] = self.gnll(preds['wide_from_device_euler'], targets['wide_from_device_euler'])
 
     # Weighted total
     total = sum(self.weights.get(k, 1.0) * v for k, v in losses.items())
