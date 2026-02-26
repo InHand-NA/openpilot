@@ -35,7 +35,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 from openpilot.tools.dashcam.train.config import DualCameraModelConfig, ModelConfig, TrainConfig
-from openpilot.tools.dashcam.train.dataset import DrivingDataset, DualCameraDrivingDataset
+from openpilot.tools.dashcam.train.dataset import CachedDualCameraDrivingDataset, DrivingDataset, DualCameraDrivingDataset
 from openpilot.tools.dashcam.train.losses import DrivingLoss
 from openpilot.tools.dashcam.train.model import DrivingVisionModel
 
@@ -125,12 +125,20 @@ def validate(model: nn.Module, loader: DataLoader, criterion: DrivingLoss, devic
   return total_loss / n, avg_subs
 
 
-def save_checkpoint(model: nn.Module, optimizer: torch.optim.Optimizer, epoch: int, val_loss: float, path: str):
+def save_checkpoint(
+  model: nn.Module,
+  optimizer: torch.optim.Optimizer,
+  scheduler: torch.optim.lr_scheduler.LRScheduler,
+  epoch: int,
+  val_loss: float,
+  path: str,
+):
   torch.save(
     {
       'epoch': epoch,
       'model_state_dict': model.state_dict(),
       'optimizer_state_dict': optimizer.state_dict(),
+      'scheduler_state_dict': scheduler.state_dict(),
       'val_loss': val_loss,
     },
     path,
@@ -183,7 +191,7 @@ class EarlyStopping:
 
 def main():
   parser = argparse.ArgumentParser(description='Train driving vision model')
-  parser.add_argument('--data-dirs', nargs='+', required=True, help='Directories containing NPZ training data')
+  parser.add_argument('--data-dirs', nargs='+', default=None, help='Directories containing NPZ training data (required unless --cache-dirs is used)')
   parser.add_argument('--output-dir', default='checkpoints', help='Output directory for checkpoints')
   parser.add_argument('--epochs', type=int, default=None, help='Override number of epochs')
   parser.add_argument('--batch-size', type=int, default=None, help='Override batch size')
@@ -193,9 +201,14 @@ def main():
   parser.add_argument('--early-stop', type=int, default=0, help='Early stopping patience (0=disabled)')
   parser.add_argument('--min-delta', type=float, default=0.001, help='Minimum val_loss improvement to count as progress (default: 0.001)')
   parser.add_argument('--dual-camera', action='store_true', help='Train dual-camera model (uint8 input, ReLU)')
+  parser.add_argument('--cache-dirs', nargs='+', default=None, help='Pre-warped YUV cache dirs (from preprocess_cache.py); enables CachedDualCameraDrivingDataset')
+  parser.add_argument('--num-workers', type=int, default=None, help='Override DataLoader num_workers')
   args = parser.parse_args()
 
-  dual_camera = args.dual_camera
+  use_cache = args.cache_dirs is not None
+  if not use_cache and args.data_dirs is None:
+    parser.error('Either --data-dirs or --cache-dirs is required')
+  dual_camera = args.dual_camera or use_cache
   model_cfg = DualCameraModelConfig() if dual_camera else ModelConfig()
   train_cfg = TrainConfig()
   if args.epochs is not None:
@@ -204,15 +217,22 @@ def main():
     train_cfg.batch_size = args.batch_size
   if args.lr is not None:
     train_cfg.lr = args.lr
+  if args.num_workers is not None:
+    train_cfg.num_workers = args.num_workers
 
   os.makedirs(args.output_dir, exist_ok=True)
 
   # Dataset
-  print(f"Loading data from: {args.data_dirs}")
-  if dual_camera:
+  if use_cache:
+    print(f"Loading cache from: {args.cache_dirs}")
+    print("Dual-camera cached mode: using CachedDualCameraDrivingDataset")
+    dataset = CachedDualCameraDrivingDataset(args.cache_dirs)
+  elif dual_camera:
+    print(f"Loading data from: {args.data_dirs}")
     print("Dual-camera mode: using DualCameraDrivingDataset")
     dataset = DualCameraDrivingDataset(args.data_dirs)
   else:
+    print(f"Loading data from: {args.data_dirs}")
     dataset = DrivingDataset(args.data_dirs)
   print(f"Total samples: {len(dataset)}")
 
@@ -244,9 +264,20 @@ def main():
     ckpt = torch.load(args.resume, map_location=device, weights_only=True)
     model.load_state_dict(ckpt['model_state_dict'])
     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+    if 'scheduler_state_dict' in ckpt:
+      scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+    else:
+      # Legacy checkpoint: no scheduler state — fast-forward to correct position.
+      # LinearLR uses the current optimizer LR multiplicatively, so we must reset it
+      # to the scheduler's "step 0" value first, then advance.
+      for pg in optimizer.param_groups:
+        pg['lr'] = train_cfg.lr * 0.01  # start_factor = 0.01
+      start_epoch_tmp = ckpt['epoch'] + 1
+      for _ in range(start_epoch_tmp):
+        scheduler.step()
     start_epoch = ckpt['epoch'] + 1
     best_val_loss = ckpt.get('val_loss', float('inf'))
-    print(f"Resumed from epoch {start_epoch}, val_loss={best_val_loss:.4f}")
+    print(f"Resumed from epoch {start_epoch}, val_loss={best_val_loss:.4f}, lr={optimizer.param_groups[0]['lr']:.6f}")
 
   # CSV logger
   csv_path = os.path.join(args.output_dir, "training_log.csv")
@@ -286,12 +317,12 @@ def main():
 
     # Save periodic checkpoint
     if (epoch + 1) % train_cfg.save_every == 0:
-      save_checkpoint(model, optimizer, epoch, val_loss, os.path.join(args.output_dir, f"checkpoint_epoch{epoch + 1}.pt"))
+      save_checkpoint(model, optimizer, scheduler, epoch, val_loss, os.path.join(args.output_dir, f"checkpoint_epoch{epoch + 1}.pt"))
 
     # Save best
     if val_loss < best_val_loss:
       best_val_loss = val_loss
-      save_checkpoint(model, optimizer, epoch, val_loss, os.path.join(args.output_dir, "best.pt"))
+      save_checkpoint(model, optimizer, scheduler, epoch, val_loss, os.path.join(args.output_dir, "best.pt"))
 
     # Early stopping check
     if early_stop and early_stop.step(val_loss):
@@ -300,7 +331,7 @@ def main():
       break
 
   # Save final
-  save_checkpoint(model, optimizer, epoch, val_loss, os.path.join(args.output_dir, "final.pt"))
+  save_checkpoint(model, optimizer, scheduler, epoch, val_loss, os.path.join(args.output_dir, "final.pt"))
 
   csv_logger.close()
 

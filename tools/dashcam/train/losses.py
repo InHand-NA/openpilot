@@ -22,7 +22,7 @@ class GaussianNLLLoss(nn.Module):
   Loss = 0.5 * ((target - mu) / sigma)^2 + log(sigma)
   """
 
-  def __init__(self, min_log_sigma: float = -7.0, max_log_sigma: float = 7.0):
+  def __init__(self, min_log_sigma: float = -3.0, max_log_sigma: float = 3.0):
     super().__init__()
     self.min_log_sigma = min_log_sigma
     self.max_log_sigma = max_log_sigma

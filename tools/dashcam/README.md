@@ -58,12 +58,16 @@ Carla RGB 帧 (1208×1928)
 | `carla_world.py` | Carla 环境管理：自车/NPC 生成、相机挂载、帧采集 |
 | `visualizer.py` | 感知渲染：车道线多边形、路边沿、前车三角标记、标定进度面板 |
 | `calibrationd.py` | 在线标定：从视觉里程计估计相机姿态（pitch/yaw）和高度 |
-| `data_recorder.py` | 训练数据记录：逐帧保存 RGB + GT 标签为压缩 NPZ 文件 |
+| `data_recorder.py` | 单目训练数据采集：逐帧保存 RGB + Carla GT 标签为 NPZ |
+| `dual_data_recorder.py` | **双目**训练数据采集：保存 road_rgb + wide_rgb + modeld 标签为 NPZ |
+| `modeld_label_extractor.py` | 从 modeld 的 modelV2/cameraOdometry 消息中提取标签 |
+| `custom_modeld.py` | 自训练**双目** tinygrad 模型推理子进程（替代 modeld） |
 | `lane_ground_truth.py` | 车道线真值提取：从 Carla 地图 API 获取 4 条车道线 + 2 条路边沿 |
 | `lead_ground_truth.py` | 前车真值提取：检测前方车辆并生成时序预测轨迹 |
 | `pose_ground_truth.py` | 自车运动真值：计算帧间平移速度和角速度 |
-| `view_npz.py` | NPZ 可视化工具：在 warp 图像上叠加所有 GT 标注 |
-| `infer.py` | 自训练 ONNX 模型进程内推理：warp → YUV420 → onnxruntime → modelV2 消息 |
+| `view_npz.py` | 单目 NPZ 可视化工具：在 warp 图像上叠加所有 GT 标注 |
+| `view_dual_data.py` | 双目 NPZ 可视化工具：并排显示 road/wide 相机 + modeld 标签 |
+| `infer.py` | 自训练单目 ONNX 模型进程内推理：warp → YUV420 → onnxruntime → modelV2 消息 |
 | `warp_example.py` | Warp 示例：演示训练时原始图像到模型输入空间的透视变换 |
 | `collect_multi_height.sh` | 批量数据采集：遍历多相机高度和多地图 |
 | `start_carla.sh` | 启动 Carla 0.9.16 Docker 容器（NVIDIA GPU、Epic 画质） |
@@ -418,13 +422,15 @@ python tools/dashcam/warp_example.py data/training/carla_001/000100.npz
 
 | 文件 | 说明 |
 |------|------|
-| `train/config.py` | 模型与训练超参数配置（`ModelConfig` + `TrainConfig`） |
+| `train/config.py` | 模型与训练超参数配置（`ModelConfig` / `DualCameraModelConfig` / `TrainConfig`） |
 | `train/model.py` | PyTorch 模型定义（FastViT 骨干 + 双路输出 Head） |
-| `train/dataset.py` | 数据集加载（帧配对、warp、YUV420 转换、GT 提取、NaN 处理） |
+| `train/dataset.py` | 数据集（`DrivingDataset` / `DualCameraDrivingDataset` / `CachedDualCameraDrivingDataset`） |
 | `train/losses.py` | 损失函数（GaussianNLL + BCEWithLogits + 组合加权 + 逐点 mask） |
 | `train/train.py` | 训练脚本（AdamW + CosineAnnealing + warmup + 早停 + CSV 日志） |
 | `train/monitor.py` | 训练监控工具（实时指标查看、训练曲线绘制） |
 | `train/export_onnx.py` | ONNX 导出（RepConv 重参数化 + onnxruntime 验证 + fp16 转换） |
+| `train/preprocess_cache.py` | **预处理缓存**：将原始 NPZ warp+YUV420 一次性预计算存盘，加速训练 26× |
+| `train/compile_tinygrad.py` | ONNX → tinygrad TinyJit pkl 编译（供 `custom_modeld.py` 加载） |
 
 ### 环境准备
 
@@ -484,12 +490,15 @@ python tools/dashcam/train/train.py \
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--data-dirs` | 必填 | 训练数据目录（支持多个） |
+| `--data-dirs` | - | 原始 NPZ 训练数据目录（支持多个，与 `--cache-dirs` 二选一） |
+| `--cache-dirs` | - | 预处理缓存目录（`preprocess_cache.py` 生成，速度比 `--data-dirs` 快 26×） |
 | `--output-dir` | `checkpoints` | checkpoint 输出目录 |
 | `--epochs` | `100` | 训练总轮数 |
 | `--batch-size` | `16` | 批大小 |
 | `--lr` | `1e-3` | 初始学习率 |
-| `--resume` | - | 从指定 checkpoint 恢复训练 |
+| `--num-workers` | `4` | DataLoader 工作进程数（缓存训练建议 8） |
+| `--dual-camera` | - | 双目模型模式（使用 `--data-dirs` 时需指定；`--cache-dirs` 自动启用） |
+| `--resume` | - | 从指定 checkpoint 恢复训练（自动恢复 scheduler 状态） |
 | `--no-export` | - | 训练结束不自动导出 ONNX |
 | `--early-stop` | `0` | 早停耐心值（0=禁用），val_loss 连续 N 个 epoch 无改善则终止 |
 
@@ -745,4 +754,228 @@ bash tools/dashcam/collect_multi_height.sh
 python tools/dashcam/train/train.py \
   --data-dirs data/training/Town04_Opt data/training/Town03_Opt data/training/Town06_Opt \
   --epochs 100
+```
+
+---
+
+## 双目模型
+
+双目模型同时输入**窄角（road）** 和**广角（wide）** 两路相机，与 openpilot 实际推理管线对齐（同一帧送入两路 VisionIPC 流）。训练标签来自 openpilot modeld 的实时输出，而非 Carla 几何真值。
+
+### 模型架构
+
+```
+输入: img     (B, 12, 128, 256) uint8  — 窄角 2帧 × 6ch YUV420
+      big_img (B, 12, 128, 256) uint8  — 广角 2帧 × 6ch YUV420
+      → 通道维度拼接 → (B, 24, 128, 256)
+      → uint8 归一化 (/128.0 - 1.0，模型内部）
+       ↓
+骨干: FastViT RepMixer [2,2,6,2], channels [64,128,256,512]（ReLU 激活）
+      → DWConv(512→1024) + SE + GAP + FC → 2048 维特征
+       ↓
+   ┌───────────────────┐    ┌───────────────────┐
+   │ Bottleneck Head   │    │ No-Bottleneck Head│
+   │ (L2Norm, 512维)   │    │ (512维)           │
+   │ ├ lane_lines  528 │    │ ├ pose         12 │
+   │ ├ lane_lines_prob │    │ └ road_transform  │
+   │ │              8  │    │               12  │
+   │ ├ road_edges  264 │    └───────────────────┘
+   │ ├ lead        144 │
+   │ └ lead_prob     3 │
+   └───────────────────┘
+        总输出: 971 维
+```
+
+与单目模型的差异：
+- `in_channels=24`（单目为 12）
+- `uint8_input=True`（模型内部归一化，匹配 openpilot modeld 的 loadyuv.cl）
+- `use_relu=True`（匹配 openpilot 预训练权重约定）
+
+### 双目数据采集
+
+双目数据采集使用 openpilot 自身的 modeld 作为标注器，输出的标签与 modeld 实际推理结果一致。
+
+```
+Carla 模拟器 (20 FPS)
+    ↓
+DashcamCarlaWorld
+    ├─ road_rgb (1928×1208) — 窄角 RGB
+    └─ wide_rgb (1928×1208) — 广角 RGB
+    ↓
+VisionIPC → modeld (openpilot 原版)
+    ├─ modelV2  → ModeldLabelExtractor → 7 类感知标签
+    └─ cameraOdometry → pose / road_transform
+    ↓
+DualCameraDataRecorder
+    └─ 保存 NPZ（road_rgb + wide_rgb + 标签）
+```
+
+**采集命令**：
+
+```bash
+# 启动 Carla
+./tools/dashcam/start_carla.sh
+
+# 采集双目数据（20,000 帧，约 15 分钟）
+python tools/dashcam/run.py \
+  --perfect-cam \
+  --record data/dual_camera_train/Town04_001 \
+  --record-modeld \
+  --record-only --fast \
+  --max-frames 20000
+```
+
+> `--record-modeld` 启用双目采集模式：保存 road_rgb + wide_rgb，并从 modeld 输出提取标签。
+
+**双目 NPZ 数据格式**：
+
+| 字段 | 形状 | 类型 | 说明 |
+|------|------|------|------|
+| `road_rgb` | (1208, 1928, 3) | uint8 | 窄角原始 RGB |
+| `wide_rgb` | (1208, 1928, 3) | uint8 | 广角原始 RGB |
+| `lane_lines` | (4, 33, 3) | float32 | 4 条车道线（来自 modeld） |
+| `lane_lines_prob` | (4,) | float32 | 车道线概率 |
+| `road_edges` | (2, 33, 3) | float32 | 2 条路边沿 |
+| `road_edges_prob` | (2,) | float32 | 路边沿存在标志（均为 1.0） |
+| `lead` | (3, 6, 4) | float32 | 前车轨迹（来自 modeld） |
+| `lead_prob` | (3,) | float32 | 前车概率 |
+| `pose` | (6,) | float32 | 自车运动（来自 cameraOdometry） |
+| `road_transform` | (6,) | float32 | 道路变换（来自 cameraOdometry） |
+| `rpyCalib` | (3,) | float32 | 相机标定角 |
+| `label_source` | str | object | `'modeld'` |
+
+**查看双目数据**：
+
+```bash
+python tools/dashcam/view_dual_data.py data/dual_camera_train/Town04_001/
+```
+
+### 预处理缓存
+
+原始双目数据每帧约 6MB（含两路高分辨率 RGB），直接训练时数据加载是瓶颈（7.8 分钟/epoch）。`preprocess_cache.py` 一次性将 warp + YUV420 转换预计算存盘，训练时直接加载小文件：
+
+| | 原始数据 | 缓存数据 |
+|---|---|---|
+| 单帧大小 | ~6.2 MB | ~192 KB（**30× 缩小**） |
+| 每 epoch | ~7.8 分钟 | ~18 秒（**26× 加速**） |
+| 100 epoch | ~13 小时 | ~30 分钟 |
+
+```bash
+# 预处理（使用全部 CPU 核，~30 秒处理 20k 帧）
+python tools/dashcam/train/preprocess_cache.py data/dual_camera_train/Town04_001
+# 输出: data/dual_camera_train/Town04_001_cache/
+```
+
+缓存文件包含：`road_yuv (6,128,256) uint8`、`wide_yuv (6,128,256) uint8`、所有标签字段。
+
+### 双目模型训练
+
+```bash
+# 方式 A：直接用原始数据（慢）
+python tools/dashcam/train/train.py \
+  --data-dirs data/dual_camera_train/Town04_001 \
+  --dual-camera \
+  --output-dir checkpoints/dual \
+  --epochs 100 --batch-size 16 --early-stop 20
+
+# 方式 B：使用预处理缓存（推荐，26× 快）
+python tools/dashcam/train/preprocess_cache.py data/dual_camera_train/Town04_001
+python tools/dashcam/train/train.py \
+  --cache-dirs data/dual_camera_train/Town04_001_cache \
+  --output-dir checkpoints/dual \
+  --epochs 100 --batch-size 16 --early-stop 20 \
+  --num-workers 8
+
+# 从 checkpoint 恢复（scheduler 状态自动恢复）
+python tools/dashcam/train/train.py \
+  --cache-dirs data/dual_camera_train/Town04_001_cache \
+  --output-dir checkpoints/dual \
+  --epochs 200 --resume checkpoints/dual/best.pt
+```
+
+训练结束自动导出 `checkpoints/dual/driving_vision.onnx`。
+
+### 编译为 tinygrad pkl
+
+双目模型推理使用 tinygrad（匹配 openpilot modeld 的推理框架）：
+
+```bash
+# 若需要从最佳 checkpoint 重新导出 ONNX（训练默认从最终 epoch 导出）
+source .venv/bin/activate && python3 -c "
+import torch
+from openpilot.tools.dashcam.train.config import DualCameraModelConfig
+from openpilot.tools.dashcam.train.model import DrivingVisionModel
+from openpilot.tools.dashcam.train.export_onnx import export_onnx_dual
+device = torch.device('cuda')
+model = DrivingVisionModel(DualCameraModelConfig()).to(device)
+ckpt = torch.load('checkpoints/dual/best.pt', map_location=device, weights_only=True)
+model.load_state_dict(ckpt['model_state_dict'])
+print(f'epoch={ckpt[\"epoch\"]}, val_loss={ckpt[\"val_loss\"]:.4f}')
+export_onnx_dual(model, 'checkpoints/dual/driving_vision.onnx', device)
+"
+
+# 编译 ONNX → tinygrad pkl（约 1 分钟）
+DEV=CUDA python3 tools/dashcam/train/compile_tinygrad.py checkpoints/dual/driving_vision.onnx
+# 输出:
+#   checkpoints/dual/driving_vision_tinygrad_cuda.pkl  (~80MB)
+#   checkpoints/dual/driving_vision_metadata.pkl
+```
+
+### 双目模型推理
+
+使用 `--custom-modeld` 启动自训练双目模型推理（作为独立子进程，替代 openpilot modeld）：
+
+```bash
+./tools/dashcam/start_carla.sh
+
+python tools/dashcam/run.py \
+  --perfect-cam --high-quality \
+  --custom-modeld checkpoints/dual/driving_vision_tinygrad_cuda.pkl
+```
+
+与 `--custom-model`（单目进程内推理）的对比：
+
+| | `--custom-model` | `--custom-modeld` |
+|---|---|---|
+| 相机 | 单目（road） | **双目**（road + wide） |
+| 模型格式 | ONNX（onnxruntime） | tinygrad pkl |
+| 运行方式 | 主进程内 | 独立子进程（VisionIPC） |
+| 标签来源 | Carla GT | modeld 输出 |
+
+### 完整双目工作流
+
+```bash
+# 0. 环境准备
+source .venv/bin/activate
+./tools/dashcam/start_carla.sh
+
+# 1. 采集双目数据（20,000 帧）
+python tools/dashcam/run.py \
+  --perfect-cam \
+  --record data/dual_camera_train/Town04_001 \
+  --record-modeld --record-only --fast \
+  --max-frames 20000
+
+# 2. 预处理缓存（30 秒，32 核并行）
+python tools/dashcam/train/preprocess_cache.py \
+  data/dual_camera_train/Town04_001
+
+# 3. 训练（约 30 分钟，RTX 4090）
+python tools/dashcam/train/train.py \
+  --cache-dirs data/dual_camera_train/Town04_001_cache \
+  --output-dir checkpoints/dual \
+  --epochs 100 --batch-size 16 --early-stop 20 \
+  --num-workers 8
+
+# 4. （可选）从 best.pt 重新导出 ONNX
+# ...（见上方代码）
+
+# 5. 编译为 tinygrad pkl
+DEV=CUDA python3 tools/dashcam/train/compile_tinygrad.py \
+  checkpoints/dual/driving_vision.onnx
+
+# 6. 验证推理效果
+python tools/dashcam/run.py \
+  --perfect-cam --high-quality \
+  --custom-modeld checkpoints/dual/driving_vision_tinygrad_cuda.pkl
 ```

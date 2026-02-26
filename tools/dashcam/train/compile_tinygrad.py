@@ -63,7 +63,11 @@ def compile_model(onnx_path: str, output_pkl_path: str):
   run_onnx = OnnxRunner(onnx_path)
 
   # Read input shapes and types
-  input_shapes = {name: spec.shape for name, spec in run_onnx.graph_inputs.items()}
+  # Replace symbolic string dimensions (e.g. 'batch') with 1
+  def _resolve_shape(shp):
+    return tuple(1 if not isinstance(d, int) else d for d in shp)
+
+  input_shapes = {name: _resolve_shape(spec.shape) for name, spec in run_onnx.graph_inputs.items()}
   input_types = {name: spec.dtype for name, spec in run_onnx.graph_inputs.items()}
   print(f"  Inputs: {input_shapes}")
   print(f"  Types: {input_types}")
