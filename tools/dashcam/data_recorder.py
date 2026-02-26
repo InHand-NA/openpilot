@@ -126,11 +126,13 @@ class DataRecorder:
     return True
 
   def record_with_vego(self, rgb, lane_gt, lead_gt, pose_gt, road_transform_gt, v_ego,
-                       road_edges_gt=None, rpyCalib=None, world_pose=None):
+                       road_edges_gt=None, rpyCalib=None, world_pose=None,
+                       wide_from_device_euler=None):
     """Record one frame with explicit v_ego, per-frame rpyCalib, and optional world_pose.
 
     Same as record() but includes v_ego, rpyCalib and world_pose in the saved data.
     world_pose: [6] float32 Carla world coords [x, y, z, roll_deg, pitch_deg, yaw_deg].
+    wide_from_device_euler: [3] float32 euler angles of wide camera relative to device.
     """
     self.frame_idx += 1
 
@@ -166,6 +168,8 @@ class DataRecorder:
     )
     if world_pose is not None:
       save_dict['world_pose'] = np.asarray(world_pose, dtype=np.float32)
+    if wide_from_device_euler is not None:
+      save_dict['wide_from_device_euler'] = np.asarray(wide_from_device_euler, dtype=np.float32)
     np.savez_compressed(filepath, **save_dict)
 
     self.saved_count += 1

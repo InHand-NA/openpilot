@@ -441,7 +441,7 @@ def main():
         rec_road_edges_gt = lane_gt_extractor.get_road_edges(veh_transform)
         rec_road_edges_gt = lane_gt_extractor.filter_road_edges(rec_lane_gt, rec_road_edges_gt)
         rec_lead_gt = lead_gt_extractor.get_lead_vehicles(veh_transform, v_ego, road_edges=rec_road_edges_gt)
-        rec_pose, rec_road_transform = pose_gt_extractor.update(veh_transform)
+        rec_pose, rec_road_transform, rec_wide_from_device_euler = pose_gt_extractor.update(veh_transform)
 
         # Per-frame rpyCalib: camera mounting angles + vehicle tilt
         veh_pitch_rad = np.deg2rad(veh_transform.rotation.pitch)
@@ -477,6 +477,7 @@ def main():
           road_edges_gt=rec_road_edges_gt,
           rpyCalib=frame_rpyCalib,
           world_pose=world_pose,
+          wide_from_device_euler=rec_wide_from_device_euler,
         )
 
       # Dual-camera recording with modeld labels
