@@ -68,8 +68,19 @@ def main():
     dynamo=False,  # use legacy exporter (ScriptModule compatible)
   )
 
-  # Validate with onnxruntime
+  # Simplify: remove Identity nodes and fold constants
+  from onnxsim import simplify
   onnx_model = onnx.load(args.output)
+  n_nodes_before = len(onnx_model.graph.node)
+  onnx_model, ok = simplify(onnx_model)
+  if ok:
+    onnx.save(onnx_model, args.output)
+    print(f"  onnxsim: {n_nodes_before} -> {len(onnx_model.graph.node)} nodes")
+  else:
+    print("  onnxsim: simplification failed, keeping original")
+    onnx_model = onnx.load(args.output)
+
+  # Validate
   onnx.checker.check_model(onnx_model)
   print("  ONNX checker: OK")
 
