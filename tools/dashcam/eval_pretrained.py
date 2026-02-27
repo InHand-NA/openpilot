@@ -358,7 +358,8 @@ def render_comparison(npz_data, prev_npz_data, model, device, camera_height):
      (200, 200, 200)),
   ])
 
-  return np.vstack([info, combined])
+  result = np.vstack([info, combined])
+  return cv2.resize(result, (result.shape[1] * 2, result.shape[0] * 2), interpolation=cv2.INTER_LINEAR)
 
 
 def run_visualize(args):
@@ -382,7 +383,7 @@ def run_visualize(args):
 
   win_name = 'eval_pretrained: GT vs PRED'
   cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-  cv2.resizeWindow(win_name, MW * 2, MH + 80)
+  cv2.resizeWindow(win_name, MW * 4, MH * 2 + 160)
 
   idx = max(0, min(args.start, len(npz_files) - 1))
   cached_img = None
