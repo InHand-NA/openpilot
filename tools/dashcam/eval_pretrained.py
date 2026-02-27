@@ -45,7 +45,7 @@ from openpilot.tools.dashcam.train.dataset import (
   rgb_to_yuv420_6ch,
   warp_image,
 )
-from openpilot.tools.dashcam.train.pretrained_model import ONNX_OUTPUT_SLICES, PretrainedVisionModel
+from openpilot.tools.dashcam.train.pretrained_model import ONNX_OUTPUT_SLICES
 from openpilot.tools.dashcam.visualizer import (
   _build_transform,
   _draw_polygon_alpha,
@@ -59,6 +59,21 @@ from openpilot.tools.dashcam.visualizer import (
 X_IDXS = np.array(ModelConstants.X_IDXS, dtype=np.float32)  # (33,)
 MW, MH = MEDMODEL_INPUT_SIZE  # 512, 256
 TEMPORAL_SKIP = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ  # 4
+
+
+def load_traced_model(pt_path: str, device: str = 'cpu'):
+  """Load TorchScript traced model and return a callable that outputs named slices."""
+  backbone = torch.jit.load(pt_path, map_location=device)
+  backbone.eval()
+  for p in backbone.parameters():
+    p.requires_grad_(False)
+  n_params = sum(p.numel() for p in backbone.parameters())
+
+  def predict(img: torch.Tensor, big_img: torch.Tensor) -> dict[str, torch.Tensor]:
+    flat = backbone(img, big_img).float()  # (1, 1576)
+    return {name: flat[:, sl] for name, sl in ONNX_OUTPUT_SLICES.items()}
+
+  return predict, n_params
 
 
 # ============================================================
@@ -362,11 +377,9 @@ def run_visualize(args):
 
   # Load model
   print("Loading pretrained model...")
-  model = PretrainedVisionModel.from_traced(args.model, freeze=True, device=args.device)
-  model.eval()
-  print(f"  Parameters: {model.n_total_params():,}")
+  model, n_params = load_traced_model(args.model, device=args.device)
+  print(f"  Parameters: {n_params:,}")
 
-  # Window setup
   win_name = 'eval_pretrained: GT vs PRED'
   cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
   cv2.resizeWindow(win_name, MW * 2, MH + 80)
@@ -375,7 +388,10 @@ def run_visualize(args):
   cached_img = None
   cached_idx = -1
 
-  print(f"\nControls: Left/Right = prev/next, PgUp/PgDn = ±100, Home/End = first/last, q/ESC = quit\n")
+  print(f"Controls: Left/Right = prev/next, PgUp/PgDn = ±100, Home/End = first/last, q/ESC = quit")
+
+  print("Loading first frame...", end="", flush=True)
+  first_frame = True
 
   while True:
     if idx != cached_idx:
@@ -388,12 +404,16 @@ def run_visualize(args):
       cached_img = render_comparison(npz_data, prev_data, model, args.device, camera_height)
       dt = time.monotonic() - t0
 
+      if first_frame:
+        print(f" done ({dt:.2f}s)")
+        first_frame = False
+
       fname = npz_files[idx].name
       print(f"\r[{idx+1}/{len(npz_files)}] {fname}  ({dt:.2f}s)", end="", flush=True)
       cached_idx = idx
 
     cv2.imshow(win_name, cached_img)
-    key = cv2.waitKey(0) & 0xFFFF
+    key = cv2.waitKeyEx(0)
 
     if key == ord('q') or key == 27:  # q / ESC
       break
@@ -437,9 +457,8 @@ def run_metrics(args):
   loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
   print("Loading pretrained model...")
-  model = PretrainedVisionModel.from_traced(args.model, freeze=True, device=args.device)
-  model.eval()
-  print(f"  Parameters: {model.n_total_params():,}")
+  model, n_params = load_traced_model(args.model, device=args.device)
+  print(f"  Parameters: {n_params:,}")
 
   all_preds: dict[str, list[np.ndarray]] = {k: [] for k in ONNX_OUTPUT_SLICES}
   all_targets: dict[str, list[np.ndarray]] = {}

@@ -32,11 +32,6 @@ Usage:
 import torch
 import torch.nn as nn
 
-try:
-  import onnx2torch
-except ImportError as e:
-  raise ImportError("onnx2torch is required: pip install onnx2torch") from e
-
 
 # Slices into the 1576-dim flat ONNX output
 ONNX_OUTPUT_SLICES = {
@@ -67,6 +62,10 @@ class PretrainedVisionModel(nn.Module):
 
   def __init__(self, onnx_path: str, freeze: bool = True):
     super().__init__()
+    try:
+      import onnx2torch
+    except ImportError as e:
+      raise ImportError("onnx2torch is required for ONNX loading: pip install onnx2torch") from e
     self._backbone = onnx2torch.convert(onnx_path)
     self._backbone.eval()
     if freeze:
