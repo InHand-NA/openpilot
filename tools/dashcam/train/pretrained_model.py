@@ -72,6 +72,20 @@ class PretrainedVisionModel(nn.Module):
     if freeze:
       self.freeze_backbone()
 
+  @classmethod
+  def from_traced(cls, pt_path: str, freeze: bool = True, device: str = 'cpu') -> 'PretrainedVisionModel':
+    """Load from a TorchScript traced .pt (exported by export_pretrained_pt.py --traced).
+
+    No onnx2torch dependency needed. Loads much faster than from ONNX.
+    """
+    model = cls.__new__(cls)
+    nn.Module.__init__(model)
+    model._backbone = torch.jit.load(pt_path, map_location=device)
+    model._backbone.eval()
+    if freeze:
+      model.freeze_backbone()
+    return model
+
   def freeze_backbone(self):
     """Freeze all backbone parameters (inference-only mode)."""
     for p in self._backbone.parameters():
