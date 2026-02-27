@@ -62,8 +62,19 @@ MW, MH = MEDMODEL_INPUT_SIZE  # 512, 256
 TEMPORAL_SKIP = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ  # 4
 
 
-def load_traced_model(pt_path: str, device: str = 'cpu'):
-  """Load TorchScript traced model and return a callable that outputs named slices."""
+def load_model(model_path: str, device: str = 'cpu'):
+  """Load model (.pt or .onnx) and return (predict_fn, n_params).
+
+  predict_fn(img, big_img) takes torch.Tensor inputs and returns
+  dict[str, torch.Tensor] with named output slices.
+  """
+  if model_path.endswith('.onnx'):
+    return _load_onnx_model(model_path, device)
+  return _load_traced_model(model_path, device)
+
+
+def _load_traced_model(pt_path: str, device: str = 'cpu'):
+  """Load TorchScript traced model."""
   backbone = torch.jit.load(pt_path, map_location=device)
   backbone.eval()
   for p in backbone.parameters():
@@ -72,6 +83,30 @@ def load_traced_model(pt_path: str, device: str = 'cpu'):
 
   def predict(img: torch.Tensor, big_img: torch.Tensor) -> dict[str, torch.Tensor]:
     flat = backbone(img, big_img).float()  # (1, 1576)
+    return {name: flat[:, sl] for name, sl in ONNX_OUTPUT_SLICES.items()}
+
+  return predict, n_params
+
+
+def _load_onnx_model(onnx_path: str, device: str = 'cpu'):
+  """Load ONNX model via onnxruntime."""
+  import onnxruntime as ort
+  providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if 'cuda' in device else ['CPUExecutionProvider']
+  sess = ort.InferenceSession(onnx_path, providers=providers)
+  actual_provider = sess.get_providers()[0]
+  print(f"  ORT provider: {actual_provider}")
+
+  # Count params from ONNX initializers
+  import onnx
+  m = onnx.load(onnx_path)
+  n_params = sum(int(np.prod(init.dims)) for init in m.graph.initializer)
+  del m
+
+  def predict(img: torch.Tensor, big_img: torch.Tensor) -> dict[str, torch.Tensor]:
+    img_np = img.cpu().numpy()
+    big_img_np = big_img.cpu().numpy()
+    flat = sess.run(None, {'img': img_np, 'big_img': big_img_np})[0]
+    flat = torch.from_numpy(flat.astype(np.float32)).to(img.device)
     return {name: flat[:, sl] for name, sl in ONNX_OUTPUT_SLICES.items()}
 
   return predict, n_params
@@ -379,7 +414,7 @@ def run_visualize(args):
 
   # Load model
   print("Loading pretrained model...")
-  model, n_params = load_traced_model(args.model, device=args.device)
+  model, n_params = load_model(args.model, device=args.device)
   print(f"  Parameters: {n_params:,}")
 
   win_name = 'eval_pretrained: GT vs PRED'
@@ -459,7 +494,7 @@ def run_metrics(args):
   loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
   print("Loading pretrained model...")
-  model, n_params = load_traced_model(args.model, device=args.device)
+  model, n_params = load_model(args.model, device=args.device)
   print(f"  Parameters: {n_params:,}")
 
   all_preds: dict[str, list[np.ndarray]] = {k: [] for k in ONNX_OUTPUT_SLICES}
