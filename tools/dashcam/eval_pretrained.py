@@ -22,8 +22,12 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.tools.dashcam.train.dataset import DualCameraDrivingDataset
 from openpilot.tools.dashcam.train.pretrained_model import ONNX_OUTPUT_SLICES, PretrainedVisionModel
+
+# Longitudinal distance (m) of each of the 33 lane/edge points
+X_IDXS = np.array(ModelConstants.X_IDXS, dtype=np.float32)  # (33,)
 
 
 # MDN outputs: first half = mu, second half = log_sigma
@@ -46,12 +50,25 @@ def extract_mdn_mean(raw: np.ndarray) -> np.ndarray:
   return raw[..., :n]
 
 
-def eval_lane_lines(pred_raw: np.ndarray, gt: np.ndarray, gt_prob: np.ndarray, gt_valid: np.ndarray) -> dict:
-  """Evaluate lane lines: pred (B, 528) → (B, 4, 33, 2) mean vs GT (B, 4, 33, 2)."""
+def _dist_mask(n_lines: int, max_dist: float | None) -> np.ndarray:
+  """Build a (1, 1, 33, 1) boolean mask for points within max_dist meters."""
+  if max_dist is None:
+    return np.ones((1, 1, 33, 1), dtype=np.float32)
+  return (X_IDXS <= max_dist).astype(np.float32).reshape(1, 1, 33, 1)
+
+
+def eval_lane_lines(pred_raw: np.ndarray, gt: np.ndarray, gt_prob: np.ndarray,
+                    gt_valid: np.ndarray, max_dist: float | None = None) -> dict:
+  """Evaluate lane lines: pred (B, 528) → (B, 4, 33, 2) mean vs GT (B, 4, 33, 2).
+
+  Args:
+    max_dist: if set, only evaluate points where X_IDXS <= max_dist (meters).
+  """
   pred_mean = extract_mdn_mean(pred_raw).reshape(-1, 4, 33, 2)
   # Mask: lane prob > 0.5 AND per-point valid
   mask = (gt_prob > 0.5)[..., np.newaxis] * gt_valid  # (B, 4, 33)
   mask = mask[..., np.newaxis]  # (B, 4, 33, 1) → broadcast to (B, 4, 33, 2)
+  mask = mask * _dist_mask(4, max_dist)
 
   if mask.sum() == 0:
     return {'mae': float('nan'), 'rmse': float('nan'), 'n_valid': 0}
@@ -66,11 +83,17 @@ def eval_lane_lines(pred_raw: np.ndarray, gt: np.ndarray, gt_prob: np.ndarray, g
   }
 
 
-def eval_road_edges(pred_raw: np.ndarray, gt: np.ndarray, gt_prob: np.ndarray, gt_valid: np.ndarray) -> dict:
-  """Evaluate road edges: pred (B, 264) → (B, 2, 33, 2) mean vs GT (B, 2, 33, 2)."""
+def eval_road_edges(pred_raw: np.ndarray, gt: np.ndarray, gt_prob: np.ndarray,
+                    gt_valid: np.ndarray, max_dist: float | None = None) -> dict:
+  """Evaluate road edges: pred (B, 264) → (B, 2, 33, 2) mean vs GT (B, 2, 33, 2).
+
+  Args:
+    max_dist: if set, only evaluate points where X_IDXS <= max_dist (meters).
+  """
   pred_mean = extract_mdn_mean(pred_raw).reshape(-1, 2, 33, 2)
   mask = (gt_prob > 0.5)[..., np.newaxis] * gt_valid
   mask = mask[..., np.newaxis]
+  mask = mask * _dist_mask(2, max_dist)
 
   if mask.sum() == 0:
     return {'mae': float('nan'), 'rmse': float('nan'), 'n_valid': 0}
@@ -150,8 +173,18 @@ def main():
                       help='Path to driving_vision.onnx')
   parser.add_argument('--num-workers', type=int, default=8,
                       help='DataLoader workers for preprocessing')
+  parser.add_argument('--max-dist', type=float, default=None,
+                      help='Max longitudinal distance (m) for lane/edge evaluation (default: all 192m)')
   parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
   args = parser.parse_args()
+
+  # Compute how many of the 33 points fall within max_dist
+  if args.max_dist is not None:
+    n_pts = int((X_IDXS <= args.max_dist).sum())
+    last_x = X_IDXS[n_pts - 1] if n_pts > 0 else 0
+    print(f"Max dist: {args.max_dist}m  → using {n_pts}/33 points (last x={last_x:.1f}m)")
+  else:
+    print("Max dist: None (all 33 points, up to 192m)")
 
   print(f"Dataset: {args.data_dir}")
   print(f"Model:   {args.onnx}")
@@ -228,9 +261,11 @@ def main():
   # Lane lines
   r = eval_lane_lines(
     all_preds['lane_lines'], all_targets['lane_lines'],
-    all_targets['lane_lines_prob'], all_targets['lane_lines_valid']
+    all_targets['lane_lines_prob'], all_targets['lane_lines_valid'],
+    max_dist=args.max_dist,
   )
-  print(f"{'lane_lines':<30} {r['mae']:>10.4f} {r['rmse']:>10.4f} {'valid=' + str(r['n_valid']):>20}")
+  dist_note = f" (≤{args.max_dist}m)" if args.max_dist else ""
+  print(f"{'lane_lines' + dist_note:<30} {r['mae']:>10.4f} {r['rmse']:>10.4f} {'valid=' + str(r['n_valid']):>20}")
 
   # Lane lines prob
   r = eval_prob(all_preds['lane_lines_prob'], all_targets['lane_lines_prob'], 'lane_lines_prob')
@@ -240,9 +275,10 @@ def main():
   # Road edges
   r = eval_road_edges(
     all_preds['road_edges'], all_targets['road_edges'],
-    all_targets['road_edges_prob'], all_targets['road_edges_valid']
+    all_targets['road_edges_prob'], all_targets['road_edges_valid'],
+    max_dist=args.max_dist,
   )
-  print(f"{'road_edges':<30} {r['mae']:>10.4f} {r['rmse']:>10.4f} {'valid=' + str(r['n_valid']):>20}")
+  print(f"{'road_edges' + dist_note:<30} {r['mae']:>10.4f} {r['rmse']:>10.4f} {'valid=' + str(r['n_valid']):>20}")
 
   # Lead
   r = eval_lead(all_preds['lead'], all_targets['lead'], all_targets['lead_prob'])
