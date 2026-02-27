@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Evaluate pretrained ONNX model accuracy against GT labels.
+"""Evaluate pretrained model accuracy against GT labels.
+
+Loads the exported .pt model (TorchScript traced) and compares predictions
+against ground truth labels from the dataset.
 
 Modes:
   1. Metrics mode (default): batch evaluate all samples, report MAE/RMSE/accuracy.
@@ -18,6 +21,10 @@ Usage:
   # Visualize starting from frame 500
   python3 tools/dashcam/eval_pretrained.py \
     --data-dir data/dual_camera_train/Town04_003 --visualize --start 500
+
+  # Use custom model path
+  python3 tools/dashcam/eval_pretrained.py \
+    --model checkpoints/my_model.pt --data-dir data/dual_camera_train/Town04_003
 """
 
 import argparse
@@ -342,7 +349,7 @@ def render_comparison(npz_data, prev_npz_data, model, device, camera_height):
 def run_visualize(args):
   """Interactive per-frame visualization mode."""
   print(f"Dataset: {args.data_dir}")
-  print(f"Model:   {args.onnx}")
+  print(f"Model:   {args.model}")
   print(f"Device:  {args.device}")
 
   # Load NPZ file list
@@ -355,9 +362,8 @@ def run_visualize(args):
 
   # Load model
   print("Loading pretrained model...")
-  model = PretrainedVisionModel(args.onnx, freeze=True)
+  model = PretrainedVisionModel.from_traced(args.model, freeze=True, device=args.device)
   model.eval()
-  model = model.to(args.device)
   print(f"  Parameters: {model.n_total_params():,}")
 
   # Window setup
@@ -422,7 +428,7 @@ def run_metrics(args):
     print("Max dist: None (all 33 points, up to 192m)")
 
   print(f"Dataset: {args.data_dir}")
-  print(f"Model:   {args.onnx}")
+  print(f"Model:   {args.model}")
   print(f"Device:  {args.device}")
 
   dataset = DualCameraDrivingDataset(data_dirs=[args.data_dir])
@@ -431,9 +437,8 @@ def run_metrics(args):
   loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
   print("Loading pretrained model...")
-  model = PretrainedVisionModel(args.onnx, freeze=True)
+  model = PretrainedVisionModel.from_traced(args.model, freeze=True, device=args.device)
   model.eval()
-  model = model.to(args.device)
   print(f"  Parameters: {model.n_total_params():,}")
 
   all_preds: dict[str, list[np.ndarray]] = {k: [] for k in ONNX_OUTPUT_SLICES}
@@ -519,8 +524,8 @@ def main():
   parser = argparse.ArgumentParser(description='Evaluate pretrained model against GT')
   parser.add_argument('--data-dir', default='data/dual_camera_train/Town04_003',
                       help='Directory with dual-camera NPZ files')
-  parser.add_argument('--onnx', default='selfdrive/modeld/models/driving_vision.onnx',
-                      help='Path to driving_vision.onnx')
+  parser.add_argument('--model', default='checkpoints/pretrained_openpilot.pt',
+                      help='Path to exported .pt model (TorchScript traced)')
   parser.add_argument('--num-workers', type=int, default=8,
                       help='DataLoader workers for preprocessing (metrics mode)')
   parser.add_argument('--max-dist', type=float, default=None,
