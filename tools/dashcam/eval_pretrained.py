@@ -12,6 +12,7 @@ Modes:
 Usage:
   # Metrics only
   python3 tools/dashcam/eval_pretrained.py \
+    --model checkpoints/pretrained_openpilot_3.pt \
     --data-dir data/dual_camera_train/Town04_003 --max-dist 80
 
   # Interactive visualization

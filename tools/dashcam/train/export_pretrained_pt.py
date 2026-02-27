@@ -14,7 +14,7 @@ Usage:
   python3 tools/dashcam/train/export_pretrained_pt.py --traced
 
   # Custom paths
-  python3 tools/dashcam/train/export_pretrained_pt.py \
+  python3 tools/dashcam/train/export_pretrained_pt.py --traced \
     --onnx selfdrive/modeld/models/driving_vision.onnx \
     --output checkpoints/pretrained_openpilot.pt
 """
