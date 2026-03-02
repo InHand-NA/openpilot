@@ -212,8 +212,13 @@ def build_camera_odometry_msg(parsed: dict[str, np.ndarray], frame_id: int, time
   odom.transStd = np.exp(pose[6:9]).tolist()
   odom.rotStd = np.exp(pose[9:12]).tolist()
 
-  odom.wideFromDeviceEuler = [0.0, 0.0, 0.0]
-  odom.wideFromDeviceEulerStd = [0.0, 0.0, 0.0]
+  if 'wide_from_device_euler' in parsed:
+    wfde = parsed['wide_from_device_euler'][0]  # (6,): 3 mu + 3 log_sigma
+    odom.wideFromDeviceEuler = wfde[:3].tolist()
+    odom.wideFromDeviceEulerStd = np.exp(wfde[3:6]).tolist()
+  else:
+    odom.wideFromDeviceEuler = [0.0, 0.0, 0.0]
+    odom.wideFromDeviceEulerStd = [0.0, 0.0, 0.0]
 
   rt = parsed['road_transform'][0]  # (12,)
   odom.roadTransformTrans = rt[:3].tolist()

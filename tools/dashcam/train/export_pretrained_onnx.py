@@ -18,11 +18,15 @@ Usage:
 """
 
 import argparse
+import codecs
 import os
+import pickle
 
 import numpy as np
 import onnx
 import torch
+
+from openpilot.tools.dashcam.train.pretrained_model import ONNX_OUTPUT_SLICES
 
 
 def main():
@@ -80,7 +84,14 @@ def main():
     print("  onnxsim: simplification failed, keeping original")
     onnx_model = onnx.load(args.output)
 
+  # Embed output_slices metadata (required by compile_tinygrad.py)
+  encoded = codecs.encode(pickle.dumps(ONNX_OUTPUT_SLICES), 'base64').decode()
+  onnx_model.metadata_props.add(key='output_slices', value=encoded)
+  onnx.save(onnx_model, args.output)
+  print(f"  Embedded output_slices metadata: {list(ONNX_OUTPUT_SLICES.keys())}")
+
   # Validate
+  onnx_model = onnx.load(args.output)
   onnx.checker.check_model(onnx_model)
   print("  ONNX checker: OK")
 

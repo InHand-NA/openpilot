@@ -86,7 +86,7 @@ def main():
   parser.add_argument('--record-only', action='store_true', help='Record mode: disable modeld and visualization, only collect GT data')
   parser.add_argument('--custom-model', type=str, default='', help='Path to custom ONNX model (bypasses modeld, uses onnxruntime)')
   parser.add_argument('--record-modeld', type=str, default='', help='Record dual-camera data with modeld labels to specified directory')
-  parser.add_argument('--custom-modeld', type=str, default='', help='Custom tinygrad pkl model (launches custom_modeld subprocess)')
+  parser.add_argument('--custom-modeld', type=str, default='', help='Custom model .pkl or .onnx (ONNX auto-compiles to tinygrad pkl)')
   args = parser.parse_args()
 
   if args.wide_road_only and args.road_only:
@@ -117,11 +117,11 @@ def main():
     # Don't force road_only — dual-camera needs both streams
     print(f"[RECORD-MODELD] Dual-camera recording with modeld labels -> {args.record_modeld}")
 
-  # Custom modeld mode (tinygrad pkl subprocess)
+  # Custom modeld mode (tinygrad pkl subprocess, accepts .pkl or .onnx)
   custom_modeld_mode = bool(args.custom_modeld)
   if custom_modeld_mode:
     # Don't force road_only — custom_modeld handles dual streams
-    print(f"[CustomModeld] Using custom tinygrad pkl: {args.custom_modeld}")
+    print(f"[CustomModeld] Using custom model: {args.custom_modeld}")
 
   # Camera pose
   if args.perfect_cam:
@@ -211,21 +211,40 @@ def main():
     print("Creating VisionIPC server...")
     camerad = DashcamCamerad(wide_road_only=args.wide_road_only, road_only=args.road_only)
 
-    # Find metadata pkl alongside the model pkl
-    pkl_path = args.custom_modeld
-    pkl_base = os.path.splitext(pkl_path)[0]
-    # Try: same_dir/*_metadata.pkl or strip _tinygrad_xxx suffix
-    metadata_candidates = [
-      pkl_base.rsplit('_tinygrad', 1)[0] + '_metadata.pkl',
-      pkl_base + '_metadata.pkl',
-    ]
-    metadata_path = ''
-    for c in metadata_candidates:
-      if os.path.exists(c):
-        metadata_path = c
-        break
-    if not metadata_path:
-      raise FileNotFoundError(f"Cannot find metadata pkl for {pkl_path}. Tried: {metadata_candidates}")
+    model_path = args.custom_modeld
+
+    if model_path.endswith('.onnx'):
+      # Auto-compile ONNX → tinygrad pkl + metadata pkl
+      base = os.path.splitext(model_path)[0]
+      dev = os.environ.get('DEV', 'CUDA').lower()
+      pkl_path = f"{base}_tinygrad_{dev}.pkl"
+      metadata_path = f"{base}_metadata.pkl"
+
+      needs_compile = not os.path.exists(pkl_path) or os.path.getmtime(model_path) > os.path.getmtime(pkl_path)
+      if needs_compile:
+        print(f"[CustomModeld] Compiling ONNX → tinygrad pkl...")
+        from openpilot.tools.dashcam.train.compile_tinygrad import compile_model, generate_metadata
+        generate_metadata(model_path, metadata_path)
+        compile_model(model_path, pkl_path)
+        print(f"[CustomModeld] Compilation done: {pkl_path}")
+      else:
+        print(f"[CustomModeld] Using cached pkl: {pkl_path}")
+    else:
+      # Existing .pkl path logic: find metadata pkl alongside the model pkl
+      pkl_path = model_path
+      pkl_base = os.path.splitext(pkl_path)[0]
+      # Try: same_dir/*_metadata.pkl or strip _tinygrad_xxx suffix
+      metadata_candidates = [
+        pkl_base.rsplit('_tinygrad', 1)[0] + '_metadata.pkl',
+        pkl_base + '_metadata.pkl',
+      ]
+      metadata_path = ''
+      for c in metadata_candidates:
+        if os.path.exists(c):
+          metadata_path = c
+          break
+      if not metadata_path:
+        raise FileNotFoundError(f"Cannot find metadata pkl for {pkl_path}. Tried: {metadata_candidates}")
 
     modeld_env = {
       **os.environ,
