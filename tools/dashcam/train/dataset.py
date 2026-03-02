@@ -14,12 +14,13 @@ Frame pairing:
   previous = sorted_npz_files[max(0, idx - temporal_skip)]
   temporal_skip = MODEL_RUN_FREQ / MODEL_CONTEXT_FREQ = 20 / 5 = 4
 
-Image preprocessing per frame:
+Image preprocessing per frame (faithful modeld pipeline):
   1. frame_rgb (1208, 1928, 3) uint8
-  2. warp_image(rgb, rpyCalib, intrinsics) -> (256, 512, 3)
-  3. rgb_to_yuv420_6ch(warped) -> (6, 128, 256) uint8
-  4. Concatenate [prev_yuv, curr_yuv] -> (12, 128, 256)
-  5. Single-cam: float32, /128.0 - 1.0 -> [-1, 1]
+  2. RGB → NV12: Y full-res (BT.601), UV half-res (AVERAGE macro = 2× mean)
+  3. Warp Y at (512, 256) with M, warp U/V at (256, 128) with transform_scale_buffer(M, 0.5)
+  4. loadyuv 6ch: [y0, y1, y2, y3, U, V] → (6, 128, 256) uint8
+  5. Concatenate [prev_yuv, curr_yuv] -> (12, 128, 256)
+  6. Single-cam: float32, /128.0 - 1.0 -> [-1, 1]
      Dual-cam: keep uint8, model normalizes internally
 """
 
@@ -38,6 +39,95 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 
 
 TEMPORAL_SKIP = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ  # 4
+
+
+def transform_scale_buffer(M: np.ndarray, s: float) -> np.ndarray:
+  """Scale input/output space of a pixel-center-origin transform matrix.
+
+  Python reimplementation of common/mat.h:transform_scale_buffer.
+  Maps: in_pt = (transform(out_pt/s + 0.5) - 0.5) * s
+
+  Args:
+    M: (3, 3) warp matrix
+    s: scale factor (0.5 for half-resolution UV)
+
+  Returns:
+    (3, 3) scaled warp matrix
+  """
+  T_out = np.array([[1.0 / s, 0.0, 0.5], [0.0, 1.0 / s, 0.5], [0.0, 0.0, 1.0]], dtype=np.float64)
+  T_in = np.array([[s, 0.0, -0.5 * s], [0.0, s, -0.5 * s], [0.0, 0.0, 1.0]], dtype=np.float64)
+  return T_in @ M @ T_out
+
+
+def rgb_to_modeld_input(rgb_full: np.ndarray, warp_matrix: np.ndarray) -> np.ndarray:
+  """Convert raw RGB image to modeld 6-channel input, matching the real modeld pipeline.
+
+  Real pipeline: RGB → NV12 (Y full-res, UV half-res via AVERAGE macro) →
+  warp Y at (512,256) → warp U,V at (256,128) with transform_scale_buffer(M, 0.5) →
+  loadyuv 6ch [y0, y1, y2, y3, U, V].
+
+  Args:
+    rgb_full: (H, W, 3) uint8 raw camera image (NOT warped)
+    warp_matrix: (3, 3) warp matrix from model-input coords to camera pixel coords
+
+  Returns:
+    (6, 128, 256) uint8 — channel order [y0, y1, y2, y3, U, V] matching loadyuv.cl
+  """
+  R = rgb_full[..., 0].astype(np.int32)
+  G = rgb_full[..., 1].astype(np.int32)
+  B = rgb_full[..., 2].astype(np.int32)
+
+  # Step 1: Full-resolution Y (BT.601, matching rgb_to_nv12.cl RGB_TO_Y)
+  Y_full = np.clip(((13 * B + 65 * G + 33 * R + 64) >> 7) + 16, 0, 255).astype(np.uint8)
+
+  # Step 2: NV12-style UV with AVERAGE macro from rgb_to_nv12.cl
+  # AVERAGE(a,b,c,d) = (a + b + c + d + 1) >> 1  (≈ 2× mean, NOT /4)
+  ar = (R[0::2, 0::2] + R[0::2, 1::2] + R[1::2, 0::2] + R[1::2, 1::2] + 1) >> 1
+  ag = (G[0::2, 0::2] + G[0::2, 1::2] + G[1::2, 0::2] + G[1::2, 1::2] + 1) >> 1
+  ab = (B[0::2, 0::2] + B[0::2, 1::2] + B[1::2, 0::2] + B[1::2, 1::2] + 1) >> 1
+  U_half = np.clip((56 * ab - 37 * ag - 19 * ar + 0x8080) >> 8, 0, 255).astype(np.uint8)
+  V_half = np.clip((56 * ar - 47 * ag - 9 * ab + 0x8080) >> 8, 0, 255).astype(np.uint8)
+
+  # Step 3: Warp Y at full model-input resolution (512×256)
+  Y_warped = cv2.warpPerspective(Y_full, warp_matrix, (512, 256),
+                                  flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+
+  # Step 4: Warp U, V at half resolution (256×128) with scaled matrix
+  M_uv = transform_scale_buffer(warp_matrix, 0.5)
+  U_warped = cv2.warpPerspective(U_half, M_uv, (256, 128),
+                                  flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+  V_warped = cv2.warpPerspective(V_half, M_uv, (256, 128),
+                                  flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+
+  # Step 5: Split Y into 4 sub-channels (loadyuv.cl layout)
+  # y0 = even row, even col; y1 = odd row, even col
+  # y2 = even row, odd col;  y3 = odd row, odd col
+  y0 = Y_warped[0::2, 0::2]
+  y1 = Y_warped[1::2, 0::2]
+  y2 = Y_warped[0::2, 1::2]
+  y3 = Y_warped[1::2, 1::2]
+
+  return np.stack([y0, y1, y2, y3, U_warped, V_warped], axis=0)
+
+
+def load_and_preprocess_frame_faithful(npz_data: dict, camera_intrinsics: np.ndarray,
+                                       bigmodel_frame: bool = False,
+                                       rgb_key: str = 'frame_rgb') -> np.ndarray:
+  """Load frame from npz dict and preprocess using the faithful modeld pipeline.
+
+  Args:
+    npz_data: dict from np.load with rgb and rpyCalib
+    camera_intrinsics: (3, 3) camera intrinsic matrix
+    bigmodel_frame: True for wide camera (sbigmodel), False for road camera (medmodel)
+    rgb_key: key to the RGB array in npz_data
+
+  Returns:
+    (6, 128, 256) uint8 — [y0, y1, y2, y3, U, V]
+  """
+  rgb = npz_data[rgb_key]
+  rpyCalib = npz_data['rpyCalib'].astype(np.float64)
+  M = compute_warp_matrix(rpyCalib, camera_intrinsics, bigmodel_frame=bigmodel_frame)
+  return rgb_to_modeld_input(rgb, M)
 
 
 def get_warp_matrix(rpyCalib: np.ndarray, camera_intrinsics: np.ndarray) -> np.ndarray:
@@ -332,15 +422,11 @@ class DualCameraDrivingDataset(Dataset):
         return max(start, prev)
     return max(0, prev)
 
-  def _warp_road(self, rgb: np.ndarray, rpyCalib: np.ndarray) -> np.ndarray:
-    """Road camera warp: medmodel (fl=910, bigmodel_frame=False)."""
-    M = compute_warp_matrix(rpyCalib.astype(np.float64), self.fcam_intrinsics, bigmodel_frame=False)
-    return cv2.warpPerspective(rgb, M, MEDMODEL_INPUT_SIZE, flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
-
-  def _warp_wide(self, rgb: np.ndarray, rpyCalib: np.ndarray) -> np.ndarray:
-    """Wide camera warp: sbigmodel (fl=455, bigmodel_frame=True)."""
-    M = compute_warp_matrix(rpyCalib.astype(np.float64), self.ecam_intrinsics, bigmodel_frame=True)
-    return cv2.warpPerspective(rgb, M, SBIGMODEL_INPUT_SIZE, flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+  def _preprocess(self, rgb: np.ndarray, rpyCalib: np.ndarray,
+                  intrinsics: np.ndarray, bigmodel_frame: bool) -> np.ndarray:
+    """Preprocess raw RGB using faithful modeld pipeline (NV12 → warp Y/UV → loadyuv 6ch)."""
+    M = compute_warp_matrix(rpyCalib.astype(np.float64), intrinsics, bigmodel_frame=bigmodel_frame)
+    return rgb_to_modeld_input(rgb, M)
 
   def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
     curr_data = dict(np.load(self.files[idx], allow_pickle=True))
@@ -350,20 +436,20 @@ class DualCameraDrivingDataset(Dataset):
     curr_rpyCalib = curr_data['rpyCalib'].astype(np.float64)
     prev_rpyCalib = prev_data['rpyCalib'].astype(np.float64)
 
-    # Road camera: prev + curr → (12, 128, 256) uint8
+    # Road camera: faithful modeld pipeline, prev + curr → (12, 128, 256) uint8
     road = np.concatenate(
       [
-        rgb_to_yuv420_6ch(self._warp_road(prev_data['road_rgb'], prev_rpyCalib)),
-        rgb_to_yuv420_6ch(self._warp_road(curr_data['road_rgb'], curr_rpyCalib)),
+        self._preprocess(prev_data['road_rgb'], prev_rpyCalib, self.fcam_intrinsics, bigmodel_frame=False),
+        self._preprocess(curr_data['road_rgb'], curr_rpyCalib, self.fcam_intrinsics, bigmodel_frame=False),
       ],
       axis=0,
     )
 
-    # Wide camera: prev + curr → (12, 128, 256) uint8
+    # Wide camera: faithful modeld pipeline, prev + curr → (12, 128, 256) uint8
     wide = np.concatenate(
       [
-        rgb_to_yuv420_6ch(self._warp_wide(prev_data['wide_rgb'], prev_rpyCalib)),
-        rgb_to_yuv420_6ch(self._warp_wide(curr_data['wide_rgb'], curr_rpyCalib)),
+        self._preprocess(prev_data['wide_rgb'], prev_rpyCalib, self.ecam_intrinsics, bigmodel_frame=True),
+        self._preprocess(curr_data['wide_rgb'], curr_rpyCalib, self.ecam_intrinsics, bigmodel_frame=True),
       ],
       axis=0,
     )

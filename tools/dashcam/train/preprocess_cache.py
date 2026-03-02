@@ -17,16 +17,13 @@ Usage:
 
 import argparse
 import multiprocessing as mp
-from functools import partial
 from pathlib import Path
 
-import cv2
 import numpy as np
 
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
-from openpilot.common.transformations.model import MEDMODEL_INPUT_SIZE, SBIGMODEL_INPUT_SIZE
 from openpilot.common.transformations.model import get_warp_matrix as compute_warp_matrix
-from openpilot.tools.dashcam.train.dataset import extract_targets, rgb_to_yuv420_6ch
+from openpilot.tools.dashcam.train.dataset import extract_targets, rgb_to_modeld_input
 
 
 def _process_one(args: tuple) -> str | None:
@@ -44,17 +41,13 @@ def _process_one(args: tuple) -> str | None:
     data = dict(np.load(npz_path, allow_pickle=True))
     rpyCalib = data['rpyCalib'].astype(np.float64)
 
-    # Road camera: medmodel warp (bigmodel_frame=False)
+    # Road camera: faithful modeld pipeline (NV12 → warp Y/UV → loadyuv 6ch)
     M_road = compute_warp_matrix(rpyCalib, fcam_intrinsics, bigmodel_frame=False)
-    road_warped = cv2.warpPerspective(data['road_rgb'], M_road, MEDMODEL_INPUT_SIZE,
-                                      flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
-    road_yuv = rgb_to_yuv420_6ch(road_warped)  # (6, 128, 256) uint8
+    road_yuv = rgb_to_modeld_input(data['road_rgb'], M_road)  # (6, 128, 256) uint8
 
-    # Wide camera: sbigmodel warp (bigmodel_frame=True)
+    # Wide camera: faithful modeld pipeline
     M_wide = compute_warp_matrix(rpyCalib, ecam_intrinsics, bigmodel_frame=True)
-    wide_warped = cv2.warpPerspective(data['wide_rgb'], M_wide, SBIGMODEL_INPUT_SIZE,
-                                      flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
-    wide_yuv = rgb_to_yuv420_6ch(wide_warped)  # (6, 128, 256) uint8
+    wide_yuv = rgb_to_modeld_input(data['wide_rgb'], M_wide)  # (6, 128, 256) uint8
 
     # Extract GT labels
     targets = extract_targets(data)

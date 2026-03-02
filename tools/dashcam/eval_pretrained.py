@@ -38,12 +38,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
-from openpilot.common.transformations.model import MEDMODEL_INPUT_SIZE, SBIGMODEL_INPUT_SIZE, get_warp_matrix, medmodel_intrinsics
+from openpilot.common.transformations.model import MEDMODEL_INPUT_SIZE, get_warp_matrix, medmodel_intrinsics
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.tools.dashcam.train.dataset import (
   DualCameraDrivingDataset,
   extract_targets,
-  rgb_to_yuv420_6ch,
+  rgb_to_modeld_input,
   warp_image,
 )
 from openpilot.tools.dashcam.train.pretrained_model import ONNX_OUTPUT_SLICES
@@ -410,23 +410,25 @@ def render_comparison(npz_data, prev_npz_data, model, device, camera_height):
   rpyCalib = npz_data['rpyCalib'].astype(np.float64)
   prev_rpyCalib = prev_npz_data['rpyCalib'].astype(np.float64)
 
-  # Warp road image for display
+  # Warp road image for display (RGB warp, only for visualization)
   warped = warp_image(npz_data['road_rgb'], rpyCalib, fcam_intrinsics)
   gt_img = cv2.cvtColor(warped, cv2.COLOR_RGB2BGR)
   pred_img = gt_img.copy()
 
-  # Prepare model input: road + wide, prev + curr
-  road_prev = rgb_to_yuv420_6ch(warp_image(prev_npz_data['road_rgb'], prev_rpyCalib, fcam_intrinsics))
-  road_curr = rgb_to_yuv420_6ch(warped)
-  road = np.concatenate([road_prev, road_curr], axis=0)  # (12, 128, 256)
+  # Prepare model input using faithful modeld pipeline (NV12 → warp Y/UV → loadyuv 6ch)
+  M_road = get_warp_matrix(rpyCalib, fcam_intrinsics, bigmodel_frame=False)
+  M_road_prev = get_warp_matrix(prev_rpyCalib, fcam_intrinsics, bigmodel_frame=False)
+  road = np.concatenate([
+    rgb_to_modeld_input(prev_npz_data['road_rgb'], M_road_prev),
+    rgb_to_modeld_input(npz_data['road_rgb'], M_road),
+  ], axis=0)  # (12, 128, 256)
 
   M_wide = get_warp_matrix(rpyCalib, ecam_intrinsics, bigmodel_frame=True)
-  wide_curr = rgb_to_yuv420_6ch(cv2.warpPerspective(
-    npz_data['wide_rgb'], M_wide, SBIGMODEL_INPUT_SIZE, flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR))
   M_wide_prev = get_warp_matrix(prev_rpyCalib, ecam_intrinsics, bigmodel_frame=True)
-  wide_prev = rgb_to_yuv420_6ch(cv2.warpPerspective(
-    prev_npz_data['wide_rgb'], M_wide_prev, SBIGMODEL_INPUT_SIZE, flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR))
-  wide = np.concatenate([wide_prev, wide_curr], axis=0)
+  wide = np.concatenate([
+    rgb_to_modeld_input(prev_npz_data['wide_rgb'], M_wide_prev),
+    rgb_to_modeld_input(npz_data['wide_rgb'], M_wide),
+  ], axis=0)
 
   # Run model
   img_t = torch.from_numpy(road[np.newaxis]).to(device)
@@ -726,10 +728,10 @@ def main():
   parser.add_argument('--data-dir', default='data/dual_camera_train/Town04_003',
                       help='Directory with dual-camera NPZ files')
   parser.add_argument('--model', default='checkpoints/pretrained_openpilot.pt',
-                      help='Path to exported .pt model (TorchScript traced)')
-  parser.add_argument('--num-workers', type=int, default=8,
+                      help='Path to exported .pt model (TorchScript traced) or .onnx file')
+  parser.add_argument('--num-workers', type=int, default=16,
                       help='DataLoader workers for preprocessing (metrics mode)')
-  parser.add_argument('--max-dist', type=float, default=None,
+  parser.add_argument('--max-dist', type=float, default=80.0,
                       help='Max longitudinal distance (m) for lane/edge evaluation')
   parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
   parser.add_argument('--visualize', action='store_true',
