@@ -61,6 +61,13 @@ X_IDXS = np.array(ModelConstants.X_IDXS, dtype=np.float32)  # (33,)
 MW, MH = MEDMODEL_INPUT_SIZE  # 512, 256
 TEMPORAL_SKIP = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ  # 4
 
+# BEV (Bird's Eye View) panel constants
+_BEV_W, _BEV_H = 160, 320   # panel pixel size (compact)
+_BEV_X_MAX = 80.0            # forward range (meters)
+_BEV_Y_HALF = 10.0           # lateral half-range (meters), ±10m
+# Info panel next to BEV
+_INFO_W = 360                # width of text info panel next to BEV
+
 
 def load_model(model_path: str, device: str = 'cpu'):
   """Load model (.pt or .onnx) and return (predict_fn, n_params).
@@ -288,13 +295,108 @@ def draw_lead(img, lead, lead_prob, K, rpyCalib, camera_height, color):
   cv2.putText(img, label, (int(x + sz), int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
 
 
-def make_info_bar(width, texts, bg_color=(30, 30, 30)):
-  """Create a multi-line info bar. texts: list of (text, color) tuples."""
-  h = 16 * len(texts) + 4
-  bar = np.full((h, width, 3), bg_color, dtype=np.uint8)
-  for i, (text, color) in enumerate(texts):
-    cv2.putText(bar, text, (4, 14 + i * 16), cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)
-  return bar
+def draw_bev_panel(bev_img, lane_lines, lane_probs, road_edges, road_edge_probs, lead, lead_prob,
+                   title, lane_color, edge_color, lead_color):
+  """Draw bird's eye view (BEV) panel showing perception from above.
+
+  Args:
+    bev_img: BEV background image (H, W, 3)
+    lane_lines: (4, 33, 3) xyz points
+    lane_probs: (4,) probabilities
+    road_edges: (2, 33, 3) xyz points
+    road_edge_probs: (2,) probabilities
+    lead: (3, 6, 4) lead vehicle state
+    lead_prob: (3,) lead probabilities
+    title: string label ("GT" or "PRED")
+    lane_color: BGR color tuple for lanes
+    edge_color: BGR color tuple for edges
+    lead_color: BGR color tuple for lead
+  """
+  bev_h, bev_w = bev_img.shape[:2]
+
+  # Coordinate mapping: 3D (x=fwd, y=right) -> BEV pixel
+  scale_x = bev_h / _BEV_X_MAX          # px per meter forward
+  scale_y = bev_w / (2 * _BEV_Y_HALF)   # px per meter lateral
+  cx_bev = bev_w // 2                    # lateral center
+
+  def to_bev(x_fwd, y_lat):
+    """Map 3D forward/lateral to BEV pixel coords."""
+    px = cx_bev + y_lat * scale_y
+    py = bev_h - x_fwd * scale_x  # forward = up
+    return int(np.clip(px, 0, bev_w - 1)), int(np.clip(py, 0, bev_h - 1))
+
+  # Draw grid lines
+  grid_color = (60, 60, 60)
+  for dist in [20, 40, 60]:
+    _, gy = to_bev(dist, 0)
+    cv2.line(bev_img, (0, gy), (bev_w, gy), grid_color, 1)
+    cv2.putText(bev_img, f"{dist}m", (3, gy - 3),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1, cv2.LINE_AA)
+
+  # Center line (ego forward)
+  cv2.line(bev_img, (cx_bev, 0), (cx_bev, bev_h), grid_color, 1)
+
+  # Draw ego vehicle marker
+  ego_bx, ego_by = to_bev(0, 0)
+  cv2.circle(bev_img, (ego_bx, ego_by - 3), 5, (255, 255, 255), -1)
+
+  # Helper: draw lane line polyline on BEV
+  def draw_bev_line(pts_3d, prob, color, thickness):
+    if prob < 0.01:
+      return
+    xs, ys = pts_3d[:, 0], pts_3d[:, 1]
+    # Filter to valid forward range
+    mask = (xs > 0) & (xs < _BEV_X_MAX) & (np.abs(ys) < _BEV_Y_HALF)
+    if np.sum(mask) < 2:
+      return
+    bev_pts = []
+    for xi, yi in zip(xs[mask], ys[mask], strict=True):
+      bx, by = to_bev(xi, yi)
+      bev_pts.append([bx, by])
+    bev_pts = np.array(bev_pts, dtype=np.int32)
+    cv2.polylines(bev_img, [bev_pts], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+  # Draw lane lines
+  for i, pts in enumerate(lane_lines):
+    draw_bev_line(pts, lane_probs[i], lane_color, 2)
+
+  # Draw road edges
+  for i, pts in enumerate(road_edges):
+    draw_bev_line(pts, road_edge_probs[i], edge_color, 2)
+
+  # Draw lead vehicles
+  for lead_idx in range(lead.shape[0]):
+    if lead_prob[lead_idx] < 0.3:
+      continue
+    x_dist, y_offset = float(lead[lead_idx, 0, 0]), float(lead[lead_idx, 0, 1])
+    if x_dist < 1.0 or x_dist > 200.0:
+      continue
+    lbx, lby = to_bev(x_dist, y_offset)
+    # Draw lead as small circle with outline
+    sz = 4
+    cv2.circle(bev_img, (lbx, lby), sz, lead_color, -1)
+    cv2.circle(bev_img, (lbx, lby), sz, (0, 0, 0), 1)
+
+  # Title
+  white = (255, 255, 255)
+  cv2.putText(bev_img, f"BEV - {title}", (5, 20),
+              cv2.FONT_HERSHEY_SIMPLEX, 0.5, white, 1, cv2.LINE_AA)
+
+
+def make_info_panel(width, height, texts, bg_color=(20, 20, 20)):
+  """Create a text info panel with fixed dimensions.
+
+  Args:
+    width: panel width in pixels
+    height: panel height in pixels
+    texts: list of (text, color) tuples, rendered top-down
+  """
+  panel = np.full((height, width, 3), bg_color, dtype=np.uint8)
+  y = 16
+  for text, color in texts:
+    cv2.putText(panel, text, (6, y), cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+    y += 15
+  return panel
 
 
 def render_comparison(npz_data, prev_npz_data, model, device, camera_height):
@@ -363,39 +465,81 @@ def render_comparison(npz_data, prev_npz_data, model, device, camera_height):
   draw_road_edges(pred_img, pred_edges, pred_edge_probs, transform, (255, 0, 255))  # magenta
   draw_lead(pred_img, pred_lead, pred_lead_prob, K, rpy_zero, camera_height, (0, 200, 255))
 
-  # Labels
+  # Labels on camera images
   white = (255, 255, 255)
   cv2.putText(gt_img, "GT", (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 2, cv2.LINE_AA)
   cv2.putText(pred_img, "PRED", (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, white, 2, cv2.LINE_AA)
 
-  # Concat side by side
-  combined = np.hstack([gt_img, pred_img])
+  # Upscale camera images 2x (user request: keep aspect ratio, x2)
+  cam_w, cam_h = MW * 2, MH * 2  # 1024 x 512
+  gt_cam = cv2.resize(gt_img, (cam_w, cam_h), interpolation=cv2.INTER_LINEAR)
+  pred_cam = cv2.resize(pred_img, (cam_w, cam_h), interpolation=cv2.INTER_LINEAR)
+  camera_row = np.hstack([gt_cam, pred_cam])  # (512, 2048, 3)
 
-  # Info bar
+  # --- BEV panels (compact) ---
+  gt_bev = np.full((_BEV_H, _BEV_W, 3), (20, 20, 20), dtype=np.uint8)
+  pred_bev = np.full((_BEV_H, _BEV_W, 3), (20, 20, 20), dtype=np.uint8)
+
+  draw_bev_panel(gt_bev, gt_lanes, gt_lane_probs, gt_edges, gt_edge_probs, gt_lead, gt_lead_prob,
+                 "GT", (0, 255, 0), (0, 165, 255), (0, 200, 255))
+  draw_bev_panel(pred_bev, pred_lanes, pred_lane_probs, pred_edges, pred_edge_probs, pred_lead, pred_lead_prob,
+                 "PRED", (255, 200, 0), (255, 0, 255), (0, 200, 255))
+
+  # --- Info panels (text beside each BEV) ---
   gt_pose = npz_data['pose']
   pred_pose = extract_mdn_mean(preds_np['pose'])
   gt_rt = npz_data['road_transform']
   pred_rt = extract_mdn_mean(preds_np['road_transform'])
   v_ego = float(npz_data['v_ego'])
 
-  info = make_info_bar(combined.shape[1], [
-    (f"v_ego={v_ego:.1f}m/s  h={camera_height:.2f}m  "
-     f"rpyCalib=[{np.degrees(rpyCalib[0]):.1f}, {np.degrees(rpyCalib[1]):.1f}, {np.degrees(rpyCalib[2]):.1f}]",
-     (200, 200, 200)),
-    (f"GT  pose: v=[{gt_pose[0]:.2f},{gt_pose[1]:.2f},{gt_pose[2]:.2f}] w=[{gt_pose[3]:.3f},{gt_pose[4]:.3f},{gt_pose[5]:.3f}]  "
-     f"rt_z={gt_rt[2]:.2f}",
-     (0, 255, 0)),
-    (f"PRD pose: v=[{pred_pose[0]:.2f},{pred_pose[1]:.2f},{pred_pose[2]:.2f}] w=[{pred_pose[3]:.3f},{pred_pose[4]:.3f},{pred_pose[5]:.3f}]  "
-     f"rt_z={pred_rt[2]:.2f}",
-     (255, 200, 0)),
-    (f"GT lanes=[{gt_lane_probs[0]:.2f},{gt_lane_probs[1]:.2f},{gt_lane_probs[2]:.2f},{gt_lane_probs[3]:.2f}]  "
-     f"PRD lanes=[{pred_lane_probs[0]:.2f},{pred_lane_probs[1]:.2f},{pred_lane_probs[2]:.2f},{pred_lane_probs[3]:.2f}]  "
-     f"GT lead_p={gt_lead_prob[0]:.2f}  PRD lead_p={pred_lead_prob[0]:.2f}",
-     (200, 200, 200)),
+  shared_lines = [
+    (f"v_ego={v_ego:.1f}m/s  h={camera_height:.2f}m", (200, 200, 200)),
+    (f"rpyCalib=[{np.degrees(rpyCalib[0]):.1f}, "
+     f"{np.degrees(rpyCalib[1]):.1f}, {np.degrees(rpyCalib[2]):.1f}]", (160, 160, 160)),
+    ("", (0, 0, 0)),  # spacer
+  ]
+  gt_info = make_info_panel(_INFO_W, _BEV_H, shared_lines + [
+    (f"pose v: [{gt_pose[0]:.2f}, {gt_pose[1]:.2f}, {gt_pose[2]:.2f}]", (0, 255, 0)),
+    (f"pose w: [{gt_pose[3]:.3f}, {gt_pose[4]:.3f}, {gt_pose[5]:.3f}]", (0, 255, 0)),
+    (f"rt: [{gt_rt[0]:.2f}, {gt_rt[1]:.2f}, {gt_rt[2]:.2f},", (0, 200, 0)),
+    (f"     {gt_rt[3]:.3f}, {gt_rt[4]:.3f}, {gt_rt[5]:.3f}]", (0, 200, 0)),
+    ("", (0, 0, 0)),
+    (f"lanes: [{gt_lane_probs[0]:.2f}, {gt_lane_probs[1]:.2f},", (100, 200, 100)),
+    (f"        {gt_lane_probs[2]:.2f}, {gt_lane_probs[3]:.2f}]", (100, 200, 100)),
+    (f"edges: [{gt_edge_probs[0]:.2f}, {gt_edge_probs[1]:.2f}]", (100, 200, 100)),
+    (f"lead_p: {gt_lead_prob[0]:.2f}", (100, 200, 100)),
   ])
 
-  result = np.vstack([info, combined])
-  return cv2.resize(result, (result.shape[1] * 2, result.shape[0] * 2), interpolation=cv2.INTER_LINEAR)
+  pred_info = make_info_panel(_INFO_W, _BEV_H, shared_lines + [
+    (f"pose v: [{pred_pose[0]:.2f}, {pred_pose[1]:.2f}, {pred_pose[2]:.2f}]", (255, 200, 0)),
+    (f"pose w: [{pred_pose[3]:.3f}, {pred_pose[4]:.3f}, {pred_pose[5]:.3f}]", (255, 200, 0)),
+    (f"rt: [{pred_rt[0]:.2f}, {pred_rt[1]:.2f}, {pred_rt[2]:.2f},", (200, 160, 0)),
+    (f"     {pred_rt[3]:.3f}, {pred_rt[4]:.3f}, {pred_rt[5]:.3f}]", (200, 160, 0)),
+    ("", (0, 0, 0)),
+    (f"lanes: [{pred_lane_probs[0]:.2f}, {pred_lane_probs[1]:.2f},", (180, 180, 100)),
+    (f"        {pred_lane_probs[2]:.2f}, {pred_lane_probs[3]:.2f}]", (180, 180, 100)),
+    (f"edges: [1.00, 1.00] (default)", (180, 180, 100)),
+    (f"lead_p: {pred_lead_prob[0]:.2f}", (180, 180, 100)),
+  ])
+
+  # --- Compose bottom row: [info | BEV] centered in each cam_w half ---
+  block_w = _INFO_W + _BEV_W  # info + BEV side by side
+  gt_block = np.hstack([gt_info, gt_bev])
+  pred_block = np.hstack([pred_info, pred_bev])
+
+  # Center each block within cam_w with dark padding
+  pad_left = (cam_w - block_w) // 2
+  pad_right = cam_w - block_w - pad_left
+  bg = (20, 20, 20)
+
+  def pad_block(block):
+    lpad = np.full((_BEV_H, pad_left, 3), bg, dtype=np.uint8)
+    rpad = np.full((_BEV_H, pad_right, 3), bg, dtype=np.uint8)
+    return np.hstack([lpad, block, rpad])
+
+  bottom_row = np.hstack([pad_block(gt_block), pad_block(pred_block)])
+
+  return np.vstack([camera_row, bottom_row])
 
 
 def run_visualize(args):
@@ -417,9 +561,10 @@ def run_visualize(args):
   model, n_params = load_model(args.model, device=args.device)
   print(f"  Parameters: {n_params:,}")
 
-  win_name = 'eval_pretrained: GT vs PRED'
+  win_name = 'eval_pretrained: GT vs PRED (with BEV)'
   cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-  cv2.resizeWindow(win_name, MW * 4, MH * 2 + 160)
+  # Layout: camera row (MW*4 x MH*2) + bottom row (MW*4 x _BEV_H)
+  cv2.resizeWindow(win_name, MW * 4, MH * 2 + _BEV_H)
 
   idx = max(0, min(args.start, len(npz_files) - 1))
   cached_img = None
