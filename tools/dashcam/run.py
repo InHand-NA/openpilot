@@ -78,37 +78,16 @@ def main():
   parser.add_argument('--height-comp', action='store_true', help='Enable lane line height compensation, do not use this functionality')
   parser.add_argument('--eval-lanes', action='store_true', help='Enable lane line ground truth evaluation')
   parser.add_argument('--eval-interval', type=int, default=1, help='GT evaluation interval in frames (default: every frame)')
-  parser.add_argument('--record', type=str, default='', help='Enable training data recording, save to specified directory')
   parser.add_argument('--record-skip', type=int, default=1, help='Save every N-th frame when recording (default: 1)')
   parser.add_argument(
     '--speed-range', type=float, nargs=2, default=[20.0, 140.0], metavar=('MIN', 'MAX'), help='Ego target speed range in km/h (default: 20 140)'
   )
-  parser.add_argument('--record-only', action='store_true', help='Record mode: disable modeld and visualization, only collect GT data')
-  parser.add_argument('--custom-model', type=str, default='', help='Path to custom ONNX model (bypasses modeld, uses onnxruntime)')
   parser.add_argument('--record-modeld', type=str, default='', help='Record dual-camera data with modeld labels to specified directory')
   parser.add_argument('--custom-modeld', type=str, default='', help='Custom model .pkl or .onnx (ONNX auto-compiles to tinygrad pkl)')
   args = parser.parse_args()
 
   if args.wide_road_only and args.road_only:
     parser.error('--wide-road-only and --road-only are mutually exclusive')
-
-  # Record mode: auto-enable road-only and fast for efficient data collection
-  recording = bool(args.record)
-  record_only = args.record_only
-  if recording:
-    if not args.road_only and not args.wide_road_only:
-      args.road_only = True
-    args.fast = True
-    print(f"[RECORD] Recording enabled -> {args.record}")
-    if record_only:
-      args.no_display = True
-      print("[RECORD] Record-only mode: modeld and visualization disabled")
-
-  custom_model_mode = bool(args.custom_model)
-  if custom_model_mode:
-    if not args.road_only and not args.wide_road_only:
-      args.road_only = True
-    print(f"[CustomModel] Using custom ONNX model: {args.custom_model}")
 
   # Dual-camera recording with modeld labels
   record_modeld = bool(args.record_modeld)
@@ -143,7 +122,7 @@ def main():
   print(f"Camera mode: {cam_mode_str}")
   print(f"Calibration mode: {'online (calibrationd)' if args.online_calib else 'known pose'}")
 
-  # 1. Initialize Params and subprocesses (skip in record-only mode)
+  # 1. Initialize Params and subprocesses
   camerad = None
   modeld_proc = None
   calibrationd_proc = None
@@ -151,7 +130,7 @@ def main():
   sm = None
 
   # Standard modeld mode
-  use_standard_modeld = not record_only and not custom_model_mode and not custom_modeld_mode
+  use_standard_modeld = not custom_modeld_mode
 
   if use_standard_modeld or record_modeld:
     params = Params()
@@ -266,14 +245,6 @@ def main():
     pm = messaging.PubMaster(pub_services)
     sm = messaging.SubMaster(['modelV2', 'liveCalibration'])
 
-  # Custom model inference (in-process ONNX, bypasses modeld)
-  inference = None
-  if custom_model_mode:
-    from openpilot.tools.dashcam.infer import CustomModelInference
-
-    dc = DEVICE_CAMERAS[("pc", "unknown")]
-    inference = CustomModelInference(args.custom_model, dc.fcam.intrinsics)
-
   # 6. Connect to Carla
   print("Connecting to Carla...")
   from openpilot.tools.dashcam.carla_world import DashcamCarlaWorld
@@ -319,50 +290,21 @@ def main():
     )
     print("[RECORD-MODELD] Label extractor + dual recorder initialized")
 
-  # Training data recording
-  recorder = None
-  lane_gt_extractor = None
-  lead_gt_extractor = None
-  pose_gt_extractor = None
-  if recording:
-    from openpilot.tools.dashcam.data_recorder import DataRecorder
-    from openpilot.tools.dashcam.lane_ground_truth import LaneGroundTruth
-    from openpilot.tools.dashcam.lead_ground_truth import LeadGroundTruth
-    from openpilot.tools.dashcam.pose_ground_truth import PoseGroundTruth
+  # Camera intrinsics and visualizer
+  # wide-road-only: modeld uses ecam.intrinsics for both transforms, so visualization must match
+  # road-only / dual: display the narrow road camera, use fcam.intrinsics
+  dc = DEVICE_CAMERAS[("pc", "unknown")]
+  vis_intrinsics = dc.ecam.intrinsics if args.wide_road_only else dc.fcam.intrinsics
 
-    lane_gt_extractor = LaneGroundTruth(world.get_map(), camera_offset_x=0.8, camera_height=camera_height)
-    lead_gt_extractor = LeadGroundTruth(world.get_world(), world.get_vehicle(), camera_offset_x=0.8, camera_height=camera_height)
-    pose_gt_extractor = PoseGroundTruth(camera_offset_x=0.8, camera_height=camera_height)
-    clip_metadata = world.get_clip_metadata(args.town)
-    recorder = DataRecorder(
-      output_dir=args.record,
-      town=args.town,
-      camera_height=camera_height,
-      camera_pitch=np.deg2rad(pitch_deg),
-      camera_yaw=np.deg2rad(yaw_deg),
-      skip_frames=args.record_skip,
-      metadata=clip_metadata,
-    )
-    print("[RECORD] GT extractors initialized (lane + lead + pose)")
+  from openpilot.tools.dashcam.visualizer import Visualizer
 
-  # Camera intrinsics and visualizer (skip in record-only mode)
-  vis_intrinsics = None
-  visualizer = None
-  if not record_only:
-    # wide-road-only: modeld uses ecam.intrinsics for both transforms, so visualization must match
-    # road-only / dual: display the narrow road camera, use fcam.intrinsics
-    dc = DEVICE_CAMERAS[("pc", "unknown")]
-    vis_intrinsics = dc.ecam.intrinsics if args.wide_road_only else dc.fcam.intrinsics
-
-    from openpilot.tools.dashcam.visualizer import Visualizer
-
-    visualizer = Visualizer(
-      save_video_path=args.save_video,
-      no_display=args.no_display,
-      source_fps=20.0,
-      actual_height=camera_height if args.height_comp else 0.0,
-      show_bev=custom_model_mode or custom_modeld_mode,
-    )
+  visualizer = Visualizer(
+    save_video_path=args.save_video,
+    no_display=args.no_display,
+    source_fps=20.0,
+    actual_height=camera_height if args.height_comp else 0.0,
+    show_bev=custom_modeld_mode,
+  )
 
   # Signal handler
   running = True
@@ -417,78 +359,32 @@ def main():
           continue
         display_rgb = road_rgb
 
-      # Send frames to modeld via VisionIPC (skip in record-only and custom-model ONNX modes)
-      if not record_only and not custom_model_mode:
-        if args.wide_road_only:
+      # Send frames to modeld via VisionIPC
+      if args.wide_road_only:
+        yuv_wide = camerad.rgb_to_yuv(wide_rgb)
+        camerad.cam_send_yuv_wide_road(yuv_wide)
+      elif args.road_only:
+        yuv_road = camerad.rgb_to_yuv(road_rgb)
+        camerad.cam_send_yuv_road(yuv_road)
+      else:
+        yuv_road = camerad.rgb_to_yuv(road_rgb)
+        camerad.cam_send_yuv_road(yuv_road)
+        if wide_rgb is not None:
           yuv_wide = camerad.rgb_to_yuv(wide_rgb)
           camerad.cam_send_yuv_wide_road(yuv_wide)
-        elif args.road_only:
-          yuv_road = camerad.rgb_to_yuv(road_rgb)
-          camerad.cam_send_yuv_road(yuv_road)
-        else:
-          yuv_road = camerad.rgb_to_yuv(road_rgb)
-          camerad.cam_send_yuv_road(yuv_road)
-          if wide_rgb is not None:
-            yuv_wide = camerad.rgb_to_yuv(wide_rgb)
-            camerad.cam_send_yuv_wide_road(yuv_wide)
 
-        # Publish deviceState (modeld needs deviceType for DEVICE_CAMERAS lookup)
-        publish_device_state(pm)
+      # Publish deviceState (modeld needs deviceType for DEVICE_CAMERAS lookup)
+      publish_device_state(pm)
 
-        # Publish carState (calibrationd needs vEgo)
-        publish_car_state(pm, world.get_vehicle_speed())
+      # Publish carState (calibrationd needs vEgo)
+      publish_car_state(pm, world.get_vehicle_speed())
 
-        # Known pose mode: publish liveCalibration directly
-        if not args.online_calib:
-          publish_live_calibration(pm, rpyCalib, camera_height)
+      # Known pose mode: publish liveCalibration directly
+      if not args.online_calib:
+        publish_live_calibration(pm, rpyCalib, camera_height)
 
-        # Non-blocking receive modelV2 and liveCalibration
-        sm.update(0)
-
-      # Custom model inference (in-process ONNX)
-      custom_model_msg = None
-      if custom_model_mode:
-        result = inference.process_frame(display_rgb, rpyCalib)
-        custom_model_msg = result.modelV2 if result is not None else None
-
-      # Training data recording
-      if recorder is not None:
-        veh_transform = world.get_vehicle_transform()
-        v_ego = world.get_vehicle_speed()
-
-        rec_lane_gt = lane_gt_extractor.get_lane_lines(veh_transform)
-        rec_road_edges_gt = lane_gt_extractor.get_road_edges(veh_transform)
-        rec_road_edges_gt = lane_gt_extractor.filter_road_edges(rec_lane_gt, rec_road_edges_gt)
-        rec_lead_gt = lead_gt_extractor.get_lead_vehicles(veh_transform, v_ego, road_edges=rec_road_edges_gt)
-        rec_pose, rec_road_transform, rec_wide_from_device_euler = pose_gt_extractor.update(veh_transform)
-
-        # rpyCalib: fixed camera mounting angles only (no vehicle tilt).
-        # Vehicle tilt is captured by road_transform, matching openpilot semantics.
-
-        world_pose = np.array(
-          [
-            veh_transform.location.x,
-            veh_transform.location.y,
-            veh_transform.location.z,
-            veh_transform.rotation.roll,
-            veh_transform.rotation.pitch,
-            veh_transform.rotation.yaw,
-          ],
-          dtype=np.float32,
-        )
-
-        recorder.record_with_vego(
-          display_rgb,
-          rec_lane_gt,
-          rec_lead_gt,
-          rec_pose,
-          rec_road_transform,
-          v_ego,
-          road_edges_gt=rec_road_edges_gt,
-          rpyCalib=rpyCalib.astype(np.float32),
-          world_pose=world_pose,
-          wide_from_device_euler=rec_wide_from_device_euler,
-        )
+      # Non-blocking receive modelV2 and liveCalibration
+      sm.update(0)
 
       # Dual-camera recording with modeld labels
       if dual_recorder is not None and sm is not None:
@@ -533,48 +429,39 @@ def main():
         frame_count = 0
         fps_start = now
 
-      if not record_only:
-        # Get current calibration and model output
-        if custom_model_mode:
-          cur_rpyCalib = rpyCalib
-          cur_height = camera_height
-          cur_valid_blocks = 20
-          cur_cal_status = 'calibrated'
-          cur_cal_perc = 100
-          model_msg = custom_model_msg
-        else:
-          if sm.seen['liveCalibration']:
-            cur_rpyCalib = np.array(sm['liveCalibration'].rpyCalib)
-            cur_height = float(sm['liveCalibration'].height[0]) if len(sm['liveCalibration'].height) > 0 else camera_height
-            cur_valid_blocks = sm['liveCalibration'].validBlocks
-            cur_cal_status = str(sm['liveCalibration'].calStatus)
-            cur_cal_perc = int(sm['liveCalibration'].calPerc)
-          else:
-            cur_rpyCalib = rpyCalib
-            cur_height = camera_height
-            cur_valid_blocks = 0
-            cur_cal_status = 'uncalibrated'
-            cur_cal_perc = 0
-          model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
+      # Get current calibration and model output
+      if sm.seen['liveCalibration']:
+        cur_rpyCalib = np.array(sm['liveCalibration'].rpyCalib)
+        cur_height = float(sm['liveCalibration'].height[0]) if len(sm['liveCalibration'].height) > 0 else camera_height
+        cur_valid_blocks = sm['liveCalibration'].validBlocks
+        cur_cal_status = str(sm['liveCalibration'].calStatus)
+        cur_cal_perc = int(sm['liveCalibration'].calPerc)
+      else:
+        cur_rpyCalib = rpyCalib
+        cur_height = camera_height
+        cur_valid_blocks = 0
+        cur_cal_status = 'uncalibrated'
+        cur_cal_perc = 0
+      model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
 
-        ok = visualizer.draw(
-          display_rgb,
-          model_msg,
-          vis_intrinsics,
-          cur_rpyCalib,
-          cur_height,
-          world.get_vehicle_speed(),
-          cur_cal_status,
-          cur_valid_blocks,
-          cur_cal_perc,
-          fps,
-          gt_lines=gt_lines,
-          gt_probs=gt_probs,
-          eval_metrics=eval_metrics,
-        )
+      ok = visualizer.draw(
+        display_rgb,
+        model_msg,
+        vis_intrinsics,
+        cur_rpyCalib,
+        cur_height,
+        world.get_vehicle_speed(),
+        cur_cal_status,
+        cur_valid_blocks,
+        cur_cal_perc,
+        fps,
+        gt_lines=gt_lines,
+        gt_probs=gt_probs,
+        eval_metrics=eval_metrics,
+      )
 
-        if not ok:
-          break
+      if not ok:
+        break
 
       if args.max_frames > 0 and tick_count // TICKS_PER_FRAME >= args.max_frames:
         print(f"Reached max frames ({args.max_frames})")
@@ -582,15 +469,7 @@ def main():
 
       if tick_count % 100 == 0:
         speed = world.get_vehicle_speed()
-        if record_only:
-          saved = recorder.saved_count if recorder else 0
-          print(f"[RECORD] frame={tick_count // TICKS_PER_FRAME} speed={speed:.1f}m/s " + f"fps={fps:.1f} saved={saved}")
-        elif custom_model_mode:
-          has_output = custom_model_msg is not None
-          print(
-            f"[CustomModel] frame={tick_count // TICKS_PER_FRAME} speed={speed:.1f}m/s " + f"fps={fps:.1f} output={'active' if has_output else 'buffering'}"
-          )
-        elif custom_modeld_mode:
+        if custom_modeld_mode:
           modeld_status = 'connected' if sm.seen['modelV2'] else 'waiting...'
           dual_saved = dual_recorder.saved_count if dual_recorder else '-'
           print(f"[CustomModeld] frame={tick_count // TICKS_PER_FRAME} speed={speed:.1f}m/s " + f"fps={fps:.1f} modeld={modeld_status} saved={dual_saved}")
@@ -621,8 +500,6 @@ def main():
     print(f"Error: {e}")
     raise
   finally:
-    if recorder is not None:
-      recorder.close()
     if dual_recorder is not None:
       dual_recorder.close()
     if evaluator is not None and evaluator.history:
@@ -631,8 +508,7 @@ def main():
       for k, v in sorted(summary.items()):
         print(f"  {k}: {v:.4f}")
       print(f"  total_frames: {len(evaluator.history)}")
-    if not record_only:
-      visualizer.close()
+    visualizer.close()
     # Terminate subprocesses first (before destroying Carla actors)
     for proc in [calibrationd_proc, modeld_proc]:
       if proc is not None:
