@@ -462,17 +462,8 @@ def main():
         rec_lead_gt = lead_gt_extractor.get_lead_vehicles(veh_transform, v_ego, road_edges=rec_road_edges_gt)
         rec_pose, rec_road_transform, rec_wide_from_device_euler = pose_gt_extractor.update(veh_transform)
 
-        # Per-frame rpyCalib: camera mounting angles + vehicle tilt
-        veh_pitch_rad = np.deg2rad(veh_transform.rotation.pitch)
-        veh_roll_rad = np.deg2rad(veh_transform.rotation.roll)
-        frame_rpyCalib = np.array(
-          [
-            veh_roll_rad,
-            -(np.deg2rad(pitch_deg) + veh_pitch_rad),
-            -np.deg2rad(yaw_deg),
-          ],
-          dtype=np.float32,
-        )
+        # rpyCalib: fixed camera mounting angles only (no vehicle tilt).
+        # Vehicle tilt is captured by road_transform, matching openpilot semantics.
 
         world_pose = np.array(
           [
@@ -494,7 +485,7 @@ def main():
           rec_road_transform,
           v_ego,
           road_edges_gt=rec_road_edges_gt,
-          rpyCalib=frame_rpyCalib,
+          rpyCalib=rpyCalib.astype(np.float32),
           world_pose=world_pose,
           wide_from_device_euler=rec_wide_from_device_euler,
         )
@@ -506,16 +497,6 @@ def main():
           labels = label_extractor.extract(sm['modelV2'], cam_odom)
           if labels is not None and road_rgb is not None and wide_rgb is not None:
             veh_transform = world.get_vehicle_transform()
-            veh_pitch_rad = np.deg2rad(veh_transform.rotation.pitch)
-            veh_roll_rad = np.deg2rad(veh_transform.rotation.roll)
-            frame_rpyCalib_dual = np.array(
-              [
-                veh_roll_rad,
-                -(np.deg2rad(pitch_deg) + veh_pitch_rad),
-                -np.deg2rad(yaw_deg),
-              ],
-              dtype=np.float32,
-            )
             world_pose_dual = np.array(
               [
                 veh_transform.location.x,
@@ -527,7 +508,7 @@ def main():
               ],
               dtype=np.float32,
             )
-            dual_recorder.record(road_rgb, wide_rgb, labels, rpyCalib=frame_rpyCalib_dual, v_ego=world.get_vehicle_speed(), world_pose=world_pose_dual)
+            dual_recorder.record(road_rgb, wide_rgb, labels, rpyCalib=rpyCalib.astype(np.float32), v_ego=world.get_vehicle_speed(), world_pose=world_pose_dual)
 
       # Lane GT evaluation (non-recording path)
       gt_lines = None
