@@ -76,8 +76,6 @@ def main():
   parser.add_argument('--wide-road-only', action='store_true', help='Single wide camera mode (modeld uses ecam intrinsics for both inputs)')
   parser.add_argument('--road-only', action='store_true', help='Single narrow camera mode (modeld uses fcam intrinsics for main input)')
   parser.add_argument('--height-comp', action='store_true', help='Enable lane line height compensation, do not use this functionality')
-  parser.add_argument('--eval-lanes', action='store_true', help='Enable lane line ground truth evaluation')
-  parser.add_argument('--eval-interval', type=int, default=1, help='GT evaluation interval in frames (default: every frame)')
   parser.add_argument('--record-skip', type=int, default=1, help='Save every N-th frame when recording (default: 1)')
   parser.add_argument(
     '--speed-range', type=float, nargs=2, default=[20.0, 140.0], metavar=('MIN', 'MAX'), help='Ego target speed range in km/h (default: 20 140)'
@@ -265,17 +263,6 @@ def main():
     speed_range=tuple(args.speed_range),
   )
 
-  # Lane GT evaluation
-  gt_extractor = None
-  evaluator = None
-  if args.eval_lanes:
-    from openpilot.tools.dashcam.lane_evaluator import LaneEvaluator
-    from openpilot.tools.dashcam.lane_ground_truth import LaneGroundTruth
-
-    gt_extractor = LaneGroundTruth(world.get_map(), camera_offset_x=0.8, camera_height=camera_height)
-    evaluator = LaneEvaluator()
-    print(f"Lane GT evaluation enabled (interval={args.eval_interval})")
-
   # Dual-camera recording with modeld labels
   dual_recorder = None
   label_extractor = None
@@ -406,20 +393,6 @@ def main():
             )
             dual_recorder.record(road_rgb, wide_rgb, labels, rpyCalib=rpyCalib.astype(np.float32), v_ego=world.get_vehicle_speed(), world_pose=world_pose_dual)
 
-      # Lane GT evaluation (non-recording path)
-      gt_lines = None
-      gt_probs = None
-      eval_metrics = None
-      eval_frame_count = tick_count // TICKS_PER_FRAME
-      if gt_extractor is not None and eval_frame_count % args.eval_interval == 0:
-        gt_lines, gt_probs = gt_extractor.get_lane_lines(world.get_vehicle_transform())
-        if gt_lines is not None and sm is not None:
-          model_msg_for_eval = sm['modelV2'] if sm.seen['modelV2'] else None
-          if model_msg_for_eval is not None and evaluator is not None:
-            model_lane_lines = [np.array([ll.x, ll.y, ll.z], dtype=np.float32).T for ll in model_msg_for_eval.laneLines]
-            model_probs = list(model_msg_for_eval.laneLineProbs)
-            eval_metrics = evaluator.evaluate(model_lane_lines, model_probs, gt_lines, gt_probs)
-
       # FPS tracking
       frame_count += 1
       now = time.monotonic()
@@ -455,9 +428,6 @@ def main():
         cur_valid_blocks,
         cur_cal_perc,
         fps,
-        gt_lines=gt_lines,
-        gt_probs=gt_probs,
-        eval_metrics=eval_metrics,
       )
 
       if not ok:
@@ -502,12 +472,6 @@ def main():
   finally:
     if dual_recorder is not None:
       dual_recorder.close()
-    if evaluator is not None and evaluator.history:
-      summary = evaluator.get_summary()
-      print("\n=== Lane Evaluation Summary ===")
-      for k, v in sorted(summary.items()):
-        print(f"  {k}: {v:.4f}")
-      print(f"  total_frames: {len(evaluator.history)}")
     visualizer.close()
     # Terminate subprocesses first (before destroying Carla actors)
     for proc in [calibrationd_proc, modeld_proc]:

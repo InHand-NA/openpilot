@@ -175,13 +175,6 @@ python tools/dashcam/run.py --perfect-cam --high-quality
 | `--road-only` | — | 仅窄角相机模式（modeld 使用 fcam intrinsics） |
 | `--height-comp` | — | 启用车高补偿（不推荐） |
 
-### 车道线 GT 评估
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--eval-lanes` | — | 启用 Carla GT 车道线评估 |
-| `--eval-interval N` | `1` | 每 N 帧评估一次（默认每帧） |
-
 ### 数据采集
 
 | 参数 | 默认值 | 说明 |
@@ -402,142 +395,7 @@ python tools/dashcam/view_dual_data.py data/dual_camera_train/Town04_001/
 python tools/dashcam/warp_example.py data/dual_camera_train/Town04_001/000100.npz
 ```
 
----
-
-## 训练框架
-
-### 模型架构
-
-```
-输入: img     (B, 12, 128, 256) uint8  — 窄角 2帧 × 6ch YUV420
-      big_img (B, 12, 128, 256) uint8  — 广角 2帧 × 6ch YUV420
-      → 通道拼接后归一化 (/ 128.0 - 1.0 → [-1, 1])
-      → (B, 24, 128, 256)
-         ↓
-骨干: FastViT RepMixer [2,2,6,2], channels [64,128,256,512]
-      Stem + 4 Stage (RepMixerBlock + ConvFFN + LayerScale)
-      → DWConv(512→1024) + SE + GAP + FC(1024→2048)
-      → 2048 维特征
-         ↓
-    ┌──────────────────────┐   ┌──────────────────────┐
-    │   Head 1             │   │   Head 2             │
-    │   (Bottleneck+L2Norm)│   │   (No Bottleneck)    │
-    │                      │   │                      │
-    │  lane_lines      528 │   │  pose             12 │
-    │  lane_lines_prob   8 │   │  road_transform   12 │
-    │  road_edges      264 │   │                      │
-    │  lead            144 │   │                      │
-    │  lead_prob         3 │   │                      │
-    └──────────────────────┘   └──────────────────────┘
-       总输出: 971 维（flat tensor）
-```
-
-**RepConv 重参数化**：训练时为多分支 DWConv（提升表达力），推理前调用 `fuse_repconv()` 融合为单个 DWConv（提升速度）。
-
-### 数据集
-
-```
-DualCameraDrivingDataset        — 实时从原始 NPZ 预处理（慢）
-CachedDualCameraDrivingDataset  — 加载预计算缓存（推荐，26× 快）
-```
-
-**时间配对**：每帧与前第 4 帧配对（temporal_skip = 4，对应 200ms），组成 `(12, 128, 256)` 时序输入。
-
-**NaN 处理**：车道线/路沿在山顶遮挡处为 NaN，dataset 层将其替换为 0 并生成 `*_valid` 掩码，loss 层排除无效点。
-
-### 预处理缓存（26× 训练加速）
-
-```bash
-# 预处理（自动使用全部 CPU 核，~30 秒处理 20000 帧）
-python tools/dashcam/train/preprocess_cache.py data/dual_camera_train/Town04_001
-# 输出：data/dual_camera_train/Town04_001_cache/
-```
-
-| | 原始 NPZ | 缓存 NPZ |
-|---|---|---|
-| 单帧大小 | ~6.2 MB | ~192 KB（**30× 缩小**） |
-| 训练速度 | ~7.8 分钟/epoch | ~18 秒/epoch（**26× 加速**） |
-
-缓存 NPZ 格式：`road_yuv (6,128,256) uint8`、`wide_yuv (6,128,256) uint8` + 所有 GT 标签。
-
-### 损失函数
-
-| 输出 | 损失类型 | 权重 | 掩码策略 |
-|------|---------|------|---------|
-| `lane_lines` | GaussianNLL | 1.0 | `lane_lines_prob > 0.5`（车道级）× `valid`（逐点） |
-| `lane_lines_prob` | BCEWithLogits | 1.0 | — |
-| `road_edges` | GaussianNLL | 1.0 | `road_edges_prob > 0.5` × `valid` |
-| `lead` | GaussianNLL | 0.5 | `lead_prob > 0.5` |
-| `lead_prob` | BCEWithLogits | 1.0 | — |
-| `pose` | GaussianNLL | 0.2 | 无掩码 |
-| `road_transform` | GaussianNLL | 0.2 | 无掩码 |
-| `wide_from_device_euler` | GaussianNLL | — | 仅当预测和真值均存在时计算 |
-
-**GaussianNLL**：MDN 格式输入 `(B, 2N)`，前 N 维为 μ，后 N 维为 log σ，clamp 到 [−3, 3]，防止梯度爆炸。
-
-### ONNX 导出
-
-```bash
-# 双目模型导出（含输出切片元数据）
-python tools/dashcam/train/export_onnx.py \
-  --checkpoint checkpoints/dual/best.pt \
-  --output checkpoints/dual/driving_vision.onnx \
-  --dual-camera
-
-# 同时生成 fp16 版本
-python tools/dashcam/train/export_onnx.py \
-  --checkpoint checkpoints/dual/best.pt \
-  --output checkpoints/dual/driving_vision.onnx \
-  --dual-camera --fp16
-```
-
-导出步骤：
-1. 加载 checkpoint，切换 eval 模式
-2. `fuse_repconv()` 融合 RepConv 分支
-3. 包装为 `FlatOutputWrapper`（dict → 971 维 flat tensor）
-4. `torch.onnx.export`（opset 17，动态 batch）
-5. 将 `output_slices` 元数据 base64 编码嵌入 ONNX metadata
-6. onnxruntime 验证一致性
-7. 可选 fp16 权重转换
-
-**输出切片**（971 维 flat tensor）：
-
-| 名称 | 切片 | 维度 |
-|------|------|------|
-| `lane_lines` | `[0:528]` | (4, 33, 4) — MDN μμσσ |
-| `lane_lines_prob` | `[528:536]` | (4, 2) — logits |
-| `road_edges` | `[536:800]` | (2, 33, 4) — MDN μμσσ |
-| `lead` | `[800:944]` | (3, 6, 8) — MDN μμμμσσσσ |
-| `lead_prob` | `[944:947]` | (3,) — logits |
-| `pose` | `[947:959]` | (12,) — μ×6 + σ×6 |
-| `road_transform` | `[959:971]` | (12,) — μ×6 + σ×6 |
-
-### 编译为 tinygrad pkl
-
-```bash
-# ONNX → tinygrad TinyJit pkl（约 1~3 分钟）
-DEV=CUDA python tools/dashcam/train/compile_tinygrad.py \
-  checkpoints/dual/driving_vision.onnx
-
-# 输出：
-#   checkpoints/dual/driving_vision_tinygrad_cuda.pkl   — TinyJit 推理图
-#   checkpoints/dual/driving_vision_metadata.pkl        — 输出切片信息
-```
-
-### 训练监控
-
-```bash
-# 查看当前训练状态
-python tools/dashcam/train/monitor.py checkpoints/training_log.csv
-
-# 实时刷新（每 10 秒）
-python tools/dashcam/train/monitor.py checkpoints/training_log.csv --live
-
-# 导出训练曲线图
-python tools/dashcam/train/monitor.py checkpoints/training_log.csv --plot
-```
-
----
+----
 
 ## 迁移学习（预训练模型）
 
@@ -600,23 +458,6 @@ VisionIPC 帧 (road + wide)
   → 解析输出切片 → MDN/BCE 解码（μ, σ, prob）
   → cereal modelV2 消息发布
 ```
-
----
-
-## 车道线 GT 评估
-
-在线评估模型输出与 Carla 几何真值的差异：
-
-```bash
-python tools/dashcam/run.py \
-  --perfect-cam --high-quality \
-  --eval-lanes --eval-interval 1
-```
-
-评估指标（每帧更新，统计汇总在退出时打印）：
-- MAE / RMSE（分段：<30m, 30~60m, 60~100m）
-- 精确率 @ 0.3m / 0.5m / 1.0m（<60m 范围内）
-- 概率检测 TP / FP / FN
 
 ---
 
