@@ -117,27 +117,35 @@ class CustomModelState:
 
 
 def decode_outputs(parsed: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-  """Decode raw network outputs (MDN / BCE) from flat slices."""
+  """Decode raw network outputs (MDN / BCE) from flat slices.
+
+  MDN layout follows openpilot parse_model_outputs.parse_mdn convention:
+    [all_means | all_log_sigma]  (non-interleaved, first half = means, second half = sigmas)
+  NOT interleaved [mu_y, mu_z, sigma_y, sigma_z] per point.
+  """
   p: dict[str, np.ndarray] = {}
 
-  # Lane lines: (1, 528) → (1, 4, 33, 4), MDN: mu=[:,:,:2], std=exp([:,:,2:])
-  ll = parsed['lane_lines'].reshape(1, 4, 33, 4)
-  p['lane_mu'] = ll[:, :, :, :2]
-  p['lane_std'] = np.exp(ll[:, :, :, 2:])
+  # Lane lines: (1, 528) → first 264 = means (4×33×2), last 264 = log_sigma
+  ll_raw = parsed['lane_lines']          # (1, 528)
+  n = ll_raw.shape[1] // 2              # 264
+  p['lane_mu'] = ll_raw[:, :n].reshape(1, 4, 33, 2)
+  p['lane_std'] = np.exp(ll_raw[:, n:]).reshape(1, 4, 33, 2)
 
   # Lane line probs: (1, 8) → (1, 4, 2), sigmoid col 1
   ll_prob = parsed['lane_lines_prob'].reshape(1, 4, 2)
   p['lane_prob'] = _sigmoid(ll_prob[:, :, 1])
 
-  # Road edges: (1, 264) → (1, 2, 33, 4)
-  re = parsed['road_edges'].reshape(1, 2, 33, 4)
-  p['edge_mu'] = re[:, :, :, :2]
-  p['edge_std'] = np.exp(re[:, :, :, 2:])
+  # Road edges: (1, 264) → first 132 = means (2×33×2), last 132 = log_sigma
+  re_raw = parsed['road_edges']          # (1, 264)
+  n = re_raw.shape[1] // 2              # 132
+  p['edge_mu'] = re_raw[:, :n].reshape(1, 2, 33, 2)
+  p['edge_std'] = np.exp(re_raw[:, n:]).reshape(1, 2, 33, 2)
 
-  # Lead: (1, 144) → (1, 3, 6, 8), MDN: mu=[:,:,:4], std=exp([:,:,4:])
-  ld = parsed['lead'].reshape(1, 3, 6, 8)
-  p['lead_mu'] = ld[:, :, :, :4]
-  p['lead_std'] = np.exp(ld[:, :, :, 4:])
+  # Lead: (1, 144) → first 72 = means (3×6×4), last 72 = log_sigma
+  ld_raw = parsed['lead']                # (1, 144)
+  n = ld_raw.shape[1] // 2              # 72
+  p['lead_mu'] = ld_raw[:, :n].reshape(1, 3, 6, 4)
+  p['lead_std'] = np.exp(ld_raw[:, n:]).reshape(1, 3, 6, 4)
 
   # Lead prob: (1, 3) → sigmoid
   p['lead_prob'] = _sigmoid(parsed['lead_prob'])
@@ -262,8 +270,11 @@ def main():
   dc = DEVICE_CAMERAS[("pc", "unknown")]
 
   live_calib_seen = False
-  transform_main = np.zeros((3, 3), dtype=np.float32)
-  transform_extra = np.zeros((3, 3), dtype=np.float32)
+  # Initialize with valid default warp (rpyCalib=[0,0,0]) instead of a zero matrix,
+  # which would produce garbage model inputs before the first liveCalibration arrives.
+  _intrinsics_main = dc.ecam.intrinsics if main_wide else dc.fcam.intrinsics
+  transform_main = get_warp_matrix(np.zeros(3, dtype=np.float32), _intrinsics_main, bigmodel_frame=False).astype(np.float32)
+  transform_extra = get_warp_matrix(np.zeros(3, dtype=np.float32), dc.ecam.intrinsics, bigmodel_frame=True).astype(np.float32)
 
   run_count = 0
   last_log_time = time.monotonic()
