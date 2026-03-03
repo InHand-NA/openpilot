@@ -6,6 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 openpilot is an operating system for robotics by comma.ai. It upgrades the driver assistance system (ACC + ALC) in 300+ supported cars. Runs on comma 3X hardware (ARM/aarch64) and x86_64 for development.
 
+本项目是openpilot的一个fork。我的目的是基于openilot的成果开发出一个适用于小轿车,suv和卡车应用场景的LDW/FCW Dashcam系统。具体包括：
+- 搭建基于openpilot软件框架和carla的仿真系统。
+- 使用openpilot+Carla采集小轿车和SUV的模拟数据，用于测试、训练用途。
+- 从openpilot预训练的driving vision模型中复刻需要的网络结构和权重，重构新的模型driving_vision_warning。
+- 基于carla模拟器采集卡车场景（高度提升）的驾驶数据，并进行标注。
+- 使用上述卡车场景数据对driving_vision_warning进行微调，扩展相机安装高度。
+- 完成以上场景需要的脚本和程序代码。
+
+
 ## Build & Development Commands
 
 ```bash
