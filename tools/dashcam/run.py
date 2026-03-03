@@ -4,7 +4,7 @@
 Usage:
   # Start Carla server first, then:
   python tools/dashcam/run.py --perfect-cam --high-quality
-  python tools/dashcam/run.py --online-calib --camera-pitch 5 --camera-yaw 3
+  python tools/dashcam/run.py --camera-pitch 5 --camera-yaw 3
   python tools/dashcam/run.py --perfect-cam --save-video output.mp4 --max-frames 100
 """
 
@@ -62,11 +62,11 @@ def main():
   parser.add_argument('--town', default='Town04_Opt')
   parser.add_argument('--spawn-point', type=int, default=16)
   parser.add_argument('--random-spawn', action='store_true', help='Spawn ego at a random waypoint (overrides --spawn-point)')
-  parser.add_argument('--camera-pitch', type=float, default=5.0, help='Camera pitch in degrees')
-  parser.add_argument('--camera-yaw', type=float, default=3.0, help='Camera yaw in degrees')
+  parser.add_argument('--camera-pitch', type=float, default=-5.0, help='Camera pitch in degrees')
+  parser.add_argument('--camera-yaw', type=float, default=-2.0, help='Camera yaw in degrees')
   parser.add_argument('--camera-height', type=float, default=1.13, help='Camera height in meters')
   parser.add_argument('--perfect-cam', action='store_true', help='Use pitch=0, yaw=0 (ideal mounting)')
-  parser.add_argument('--online-calib', action='store_true', help='Use online calibration (calibrationd subprocess)')
+  parser.add_argument('--known-pose', action='store_true', help='Use fixed camera pose (skip calibrationd, use --camera-pitch/yaw directly)')
   parser.add_argument('--num-npc', type=int, default=20)
   parser.add_argument('--high-quality', action='store_true')
   parser.add_argument('--no-display', action='store_true')
@@ -118,7 +118,7 @@ def main():
   else:
     cam_mode_str = 'dual (fcam + ecam)'
   print(f"Camera mode: {cam_mode_str}")
-  print(f"Calibration mode: {'online (calibrationd)' if args.online_calib else 'known pose'}")
+  print(f"Calibration mode: {'online (calibrationd)' if not args.known_pose else 'known pose'}")
 
   # 1. Initialize Params and subprocesses
   camerad = None
@@ -139,7 +139,7 @@ def main():
     params.put("CarParams", CP.to_bytes())
 
     calib_msg = messaging.new_message('liveCalibration')
-    if args.online_calib:
+    if not args.known_pose:
       calib_msg.liveCalibration.validBlocks = 0
       calib_msg.liveCalibration.rpyCalib = [0.0, 0.0, 0.0]
     else:
@@ -154,7 +154,7 @@ def main():
     print(f"Starting modeld subprocess (DEV={modeld_env['DEV']})...")
     modeld_proc = subprocess.Popen([sys.executable, '-m', 'selfdrive.modeld.modeld'], env=modeld_env)
 
-    if args.online_calib:
+    if not args.known_pose:
       print("Starting calibrationd subprocess...")
       calibrationd_proc = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.dashcam.calibrationd'], env={**os.environ})
 
@@ -162,7 +162,7 @@ def main():
     if record_modeld:
       sub_topics.append('cameraOdometry')
     pub_services = ['carState', 'deviceState']
-    if not args.online_calib:
+    if args.known_pose:
       pub_services.append('liveCalibration')
     pm = messaging.PubMaster(pub_services)
     sm = messaging.SubMaster(sub_topics)
@@ -177,7 +177,7 @@ def main():
     params.put("CarParams", CP.to_bytes())
 
     calib_msg = messaging.new_message('liveCalibration')
-    if args.online_calib:
+    if not args.known_pose:
       calib_msg.liveCalibration.validBlocks = 0
       calib_msg.liveCalibration.rpyCalib = [0.0, 0.0, 0.0]
     else:
@@ -233,12 +233,12 @@ def main():
     print(f"Starting custom_modeld subprocess (pkl={pkl_path}, metadata={metadata_path})...")
     modeld_proc = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.dashcam.custom_modeld'], env=modeld_env)
 
-    if args.online_calib:
+    if not args.known_pose:
       print("Starting calibrationd subprocess...")
       calibrationd_proc = subprocess.Popen([sys.executable, '-m', 'openpilot.tools.dashcam.calibrationd'], env={**os.environ})
 
     pub_services = ['carState', 'deviceState']
-    if not args.online_calib:
+    if args.known_pose:
       pub_services.append('liveCalibration')
     pm = messaging.PubMaster(pub_services)
     sm = messaging.SubMaster(['modelV2', 'liveCalibration'])
@@ -367,7 +367,7 @@ def main():
       publish_car_state(pm, world.get_vehicle_speed())
 
       # Known pose mode: publish liveCalibration directly
-      if not args.online_calib:
+      if args.known_pose:
         publish_live_calibration(pm, rpyCalib, camera_height)
 
       # Non-blocking receive modelV2 and liveCalibration

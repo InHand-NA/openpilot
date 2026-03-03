@@ -159,8 +159,8 @@ python tools/dashcam/run.py --perfect-cam --high-quality
 
 | 参数 | 说明 |
 |------|------|
-| （默认） | **已知姿态模式**：直接使用 pitch/yaw 参数作为固定标定值 |
-| `--online-calib` | **在线标定模式**：启动 calibrationd 子进程，从视觉里程计实时估计 |
+| （默认） | **在线标定模式**：启动 calibrationd 子进程，从视觉里程计实时估计 pitch/yaw/height |
+| `--known-pose` | **已知姿态模式**：跳过 calibrationd，直接使用 `--camera-pitch`/`--camera-yaw` 作为固定标定值 |
 
 ### 运行控制
 
@@ -196,8 +196,11 @@ python tools/dashcam/run.py --perfect-cam --high-quality
 # 标准运行（openpilot modeld，理想相机，高画质）
 python tools/dashcam/run.py --perfect-cam --high-quality
 
-# 在线标定（模拟相机装歪 5° 俯仰 + 3° 偏航）
-python tools/dashcam/run.py --online-calib --camera-pitch 5 --camera-yaw 3
+# 在线标定（模拟相机装歪 5° 俯仰 + 3° 偏航，默认即在线标定）
+python tools/dashcam/run.py --camera-pitch 5 --camera-yaw 3
+
+# 已知姿态模式（跳过 calibrationd，直接使用指定角度）
+python tools/dashcam/run.py --known-pose --camera-pitch 5 --camera-yaw 3
 
 # 录制视频（500 帧后自动停止）
 python tools/dashcam/run.py --perfect-cam --save-video output.mp4 --max-frames 500
