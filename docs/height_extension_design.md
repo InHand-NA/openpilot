@@ -866,76 +866,239 @@ PretrainedVisionModel(backbone, 微调后或冻结)
 
 ## 4. 数据采集方案
 
-### 4.1 多高度 Carla 配置
+### 4.1 两阶段采集策略
 
-采集 **6 个高度档位**，覆盖主要车型。俯仰角采用**恒定 5° 策略**（详见 §2.9），注视距离随高度等比例增大：
+训练数据采集分为**快速验证**和**正式训练**两个阶段，在资源投入和多样性覆盖之间分级权衡。
 
-| 档位 | 高度 H (m) | 注视距离 | 俯仰角 | 车型 | 最近可见 X |
-|------|-----------|---------|--------|------|---------|
-| H1 | 1.22 | 14m | 5.0° 向下 | 标准轿车/comma 3X（基准） | 3.8m |
-| H2 | 1.5 | 17m | 5.0° 向下 | SUV / 越野 | 4.7m |
-| H3 | 2.0 | 23m | 5.0° 向下 | 中型货车 / 厢式面包车 | 6.2m |
-| H4 | 2.5 | 29m | 5.0° 向下 | 大型货车 / 中型卡车 | 7.8m |
-| H5 | 3.0 | 34m | 5.0° 向下 | 重卡 / 长途卡车 | 9.3m |
-| H6 | 1.0 | 11m | 5.0° 向下 | 小型轿车（扩展低端） | 3.1m |
+| 维度 | 快速验证阶段 | 正式训练阶段 |
+|------|------------|------------|
+| **目标** | 验证训练流水线、多高度基本效果 | 泛化能力、场景鲁棒性 |
+| **高度档位** | H1 + H5（两个极端） | H1–H6 全部 6 档 |
+| **地图** | Town04（1 个） | Town04 / Town05 / Town07（3 个） |
+| **天气/时间** | ClearNoon（固定） | 3 天气 × 2 时段 |
+| **相机姿态** | pitch=5°, yaw=0°（固定） | pitch ∈ [3°,7°]，yaw ∈ [−3°,3°] |
+| **帧数** | ~2000 帧（1000/高度） | ~42000 帧（≥5000/高度） |
+| **允许过拟合** | ✅ 是（只验证上界） | ❌ 否（需泛化） |
 
-> **关于 H1 基准高度的说明**：将 1.22m 作为 H1（而非 1.0m）是因为这是 openpilot 预训练模型的标准高度，适合作为微调的锚定基准（§2.6 灾难性遗忘防护）。
+---
 
-俯仰角计算（恒定 5° 策略）：
+### 4.2 高度档位配置
+
+采集 **6 个高度档位**，覆盖主要车型。俯仰角采用**恒定 5° 策略**（详见 §2.9）：
+
+| 档位 | 高度 H (m) | 注视距离 | 名义 pitch | 车型 | 最近可见 X |
+|------|-----------|---------|-----------|------|---------|
+| H1 | 1.22 | 13.9m | 5.0° | 标准轿车 / comma 3X（基准） | 3.8m |
+| H2 | 1.5  | 17.1m | 5.0° | SUV / 越野 | 4.7m |
+| H3 | 2.0  | 22.9m | 5.0° | 中型货车 / 厢式面包车 | 6.2m |
+| H4 | 2.5  | 28.6m | 5.0° | 大型货车 / 中型卡车 | 7.8m |
+| H5 | 3.0  | 34.3m | 5.0° | 重卡 / 长途卡车 | 9.3m |
+| H6 | 1.0  | 11.4m | 5.0° | 小型轿车（扩展低端） | 3.1m |
+
+> H1（1.22m）是 openpilot 预训练模型的标准高度，作为微调锚点（§2.6）。H6（1.0m）作为低端扩展，低于标准高度。
+
+---
+
+### 4.3 相机姿态参数设计
+
+#### 4.3.1 Pitch（俯仰角）
+
+实际部署中，相机安装角度因固定支架、吸盘粘贴面、挡风玻璃倾斜度而存在偏差。calibrationd 在运行时自动从视觉里程计收敛到实际 pitch，warp 矩阵随之调整（详见 §2.9.6）。训练数据应覆盖这一分布以保证鲁棒性。
+
+| 参数 | 值 |
+|------|-----|
+| 名义安装角（恒定策略） | 5.0° |
+| 实际安装偏差（典型） | ±1°~±2° |
+| 实际安装偏差（最大） | ±3° |
+| **训练覆盖范围** | **3° ~ 7°** |
+| openpilot PITCH_LIMITS 上限 | 9.74°（0.17 rad） |
+| openpilot PITCH_LIMITS 下限 | −5.2°（−0.09074 rad） |
+
+训练 pitch 范围 [3°, 7°] 完全处于 PITCH_LIMITS 内，calibrationd 在部署时可正常收敛。
+
+**快速验证**：固定 pitch = 5.0°
+**正式训练**：在 {3°, 4°, 5°, 6°, 7°} 中均匀采样，各高度档位均覆盖全部 pitch 值
+
+#### 4.3.2 Yaw（偏航角）
+
+水平安装偏转同样影响 warp 几何。calibrationd 也会估计 yaw 并纳入 warp 矩阵计算。
+
+| 参数 | 值 |
+|------|-----|
+| 名义偏航（朝正前方） | 0° |
+| 实际安装偏转（典型） | ±1°~±2° |
+| 实际安装偏转（最大） | ±4° |
+| **训练覆盖范围** | **−3° ~ +3°** |
+
+**快速验证**：固定 yaw = 0°
+**正式训练**：在 {−3°, −1.5°, 0°, 1.5°, 3°} 中均匀采样
+
+#### 4.3.3 正式训练姿态矩阵
+
+正式训练每个高度档位需覆盖以下姿态组合：
+
+| pitch \ yaw | −3° | −1.5° | 0° | +1.5° | +3° |
+|-------------|-----|-------|-----|-------|-----|
+| 3° | ○ | | ○ | | ○ |
+| 4° | | ○ | ○ | ○ | |
+| **5°（名义）** | ○ | ○ | **●** | ○ | ○ |
+| 6° | | ○ | ○ | ○ | |
+| 7° | ○ | | ○ | | ○ |
+
+> ● 名义中心点，帧数权重 2×；○ 覆盖点，帧数权重 1×。中心点权重加倍确保名义安装条件的训练密度。
+
+---
+
+### 4.4 地图与场景条件
+
+#### 4.4.1 地图选择
+
+| 地图 | 道路特征 | 用途 |
+|------|---------|------|
+| **Town04** | 高速公路 + 乡村双车道，车道线清晰，弯道少 | 快速验证 **+** 正式训练 |
+| **Town05** | 城区网格路网，多车道 + 十字路口 | 正式训练 |
+| **Town07** | 乡村小道，弯道多，无中心线 | 正式训练（边缘场景） |
+
+Town04 是快速验证的首选：车道线规则清晰，便于定性检查模型输出。
+
+#### 4.4.2 天气与时段
+
+| 条件代码 | 描述 | 阶段 |
+|---------|------|------|
+| `ClearNoon` | 晴天正午，高对比度 | 验证 + 正式 |
+| `CloudyNoon` | 多云正午，漫射光 | 正式 |
+| `MidRainyNoon` | 中雨，路面反光 | 正式 |
+| `ClearSunset` | 晴天黄昏，低角度侧光 | 正式 |
+
+快速验证阶段只用 `ClearNoon`，条件最稳定，排除光照干扰。
+
+正式训练：**3 天气（Clear/Cloudy/Rain）× 2 时段（Noon/Sunset）= 6 个场景条件**。
+
+#### 4.4.3 其他场景参数
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| NPC 车辆密度 | 40–60 辆 | 保证有前车目标供 FCW 训练 |
+| 自车速度 | 40–100 km/h | 模拟高速/城区混合工况 |
+| 路线类型 | 直道 + 弯道 + 匝道 | 避免单一场景过拟合 |
+
+---
+
+### 4.5 采集规模与分配
+
+#### 快速验证阶段（总计约 2000 帧）
+
+| 高度 | 地图 | 场景 | pitch | yaw | 帧数 |
+|------|------|------|-------|-----|------|
+| H1 (1.22m) | Town04 | ClearNoon | 5° | 0° | 1000 |
+| H5 (3.0m) | Town04 | ClearNoon | 5° | 0° | 1000 |
+
+目标：2000 帧在 ~30 分钟内完成采集，1 小时内完成预处理 + 训练试跑。
+
+#### 正式训练阶段（总计约 42000 帧）
+
+每个高度档位的场景分配（以 H3–H5 为例，高偏移档位分配更多帧数）：
+
+| 高度 | 帧数（总） | 地图分配 | 场景多样性 | pitch×yaw 覆盖 |
+|------|---------|---------|---------|--------------|
+| H1 (1.22m) | 3000 | Town04×3 | Clear+Cloudy+Rain | 3×3=9种 |
+| H2 (1.5m) | 4000 | 3地图 | 4种 | 5×5=15种（采样） |
+| H3 (2.0m) | 6000 | 3地图 | 6种 | 5×5=15种 |
+| H4 (2.5m) | 7000 | 3地图 | 6种 | 5×5=15种 |
+| H5 (3.0m) | 10000 | 3地图 | 6种 | 5×5=15种 |
+| H6 (1.0m) | 4000 | Town04+Town05 | 4种 | 3×3=9种 |
+| **合计** | **~34000** | | | |
+
+> H5（3.0m）帧数最多，因分布偏移最大（§2.6.3）且是最具挑战性的场景。H1 因与预训练分布一致，帧数最少。
+
+**追加采集缓冲**：建议在每个高度多采集 20%（约 +7000 帧），用于剔除异常帧（碰撞、急停、场景切换）。最终有效帧目标 ~34000，原始采集目标约 **42000 帧**。
+
+---
+
+### 4.6 Carla 配置代码
+
+#### HEIGHT_CONFIGS（含车型映射）
 
 ```python
 import math
-TARGET_PITCH_DEG = 5.0
-for H in heights:
-    look_at = H / math.tan(math.radians(TARGET_PITCH_DEG))
-    pitch_down = TARGET_PITCH_DEG  # 对所有高度均为 5°
-```
 
-**采集规模目标**：每高度档位 ≥ 5000 帧，覆盖 ≥ 3 个地图（Town04/Town05/Town07），总计 ≥ 30000 帧。
-
-### 4.2 Carla 场景配置
-
-每个高度档位的采集配置：
-
-```python
-import math
 TARGET_PITCH_DEG = 5.0
 
 HEIGHT_CONFIGS = {
-    'H1': {'height': 1.22, 'look_at': 13.9, 'pitch': -TARGET_PITCH_DEG, 'vehicle': 'vehicle.toyota.prius'},
-    'H2': {'height': 1.5,  'look_at': 17.1, 'pitch': -TARGET_PITCH_DEG, 'vehicle': 'vehicle.ford.mustang'},
-    'H3': {'height': 2.0,  'look_at': 22.9, 'pitch': -TARGET_PITCH_DEG, 'vehicle': 'vehicle.mercedes.sprinter'},
-    'H4': {'height': 2.5,  'look_at': 28.6, 'pitch': -TARGET_PITCH_DEG, 'vehicle': 'vehicle.carlamotors.firetruck'},
-    'H5': {'height': 3.0,  'look_at': 34.3, 'pitch': -TARGET_PITCH_DEG, 'vehicle': 'vehicle.carlamotors.european_hgv'},
-    'H6': {'height': 1.0,  'look_at': 11.4, 'pitch': -TARGET_PITCH_DEG, 'vehicle': 'vehicle.tesla.model3'},
+    'H1': {'height': 1.22, 'look_at': 13.9, 'vehicle': 'vehicle.toyota.prius'},
+    'H2': {'height': 1.5,  'look_at': 17.1, 'vehicle': 'vehicle.ford.mustang'},
+    'H3': {'height': 2.0,  'look_at': 22.9, 'vehicle': 'vehicle.mercedes.sprinter'},
+    'H4': {'height': 2.5,  'look_at': 28.6, 'vehicle': 'vehicle.carlamotors.firetruck'},
+    'H5': {'height': 3.0,  'look_at': 34.3, 'vehicle': 'vehicle.carlamotors.european_hgv'},
+    'H6': {'height': 1.0,  'look_at': 11.4, 'vehicle': 'vehicle.tesla.model3'},
 }
+
+# 姿态扰动配置
+PITCH_VARIANTS = [3.0, 4.0, 5.0, 6.0, 7.0]   # 度，向下为正
+YAW_VARIANTS   = [-3.0, -1.5, 0.0, 1.5, 3.0]  # 度，右偏为正
+
+# 快速验证：单一姿态
+QUICK_POSE = {'pitch': -5.0, 'yaw': 0.0}
 ```
 
-场景条件：
-- **天气**：晴天 / 多云 / 小雨（各 1/3）
-- **时间**：日间（6:00–18:00）
-- **道路类型**：双车道乡村路 + 高速公路 + 城区道路
-- **交通密度**：中密度（50辆 NPC 车辆）
-
-### 4.3 采集脚本修改
-
-在 `tools/dashcam/carla_world.py` 的相机挂载点添加高度参数支持：
+#### 场景条件配置
 
 ```python
-# 在 carla_world.py 中增加 camera_height 参数
-class CameraConfig:
-    height: float = 1.22    # 相机离地面高度（米）
-    pitch: float = -4.9     # 相机俯仰角（度）
-    forward_offset: float = 2.0  # 前向偏移（米）
+# 正式训练场景矩阵
+SCENE_CONFIGS_FULL = [
+    {'map': 'Town04', 'weather': 'ClearNoon'},
+    {'map': 'Town04', 'weather': 'CloudyNoon'},
+    {'map': 'Town04', 'weather': 'MidRainyNoon'},
+    {'map': 'Town05', 'weather': 'ClearNoon'},
+    {'map': 'Town05', 'weather': 'ClearSunset'},
+    {'map': 'Town07', 'weather': 'ClearNoon'},
+]
 
-# 批量多高度采集入口
-def collect_multi_height(heights, frames_per_height=5000, output_base='data/multi_height'):
-    for h_config in heights:
-        output_dir = f"{output_base}/H{h_config['height']:.1f}"
-        run_collection(camera_height=h_config['height'],
-                       camera_pitch=h_config['pitch'],
-                       output_dir=output_dir,
-                       n_frames=frames_per_height)
+# 快速验证：仅使用第一条
+SCENE_CONFIGS_QUICK = SCENE_CONFIGS_FULL[:1]
+```
+
+#### CameraConfig（含 yaw 支持）
+
+```python
+# tools/dashcam/carla_world.py
+class CameraConfig:
+    height: float = 1.22    # 相机离地高度（米）
+    pitch: float = -5.0     # 相机俯仰角（度，负值=向下）
+    yaw:   float = 0.0      # 相机偏航角（度，正值=右偏）
+    forward_offset: float = 2.0  # 前向偏移（米）
+```
+
+#### 批量采集入口
+
+```python
+def collect_batch(phase='quick', output_base='data/multi_height'):
+    """
+    phase='quick': 快速验证，固定条件，H1+H5
+    phase='full':  正式训练，全高度，多场景，多姿态
+    """
+    heights = ['H1', 'H5'] if phase == 'quick' else list(HEIGHT_CONFIGS.keys())
+    scenes  = SCENE_CONFIGS_QUICK if phase == 'quick' else SCENE_CONFIGS_FULL
+    pitches = [QUICK_POSE['pitch']] if phase == 'quick' else [-p for p in PITCH_VARIANTS]
+    yaws    = [QUICK_POSE['yaw']]   if phase == 'quick' else YAW_VARIANTS
+    frames  = 1000 if phase == 'quick' else 800  # 每个条件组合的帧数
+
+    for h_key in heights:
+        h = HEIGHT_CONFIGS[h_key]
+        for scene in scenes:
+            for pitch in pitches:
+                for yaw in yaws:
+                    tag = f"{h_key}_p{abs(pitch):.0f}_y{yaw:+.0f}_{scene['map']}_{scene['weather']}"
+                    run_collection(
+                        camera_height=h['height'],
+                        camera_pitch=pitch,
+                        camera_yaw=yaw,
+                        vehicle=h['vehicle'],
+                        map_name=scene['map'],
+                        weather=scene['weather'],
+                        n_frames=frames,
+                        output_dir=f"{output_base}/{tag}",
+                    )
 ```
 
 ---
