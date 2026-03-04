@@ -877,7 +877,9 @@ PretrainedVisionModel(backbone, 微调后或冻结)
 | **地图** | Town04（1 个） | Town04 / Town05 / Town07（3 个） |
 | **天气/时间** | ClearNoon（固定） | 3 天气 × 2 时段 |
 | **相机姿态** | pitch=5°, yaw=0°（固定） | pitch ∈ [−1.5°,7°]，yaw ∈ [−3°,3°] |
-| **帧数** | ~2000 帧（1000/高度） | ~42000 帧（≥5000/高度） |
+| **原始采集帧** | ~40000 帧（20FPS，2000s） | ~680000 帧（20FPS，约9.4小时） |
+| **训练帧（1FPS抽样后）** | ~2000 帧（1000/高度） | ~34000 帧（见§4.5） |
+| **数据预处理** | 1FPS 抽样 | 1FPS 抽样 + 低速帧过滤 |
 | **允许过拟合** | ✅ 是（只验证上界） | ❌ 否（需泛化） |
 
 ---
@@ -953,8 +955,8 @@ PretrainedVisionModel(backbone, 微调后或冻结)
 >
 > **密度分级依据**：
 > - [-1.5°, 0°]（相机略仰）：稀疏外侧 yaw——实际安装极少，仅保证覆盖
-> - [1.5°, 3°, 7°]（偏离名义较多）：内侧 3-yaw——偶见安装，中等密度
-> - [4°, 5°, 6°]（名义值±1°以内）：全 5-yaw——最常见安装区间，全密度覆盖
+> - [1.5°, 7°]（偏离名义较多）：内侧 3-yaw——偶见安装，中等密度
+> - [3°, 4°, 5°, 6°]（名义值±1°以内）：全 5-yaw——最常见安装区间，全密度覆盖
 
 ---
 
@@ -995,51 +997,52 @@ Town04 是快速验证的首选：车道线规则清晰，便于定性检查模�
 
 ### 4.5 采集规模与分配
 
-#### 快速验证阶段（总计约 2000 帧）
+> **帧数说明**：本节所有帧数均指 **1FPS 抽样后的训练帧**（详见 §4.7）。Carla 以 20FPS 采集，原始帧数为训练帧数的 **20×**。
 
-| 高度 | 地图 | 场景 | pitch | yaw | 帧数 |
-|------|------|------|-------|-----|------|
-| H1 (1.22m) | Town04 | ClearNoon | 5° | 0° | 1000 |
-| H6 (3.0m) | Town04 | ClearNoon | 5° | 0° | 1000 |
+#### 快速验证阶段
 
-目标：2000 帧在 ~30 分钟内完成采集，1 小时内完成预处理 + 训练试跑。
+| 高度 | 地图 | 场景 | pitch | yaw | 训练帧 | 原始采集帧 |
+|------|------|------|-------|-----|--------|----------|
+| H1 (1.22m) | Town04 | ClearNoon | 5° | 0° | 1000 | 20000 |
+| H6 (3.0m) | Town04 | ClearNoon | 5° | 0° | 1000 | 20000 |
+| **合计** | | | | | **2000** | **40000** |
 
-#### 正式训练阶段（总计约 42000 帧）
+原始采集约 2000 秒（~33 分钟）Carla 仿真；预处理（1FPS 抽样）后得到 2000 训练帧，约 1 小时内完成预处理 + 训练试跑。
 
-每个高度档位的场景分配（以 H3–H5 为例，高偏移档位分配更多帧数）：
+#### 正式训练阶段
 
-| 高度 | 帧数（总） | 地图分配 | 场景多样性 | pitch×yaw 覆盖 |
-|------|---------|---------|---------|--------------|
-| H1 (1.22m) | 3000 | Town04×3 | Clear+Cloudy+Rain | 3×3=9种 |
-| H2 (1.3m) | 3000 | Town04+Town05 | 4种 | 3×3=9种 |
-| H3 (1.5m) | 4000 | 3地图 | 4种 | 5×5=15种（采样） |
-| H4 (2.0m) | 6000 | 3地图 | 6种 | 5×5=15种 |
-| H5 (2.5m) | 8000 | 3地图 | 6种 | 5×5=15种 |
-| H6 (3.0m) | 10000 | 3地图 | 6种 | 5×5=15种 |
-| **合计** | **~34000** | | | |
+| 高度 | 训练帧 | 原始采集帧 | 地图分配 | 场景多样性 | pitch×yaw 覆盖 |
+|------|--------|----------|---------|---------|--------------|
+| H1 (1.22m) | 3000 | 60000 | Town04×3 | Clear+Cloudy+Rain | 3×3=9种 |
+| H2 (1.3m) | 3000 | 60000 | Town04+Town05 | 4种 | 3×3=9种 |
+| H3 (1.5m) | 4000 | 80000 | 3地图 | 4种 | 5×5=15种（采样） |
+| H4 (2.0m) | 6000 | 120000 | 3地图 | 6种 | 5×5=15种 |
+| H5 (2.5m) | 8000 | 160000 | 3地图 | 6种 | 5×5=15种 |
+| H6 (3.0m) | 10000 | 200000 | 3地图 | 6种 | 5×5=15种 |
+| **合计** | **~34000** | **~680000** | | | |
 
-> H6（3.0m）帧数最多，因分布偏移最大（§2.6.3）且是最具挑战性的场景。H1/H2 因偏移极小，帧数最少。
+H6（3.0m）分配最多，因分布偏移最大。H1/H2 偏移极小，帧数最少。
 
-**追加采集缓冲**：建议在每个高度多采集 20%（约 +7000 帧），用于剔除异常帧（碰撞、急停、场景切换）。最终有效帧目标 ~34000，原始采集目标约 **42000 帧**。
+**追加缓冲**：建议各高度多采集 20%（~+140000 原始帧），用于剔除异常帧（碰撞、急停、场景切换）。含缓冲的原始采集目标约 **820000 帧**（Carla 总仿真时长约 11 小时）。
 
 ---
 
 ### 4.6 Carla 配置代码
 
-#### HEIGHT_CONFIGS（含车型映射）
-
+#### HEIGHT_CONFIGS
+（**现阶段暂时不考虑多种车型，只使用特斯拉**）
 ```python
 import math
 
 TARGET_PITCH_DEG = 5.0
 
 HEIGHT_CONFIGS = {
-    'H1': {'height': 1.22, 'look_at': 13.9, 'vehicle': 'vehicle.toyota.prius'},
-    'H2': {'height': 1.3,  'look_at': 14.9, 'vehicle': 'vehicle.lincoln.mkz_2017'},
-    'H3': {'height': 1.5,  'look_at': 17.1, 'vehicle': 'vehicle.ford.mustang'},
-    'H4': {'height': 2.0,  'look_at': 22.9, 'vehicle': 'vehicle.mercedes.sprinter'},
-    'H5': {'height': 2.5,  'look_at': 28.6, 'vehicle': 'vehicle.carlamotors.firetruck'},
-    'H6': {'height': 3.0,  'look_at': 34.3, 'vehicle': 'vehicle.carlamotors.european_hgv'},
+    'H1': {'height': 1.22, 'look_at': 13.9},
+    'H2': {'height': 1.3,  'look_at': 14.9},
+    'H3': {'height': 1.5,  'look_at': 17.1},
+    'H4': {'height': 2.0,  'look_at': 22.9},
+    'H5': {'height': 2.5,  'look_at': 28.6},
+    'H6': {'height': 3.0,  'look_at': 34.3},
 }
 
 # 姿态扰动配置
@@ -1112,354 +1115,51 @@ def collect_batch(phase='quick', output_base='data/multi_height'):
 
 ---
 
+### 4.7 训练前数据抽样策略
+
+#### 问题：20FPS 连续帧的时序冗余
+
+Carla 以 20FPS 输出视频流，相邻帧间隔仅 50ms。在典型行驶速度下（60 km/h），相邻帧之间车辆仅前进约 **0.83m**，场景内容高度重复。若将全部 20FPS 帧送入训练：
+
+- 同质样本主导梯度更新，等效独立训练步骤远少于帧数总量
+- 模型可能过拟合时序序列特征，而非空间感知特征
+- 存储和训练计算资源浪费
+
+#### 策略：1FPS 时序抽样
+
+在预处理阶段每隔 20 帧保留 1 帧（1FPS），使相邻训练帧间隔约 1 秒。在 60 km/h 行驶速度下，相邻训练帧间距约 **16m**，时序相关性基本消除。
+
+```
+原始采集：[f0, f1, f2, ..., f19, f20, f21, ..., f39, f40, ...]  @20FPS
+                                 ↓ 每20帧取1帧
+训练数据：[f0,                   f20,                  f40, ...]  @1FPS
+```
+
+| 指标 | 20FPS 全采 | 1FPS 抽样 |
+|------|-----------|---------|
+| 相邻帧间车辆位移（60km/h） | 0.83m | 16.7m |
+| 相邻帧场景重叠度（估计） | >95% | <30% |
+| 训练帧数（相同原始录像） | 1× | 1/20× |
+| 等效独立样本比例 | ~5% | ~100% |
+
+
+
+#### 与 §4.5 帧数目标的关系
+
+§4.5 中所有"帧数"均指抽样后的**训练帧**。原始采集量 = 训练帧 × 20（见 §4.5 "原始采集帧"列）。快速验证阶段原始采集约 4 万帧；正式训练阶段原始采集约 82 万帧（含缓冲），对应 Carla 总仿真时长约 **11 小时**。
+
+---
+
 ## 5. 数据标注方案
 
-### 5.1 modeld 在线标注（H ≤ 1.5m）
 
-对于接近标准高度的数据，使用 `tools/dashcam/run.py --record-modeld` 直接采集 modeld 输出作为标注：
-
-```bash
-python tools/dashcam/run.py \
-    --camera-height 1.3 \
-    --record-modeld \
-    --output-dir data/multi_height/H1.3
-```
 
 ## 6. 模型训练方案
 
-### 6.1 架构设计：高度条件化模型
-
-#### HeightConditionedModel 结构
-
-```
-输入：
-  img:     (B, 12, 128, 256) uint8   — road camera
-  big_img: (B, 12, 128, 256) uint8   — wide camera
-  height:  (B, 1)            float32 — 相机安装高度（米）
-
-处理流程：
-  1. backbone(img, big_img) → flat (B, 977)    [backbone冻结]
-  2. height_embedding(height) → h_emb (B, 8)   [可训练]
-  3. concat([flat, h_emb]) → (B, 985)
-  4. conditioned_head(985 → 977) → out (B, 977) [可训练]
-
-输出：与 PretrainedVisionModel 完全兼容的字典格式
-```
-
-#### 高度嵌入设计
-
-```python
-class HeightEmbedding(nn.Module):
-    """将标量高度编码为连续嵌入向量。
-
-    使用正弦位置编码风格，对高度变化敏感。
-    """
-    def __init__(self, embed_dim=8, height_min=0.8, height_max=3.5):
-        super().__init__()
-        self.height_min = height_min
-        self.height_max = height_max
-        # 可学习的频率参数
-        self.freq = nn.Parameter(torch.randn(embed_dim // 2) * 0.1)
-        self.phase = nn.Parameter(torch.zeros(embed_dim // 2))
-
-    def forward(self, height):  # height: (B, 1)
-        h_norm = (height - self.height_min) / (self.height_max - self.height_min)  # [0, 1]
-        angles = h_norm * self.freq.unsqueeze(0) + self.phase.unsqueeze(0)
-        return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)  # (B, 8)
-```
-
-#### 高度条件化头部
-
-```python
-class HeightConditionedHead(nn.Module):
-    """轻量级高度条件化 MLP，调制 backbone 输出。"""
-    def __init__(self, feat_dim=977, height_embed_dim=8, hidden_dim=256):
-        super().__init__()
-        self.height_emb = HeightEmbedding(embed_dim=height_embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(feat_dim + height_embed_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, feat_dim),
-        )
-        # 初始化为恒等映射（残差），保证初始时接近预训练模型输出
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
-
-    def forward(self, flat, height):
-        h_emb = self.height_emb(height)
-        x = torch.cat([flat, h_emb], dim=-1)
-        return flat + self.mlp(x)  # 残差连接
-```
-
-#### 完整模型
-
-```python
-class HeightConditionedVisionModel(nn.Module):
-    """高度条件化驾驶视觉模型。
-
-    backbone: PretrainedVisionModel（openpilot 预训练，默认冻结）
-    head:     HeightConditionedHead（轻量级，随机初始化）
-    """
-    def __init__(self, onnx_path, freeze_backbone=True):
-        super().__init__()
-        self.backbone = PretrainedVisionModel(onnx_path, freeze=freeze_backbone)
-        self.head = HeightConditionedHead()
-
-    def forward(self, img, big_img, height):
-        # 1. 预训练 backbone 提取特征
-        backbone_out = self.backbone(img, big_img)  # dict(977维)
-        flat = torch.cat([backbone_out[k] for k in OUTPUT_NAMES], dim=-1)  # (B, 977)
-
-        # 2. 高度条件化调制
-        flat_conditioned = self.head(flat, height)  # (B, 977)
-
-        # 3. 重新分割为输出字典
-        return split_output_dict(flat_conditioned)  # dict，与 backbone_out 格式相同
-
-    def freeze_backbone(self):
-        self.backbone.freeze_backbone()
-
-    def unfreeze_all(self):
-        self.backbone.unfreeze_all()
-
-    def n_trainable_params(self):
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-```
-
-**参数量对比**：
-- backbone（冻结）：~23M 参数，0 可训练
-- HeightConditionedHead：~250K 参数（<1%），全部可训练
-- 总训练参数量：~250K（极轻量）
-
-### 6.2 数据准备
-
-#### 预处理缓存扩展
-
-现有 `preprocess_cache.py` 生成的 NPZ 缓存需增加 `camera_height` 字段：
-
-```python
-# preprocess_cache.py — 新增字段
-cache_dict = {
-    'road_yuv': road_yuv,    # (12, 128, 256) uint8
-    'wide_yuv': wide_yuv,    # (12, 128, 256) uint8
-    'camera_height': np.float32(frame_data['camera_height']),  # 标量
-    # ... 其他标签字段不变
-}
-```
-
-#### 多高度数据集混合策略
-
-```python
-class MultiHeightDataset(Dataset):
-    """按高度均匀采样的多高度数据集。
-
-    策略：每个 batch 中各高度档位均匀出现，避免高度分布偏差。
-    """
-    def __init__(self, height_cache_dirs: dict[float, str]):
-        # height_cache_dirs: {1.0: 'data/H1.0_cache', 1.3: '...', ...}
-        self.datasets = {
-            h: CachedDualCameraDrivingDataset(d)
-            for h, d in height_cache_dirs.items()
-        }
-        # 按最小数据集大小截断，确保均匀采样
-        min_size = min(len(d) for d in self.datasets.values())
-        self.size = min_size * len(self.datasets)
-
-    def __getitem__(self, idx):
-        heights = sorted(self.datasets.keys())
-        h = heights[idx % len(heights)]
-        local_idx = idx // len(heights)
-        sample = self.datasets[h][local_idx]
-        sample['camera_height'] = torch.tensor([h], dtype=torch.float32)
-        return sample
-```
-
-#### 数据增强：高度 jitter
-
-```python
-# 训练时对 camera_height 添加轻微扰动，增强鲁棒性
-height_jitter = 0.1  # ±0.1m
-height = height + torch.randn_like(height) * height_jitter
-height = height.clamp(0.8, 3.5)
-```
-
-### 6.3 训练流程
-
-#### 阶段0：零样本基线评估（无需训练）
-
-在各高度数据集上直接运行标准 `PretrainedVisionModel`（不传高度），量化精度退化：
-
-```bash
-python tools/dashcam/train/evaluate.py \
-    --model pretrained \
-    --onnx-path selfdrive/modeld/models/driving_vision.onnx \
-    --cache-dirs data/multi_height/H1.0_cache data/multi_height/H3.0_cache \
-    --output baseline_report.json
-```
-
-#### 阶段1：高度头微调（backbone 冻结）
-
-```bash
-python tools/dashcam/train/train.py \
-    --model height-conditioned \
-    --onnx-path selfdrive/modeld/models/driving_vision.onnx \
-    --freeze-backbone \
-    --height-cache-dirs data/multi_height/H*_cache \
-    --output-dir checkpoints/height_v1 \
-    --epochs 50 --batch-size 8 --lr 1e-4 \
-    --early-stop 15
-```
-
-预期效果：轻量头部快速收敛（~10 epoch），backbone 知识完全保留。
-
-#### 阶段2（可选）：全网络微调
-
-当阶段1收敛后，解冻 backbone 进行微调：
-
-```bash
-python tools/dashcam/train/train.py \
-    --model height-conditioned \
-    --resume checkpoints/height_v1/best.pt \
-    --unfreeze-backbone \
-    --height-cache-dirs data/multi_height/H*_cache \
-    --output-dir checkpoints/height_v2 \
-    --epochs 30 --batch-size 4 --lr 1e-5 \
-    --early-stop 10
-```
-
-注意：全网络微调需要更小学习率（1e-5），防止预训练权重被过度修改。
-
-### 6.4 损失函数
-
-现有 `DrivingLoss`（GaussianNLL）不需修改，直接复用：
-
-```python
-# losses.py — 现有 DrivingLoss 已支持所有输出头
-# 按高度分层监控 loss，用于验证各高度档位的收敛情况
-
-def compute_height_stratified_loss(preds, targets, heights):
-    """按高度档位分别统计 loss，用于 tensorboard 监控。"""
-    height_bins = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5]
-    for i in range(len(height_bins) - 1):
-        mask = (heights >= height_bins[i]) & (heights < height_bins[i+1])
-        if mask.any():
-            loss_i = compute_driving_loss(preds[mask], targets[mask])
-            log_metric(f'val_loss_H{height_bins[i]:.1f}', loss_i)
-```
-
----
-
 ## 7. 评价方案
 
-### 7.1 离线评价指标
-
-#### 车道线评价
-
-模型输出 `lane_lines (4, 33, 2)` 中的横向坐标与 GT 对比：
-
-```python
-# 按 X 距离分段的 MAE
-X_IDXS = ModelConstants.X_IDXS  # [0, ..., 192m]，33个点
-
-for segment, (x_min, x_max) in {'near': (0, 30), 'mid': (30, 80), 'far': (80, 192)}.items():
-    mask = [(x_min <= x < x_max) for x in X_IDXS]
-    lane_mae = mean_absolute_error(pred_ll[:, mask, 0], gt_ll[:, mask, 0])  # 横向 y
-    print(f"Lane MAE [{segment}]: {lane_mae:.3f} m")
-```
-
-#### 前车检测评价
-
-```python
-# BEV mAP，IOU > 0.5（投影到 X-Y 平面）
-def compute_lead_map(pred_lead, gt_lead, iou_threshold=0.5):
-    """计算前车检测 mAP（BEV，基于预测框与 GT 框的 IOU）。"""
-    # 以 lead[best_prob].x, lead[best_prob].y 为框中心，车辆尺寸为 4.5×2.0m
-    ...
-```
-
-#### Pose 误差
-
-```python
-# 平移/旋转均方误差
-pose_trans_rmse = torch.sqrt(((pred_pose[:, :3] - gt_pose[:, :3])**2).mean())
-pose_rot_rmse   = torch.sqrt(((pred_pose[:, 3:] - gt_pose[:, 3:])**2).mean())
-```
-
-### 7.2 分层评价设计
-
-#### 按高度分层
-
-| 高度档位 | 数据集 | 评价角色 |
-|---------|--------|---------|
-| H1 (1.22m) | 采集 200 帧 | 测试集（openpilot 标准高度，验证不退化） |
-| H2 (1.3m) | 采集 500 帧 | 测试集（标准高度，基线参考） |
-| H3 (1.5m) | 训练集 | 训练 |
-| H4 (2.0m) | 训练集 | 训练 |
-| H5 (2.5m) | 测试集（留出） | 跨高度泛化测试 |
-| H6 (3.0m) | 训练集 | 训练 |
-
-> H2.5 作为泛化测试集（训练中不出现），验证模型在未见高度档位的插值能力。
-
-#### 跨高度泛化矩阵
-
-| 训练集 \ 测试集 | H1 | H2 | H3 | H4 | **H5** | H6 |
-|---------------|----|----|----|----|--------|-----|
-| 全高度联合 | ✓ | ✓ | ✓ | ✓ | **泛化测试** | ✓ |
-| 仅 H2 (基线) | 基线 | 基线 | 退化 | 退化 | 退化 | 退化 |
-
-### 7.3 在线评价（Carla 实时仿真）
-
-在 Carla 中各高度下运行完整感知管线：
-
-```bash
-# 各高度在线评价
-for height in 1.0 1.3 1.5 2.0 2.5 3.0; do
-    python tools/dashcam/run.py \
-        --camera-height $height \
-        --custom-modeld checkpoints/height_v2/best.pt \
-        --eval-mode \
-        --output-dir eval/online/H$height
-done
-```
-
-在线评价指标：
-- **FPS**：推理帧率（目标 ≥ 20 FPS）
-- **车道线稳定性**：连续帧间横向偏差标准差
-- **前车检测率**：在 NPC 车辆存在时的召回率
-- **主观评价**：目视检查可视化输出
-
-与标准 openpilot modeld 的对比（相同 H2=1.3m 场景）：
-
-```bash
-python tools/dashcam/run.py --camera-height 1.3 --use-stock-modeld  # 对照
-python tools/dashcam/run.py --camera-height 1.3 --custom-modeld ...  # 实验
-```
-
----
 
 ## 8. 实施路线图
-
-| 阶段 | 任务 | 关键产出 | 依赖 |
-|------|------|---------|------|
-| **Phase 0** | 零样本基线评估 | 各高度精度退化量化报告 | 无（直接用预训练模型） |
-| **Phase 1** | 多高度数据采集 | 6×5000帧 NPZ 数据集，含 GT 标注 | carla_world.py 高度参数支持 |
-| **Phase 2** | Carla GT 标注脚本 | `carla_gt_extractor.py`（车道线+前车） | Carla waypoint API |
-| **Phase 3** | 数据预处理 | 多高度缓存（`preprocess_cache.py` 扩展） | Phase 1 数据 |
-| **Phase 4** | 模型训练 | `HeightConditionedVisionModel` 权重 | Phase 3 缓存 |
-| **Phase 5** | 离线评价 | 高度分层评价报告（各指标） | Phase 4 权重 |
-| **Phase 6** | 在线验证 | Carla 实时仿真 FPS + 精度 | Phase 5 权重 |
-| **Phase 7** | 迭代优化 | 最终模型权重，评价报告 | Phase 6 反馈 |
-
-### 时间估计
-
-- Phase 0（零样本评估）：半天（运行评估脚本）
-- Phase 1–2（数据采集与标注）：2–3 天（Carla 采集 + GT 脚本开发）
-- Phase 3（预处理缓存）：0.5 天（复用现有 preprocess_cache.py）
-- Phase 4（模型训练，阶段1）：~1 天（50 epoch × ~20s/epoch = ~17min，GPU 加速）
-- Phase 5–6（评价）：1 天
-- Phase 7（迭代）：视反馈而定
-
----
 
 ## 9. 关键文件索引
 
