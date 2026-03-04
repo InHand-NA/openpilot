@@ -873,7 +873,7 @@ PretrainedVisionModel(backbone, 微调后或冻结)
 | 维度 | 快速验证阶段 | 正式训练阶段 |
 |------|------------|------------|
 | **目标** | 验证训练流水线、多高度基本效果 | 泛化能力、场景鲁棒性 |
-| **高度档位** | H1 + H5（两个极端） | H1–H6 全部 6 档 |
+| **高度档位** | H1 + H6（两个极端） | H1–H6 全部 6 档 |
 | **地图** | Town04（1 个） | Town04 / Town05 / Town07（3 个） |
 | **天气/时间** | ClearNoon（固定） | 3 天气 × 2 时段 |
 | **相机姿态** | pitch=5°, yaw=0°（固定） | pitch ∈ [3°,7°]，yaw ∈ [−3°,3°] |
@@ -889,13 +889,13 @@ PretrainedVisionModel(backbone, 微调后或冻结)
 | 档位 | 高度 H (m) | 注视距离 | 名义 pitch | 车型 | 最近可见 X |
 |------|-----------|---------|-----------|------|---------|
 | H1 | 1.22 | 13.9m | 5.0° | 标准轿车 / comma 3X（基准） | 3.8m |
-| H2 | 1.5  | 17.1m | 5.0° | SUV / 越野 | 4.7m |
-| H3 | 2.0  | 22.9m | 5.0° | 中型货车 / 厢式面包车 | 6.2m |
-| H4 | 2.5  | 28.6m | 5.0° | 大型货车 / 中型卡车 | 7.8m |
-| H5 | 3.0  | 34.3m | 5.0° | 重卡 / 长途卡车 | 9.3m |
-| H6 | 1.0  | 11.4m | 5.0° | 小型轿车（扩展低端） | 3.1m |
+| H2 | 1.3  | 14.9m | 5.0° | 紧凑型轿车 / 小型 SUV | 4.1m |
+| H3 | 1.5  | 17.1m | 5.0° | SUV / 越野 | 4.7m |
+| H4 | 2.0  | 22.9m | 5.0° | 中型货车 / 厢式面包车 | 6.2m |
+| H5 | 2.5  | 28.6m | 5.0° | 大型货车 / 中型卡车 | 7.8m |
+| H6 | 3.0  | 34.3m | 5.0° | 重卡 / 长途卡车 | 9.3m |
 
-> H1（1.22m）是 openpilot 预训练模型的标准高度，作为微调锚点（§2.6）。H6（1.0m）作为低端扩展，低于标准高度。
+> H1（1.22m）是 openpilot 预训练模型的标准高度，作为微调锚点（§2.6）。H6（3.0m）是最大挑战场景，分布偏移最大，需要最多训练数据。
 
 ---
 
@@ -991,7 +991,7 @@ Town04 是快速验证的首选：车道线规则清晰，便于定性检查模�
 | 高度 | 地图 | 场景 | pitch | yaw | 帧数 |
 |------|------|------|-------|-----|------|
 | H1 (1.22m) | Town04 | ClearNoon | 5° | 0° | 1000 |
-| H5 (3.0m) | Town04 | ClearNoon | 5° | 0° | 1000 |
+| H6 (3.0m) | Town04 | ClearNoon | 5° | 0° | 1000 |
 
 目标：2000 帧在 ~30 分钟内完成采集，1 小时内完成预处理 + 训练试跑。
 
@@ -1002,14 +1002,14 @@ Town04 是快速验证的首选：车道线规则清晰，便于定性检查模�
 | 高度 | 帧数（总） | 地图分配 | 场景多样性 | pitch×yaw 覆盖 |
 |------|---------|---------|---------|--------------|
 | H1 (1.22m) | 3000 | Town04×3 | Clear+Cloudy+Rain | 3×3=9种 |
-| H2 (1.5m) | 4000 | 3地图 | 4种 | 5×5=15种（采样） |
-| H3 (2.0m) | 6000 | 3地图 | 6种 | 5×5=15种 |
-| H4 (2.5m) | 7000 | 3地图 | 6种 | 5×5=15种 |
-| H5 (3.0m) | 10000 | 3地图 | 6种 | 5×5=15种 |
-| H6 (1.0m) | 4000 | Town04+Town05 | 4种 | 3×3=9种 |
+| H2 (1.3m) | 3000 | Town04+Town05 | 4种 | 3×3=9种 |
+| H3 (1.5m) | 4000 | 3地图 | 4种 | 5×5=15种（采样） |
+| H4 (2.0m) | 6000 | 3地图 | 6种 | 5×5=15种 |
+| H5 (2.5m) | 8000 | 3地图 | 6种 | 5×5=15种 |
+| H6 (3.0m) | 10000 | 3地图 | 6种 | 5×5=15种 |
 | **合计** | **~34000** | | | |
 
-> H5（3.0m）帧数最多，因分布偏移最大（§2.6.3）且是最具挑战性的场景。H1 因与预训练分布一致，帧数最少。
+> H6（3.0m）帧数最多，因分布偏移最大（§2.6.3）且是最具挑战性的场景。H1/H2 因偏移极小，帧数最少。
 
 **追加采集缓冲**：建议在每个高度多采集 20%（约 +7000 帧），用于剔除异常帧（碰撞、急停、场景切换）。最终有效帧目标 ~34000，原始采集目标约 **42000 帧**。
 
@@ -1026,11 +1026,11 @@ TARGET_PITCH_DEG = 5.0
 
 HEIGHT_CONFIGS = {
     'H1': {'height': 1.22, 'look_at': 13.9, 'vehicle': 'vehicle.toyota.prius'},
-    'H2': {'height': 1.5,  'look_at': 17.1, 'vehicle': 'vehicle.ford.mustang'},
-    'H3': {'height': 2.0,  'look_at': 22.9, 'vehicle': 'vehicle.mercedes.sprinter'},
-    'H4': {'height': 2.5,  'look_at': 28.6, 'vehicle': 'vehicle.carlamotors.firetruck'},
-    'H5': {'height': 3.0,  'look_at': 34.3, 'vehicle': 'vehicle.carlamotors.european_hgv'},
-    'H6': {'height': 1.0,  'look_at': 11.4, 'vehicle': 'vehicle.tesla.model3'},
+    'H2': {'height': 1.3,  'look_at': 14.9, 'vehicle': 'vehicle.lincoln.mkz_2017'},
+    'H3': {'height': 1.5,  'look_at': 17.1, 'vehicle': 'vehicle.ford.mustang'},
+    'H4': {'height': 2.0,  'look_at': 22.9, 'vehicle': 'vehicle.mercedes.sprinter'},
+    'H5': {'height': 2.5,  'look_at': 28.6, 'vehicle': 'vehicle.carlamotors.firetruck'},
+    'H6': {'height': 3.0,  'look_at': 34.3, 'vehicle': 'vehicle.carlamotors.european_hgv'},
 }
 
 # 姿态扰动配置
@@ -1074,10 +1074,10 @@ class CameraConfig:
 ```python
 def collect_batch(phase='quick', output_base='data/multi_height'):
     """
-    phase='quick': 快速验证，固定条件，H1+H5
+    phase='quick': 快速验证，固定条件，H1+H6
     phase='full':  正式训练，全高度，多场景，多姿态
     """
-    heights = ['H1', 'H5'] if phase == 'quick' else list(HEIGHT_CONFIGS.keys())
+    heights = ['H1', 'H6'] if phase == 'quick' else list(HEIGHT_CONFIGS.keys())
     scenes  = SCENE_CONFIGS_QUICK if phase == 'quick' else SCENE_CONFIGS_FULL
     pitches = [QUICK_POSE['pitch']] if phase == 'quick' else [-p for p in PITCH_VARIANTS]
     yaws    = [QUICK_POSE['yaw']]   if phase == 'quick' else YAW_VARIANTS
