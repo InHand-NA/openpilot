@@ -1407,18 +1407,47 @@ MULTI_HEIGHT_CAMERAS = [
 
 #### Step 1：H1 图像预处理与 openpilot 推理
 
-TODO: 需要分析H1基准标注使用固定的pitch/yaw计算warp矩阵，还是使用calibrationd。
+##### Warp 矩阵方案分析：固定 pitch/yaw vs calibrationd
+
+两种方案的核心区别在于 `rpyCalib`（即 `device_from_calib_euler`）的来源：
+
+| 维度 | 方案A：固定 pitch/yaw（已知） | 方案B：calibrationd 在线估计 |
+|------|---------------------------|---------------------------|
+| **数据来源** | Carla 仿真参数（精确已知） | 从模型光流输出估计（含噪声） |
+| **收敛代价** | 无（即时可用） | ≥500 帧（25秒 @20FPS）才有效 |
+| **§4.3.3 34种姿态组合** | 直接使用各组合的已知 pitch/yaw | 每种组合需单独收敛，浪费 **34×500=17,000 帧** |
+| **估计精度** | 精确（仿真真值） | 近似（滑动平均，存在噪声） |
+| **NPZ 中已有字段** | 需用 Carla 参数或 `world_pose` 推算 | `npz['rpyCalib']`（早期帧为 [0,0,0]，未收敛） |
+| **早期帧可靠性** | 始终可靠 | 前 500 帧 `rpyCalib≈[0,0,0]`（RPY_INIT），**warp 错误** |
+
+**calibrationd 估计的本质**（`calibrationd.py` 第249行）：
+```python
+observed_pitch = -np.arctan2(trans[2], trans[0])  # 从光流反推几何 pitch
+```
+这是纯几何估计——相机下倾 θ 度时，前向运动的纵向光流分量恰好编码了该角度。收敛后，calibrationd 估计值**近似等于 Carla 仿真中已知的真实安装 pitch/yaw**，两者本质上是相同的量，只是前者含有估计误差和收敛延迟。
+
+**结论：§5.4 Step 1 采用方案A（固定已知 pitch/yaw）**
+
+理由：
+1. Carla 仿真中相机安装角度精确已知，方案A是无损真值，方案B是有噪声的近似；
+2. NPZ 中保存的 `rpyCalib` 在每段录像起始 25 秒内为初值 `[0,0,0]`，直接使用会导致 warp 错误；
+3. §4.3.3 的 34 种姿态扰动组合每种 pitch/yaw 均已知，无需重新估计；
+4. 若录像足够长且 calibrationd 已充分收敛，`npz['rpyCalib']` 可作为交叉验证手段，但不作为主方案。
+
+> **注意**：`device_from_calib_euler = [roll, pitch, yaw]`。相机向下倾斜 θ 度对应 `pitch = +θ`（标定帧沿车辆方向，设备帧相对其向下旋转），**yaw 同理**。
 
 ```python
-# 为 H1 计算 warp 矩阵（已知精确 pitch，无需 calibrationd 收敛）
+# 为 H1 计算 warp 矩阵：使用 Carla 已知精确 pitch/yaw（方案A）
+# device_from_calib_euler = [roll, pitch, yaw]，单位：弧度
+# 例：相机向下倾斜 5°，无偏航 → [0, radians(5.0), 0]
 warp_h1 = get_warp_matrix(
-    device_from_calib_euler=[0, 0, -math.radians(5.0)],  # pitch=5°
+    device_from_calib_euler=[0, math.radians(pitch_deg), math.radians(yaw_deg)],
     intrinsics=NARROW_CAM_INTRINSICS
 )
 
 # 输入 openpilot 模型推理
 flat_h1 = pretrained_model(warp(img_narrow_h1), warp(img_wide_h1))
-# → 977 维设备帧标注（含 MDN 均值 + log_sigma）
+# → 977 维标定帧标注（含 MDN 均值 + log_sigma）
 ```
 
 #### Step 2：标注变换到 H_k
