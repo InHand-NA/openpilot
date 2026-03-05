@@ -1276,7 +1276,7 @@ Carla 以 20FPS 输出视频流，相邻帧间隔仅 50ms。在典型行驶速�
 
 #### 策略：1FPS 时序抽样
 
-在预处理阶段每隔 20 帧保留 1 帧（1FPS），使相邻训练帧间隔约 1 秒。在 60 km/h 行驶速度下，相邻训练帧间距约 **16m**，时序相关性基本消除。
+在训练前的数据预处理阶段每隔 20 帧保留 1 帧（1FPS），使相邻训练帧间隔约 1 秒。在 60 km/h 行驶速度下，相邻训练帧间距约 **16m**，时序相关性基本消除。
 
 ```
 原始采集：[f0, f1, f2, ..., f19, f20, f21, ..., f39, f40, ...]  @20FPS
@@ -1407,6 +1407,8 @@ MULTI_HEIGHT_CAMERAS = [
 
 #### Step 1：H1 图像预处理与 openpilot 推理
 
+TODO: 需要分析H1基准标注使用固定的pitch/yaw计算warp矩阵，还是使用calibrationd。
+
 ```python
 # 为 H1 计算 warp 矩阵（已知精确 pitch，无需 calibrationd 收敛）
 warp_h1 = get_warp_matrix(
@@ -1469,6 +1471,8 @@ def is_high_confidence(flat_h1: np.ndarray, min_ll_prob: float = 0.5) -> bool:
 
 同时结合 §4.7 的低速帧过滤（speed < 18 km/h 丢弃），确保标注帧质量。
 
+**决策：** 在数据采集环节不做置信度质量过滤。等采集完成后再通过统计分析是否需要置信度质量过滤。不做低速帧过滤。
+
 ---
 
 ### 5.5 log_sigma 的处理策略
@@ -1484,6 +1488,8 @@ flat[117+264+1::2] *= z_sigma_scale  # lane_lines z_log_sigma 分量
 ```
 
 实践中，若训练时使用 `GaussianNLLLoss`，适度放大 sigma 等价于对该分量给予较低的损失权重，有助于防止模型过度拟合变换后的 z_height 标注。
+
+**决策：** 暂时不做log_sigma调整，留作后续研究课题。
 
 ---
 
