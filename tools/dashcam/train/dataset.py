@@ -367,10 +367,14 @@ class CachedDualCameraDrivingDataset(Dataset):
     else:
       targets['wide_from_device_euler'] = np.zeros(3, dtype=np.float32)
 
+    # camera_height: optional (1.22m default for legacy data); reserved for HeightConditionedHead
+    targets['camera_height'] = np.float32(curr.get('camera_height', 1.22))
+
     return (
       torch.from_numpy(road),   # uint8 (12, 128, 256)
       torch.from_numpy(wide),   # uint8 (12, 128, 256)
-      {k: torch.from_numpy(v) for k, v in targets.items()},
+      {k: torch.from_numpy(np.atleast_1d(v)) if np.ndim(v) == 0 else torch.from_numpy(v)
+       for k, v in targets.items()},
     )
 
 

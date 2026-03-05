@@ -16,6 +16,8 @@ Usage:
 """
 
 import argparse
+import json
+import math
 import multiprocessing as mp
 from pathlib import Path
 
@@ -26,8 +28,35 @@ from openpilot.common.transformations.model import get_warp_matrix as compute_wa
 from openpilot.tools.dashcam.train.dataset import extract_targets, rgb_to_modeld_input
 
 
+def _get_rpyCalib(npz_path: str, data: dict) -> np.ndarray:
+  """Get calibration RPY from clip_info.json (method A) or from npz data (fallback).
+
+  Method A (multi-height annotated data): reads clip_info.json from the session
+  directory (parent of the height subdirectory). npz_path is like:
+    session_annotated/H1/000001.npz → parent.parent = session_annotated/
+
+  Fallback (legacy dual-camera data): reads 'rpyCalib' field directly from npz.
+  """
+  clip_info_path = Path(npz_path).parent.parent / 'clip_info.json'
+  if clip_info_path.exists():
+    try:
+      with open(clip_info_path) as f:
+        clip_info = json.load(f)
+      cam = clip_info.get('camera', {})
+      pitch_rad = math.radians(cam.get('pitch_deg', 0.0))
+      yaw_rad = math.radians(cam.get('yaw_deg', 0.0))
+      return np.array([0.0, pitch_rad, yaw_rad], dtype=np.float64)
+    except Exception:
+      pass  # fall through to legacy
+  # Legacy: rpyCalib stored directly in NPZ
+  return data['rpyCalib'].astype(np.float64)
+
+
 def _process_one(args: tuple) -> str | None:
   """Process a single NPZ file: warp + YUV convert + extract labels → cache NPZ.
+
+  Supports both legacy dual-camera NPZs (with rpyCalib field) and
+  multi-height annotated NPZs (with clip_info.json in parent.parent).
 
   Returns path of written cache file, or None on error.
   """
@@ -39,7 +68,7 @@ def _process_one(args: tuple) -> str | None:
 
   try:
     data = dict(np.load(npz_path, allow_pickle=True))
-    rpyCalib = data['rpyCalib'].astype(np.float64)
+    rpyCalib = _get_rpyCalib(npz_path, data)
 
     # Road camera: faithful modeld pipeline (NV12 → warp Y/UV → loadyuv 6ch)
     M_road = compute_warp_matrix(rpyCalib, fcam_intrinsics, bigmodel_frame=False)
@@ -49,8 +78,12 @@ def _process_one(args: tuple) -> str | None:
     M_wide = compute_warp_matrix(rpyCalib, ecam_intrinsics, bigmodel_frame=True)
     wide_yuv = rgb_to_modeld_input(data['wide_rgb'], M_wide)  # (6, 128, 256) uint8
 
-    # Extract GT labels
+    # Extract GT labels (works for both legacy and annotated NPZ formats)
     targets = extract_targets(data)
+
+    # Preserve camera_height for HeightConditionedHead (future use)
+    camera_height = data.get('camera_height', np.float32(1.22))
+    targets['camera_height'] = np.float32(camera_height)
 
     # Save cache
     np.savez_compressed(str(out_path), road_yuv=road_yuv, wide_yuv=wide_yuv, **targets)

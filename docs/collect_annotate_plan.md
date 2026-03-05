@@ -819,7 +819,7 @@ z_height 变换一致性: ✅ PASS (均值误差 < 0.02m vs. ΔH)
 以下是快速验证（H1+H6，Town04，ClearNoon，pitch=5°，yaw=0°）的完整运行步骤，含各阶段人工检查命令：
 
 ```bash
-SESSION="quick_Town04_ClearNoon_p5.0_y0.0"
+SESSION="Town04_ClearNoon_p5.0_y0.0"
 SESSION_DIR="data/multi_height/${SESSION}"
 ANNOTATED_DIR="${SESSION_DIR}_annotated"
 
