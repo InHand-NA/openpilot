@@ -177,16 +177,72 @@ class MultiHeightCarlaWorld:
     def close(self) -> None
 ```
 
-**关键实现细节：**
-- 每个高度对应 2 个相机 Actor（narrow FOV=40°，wide FOV=120°），attach to ego vehicle
-- 同一帧的 road_image 和 wide_road_image 回调分别写入 `self.frames[tag] = (road, wide)`
-- 用 `threading.Lock` 保护帧字典，仅当 H1 的 narrow 相机触发时置位 `_new_frame`（即以 H1 narrow 为同步基准）
-- `get_frames()` 一次性返回所有高度的帧，确保时序一致
-- `high_quality=False` 时关闭后处理效果，减少渲染开销
+**帧同步设计（Carla 同步模式）：**
+
+Carla 同步模式（`synchronous_mode = True`）在物理层面保证：**同一 `world.tick()` 触发的所有 sensor，其数据来自相同的物理状态，携带相同的 `image.frame` 帧序号**。12 个相机（6高度×2）只要 `sensor_tick` 相同，就一定产生于同一仿真 tick，天然帧对齐。
+
+但 Carla 的 sensor 回调通过**独立流线程**（streaming thread）异步送达 Python，`world.tick()` 返回时不保证 12 个回调全部执行完毕。若以"H1 narrow 先到达"为同步基准（类似 `DashcamCarlaWorld._cam_callback_road` 第186行的做法），读取其他相机时其回调可能还未到达，产生帧号不一致的数据混用。
+
+**正确方案：`image.frame` 帧号全匹配检查**
+
+每个回调写入 `(frame_id, rgb)` 二元组，`get_frames()` 仅在所有相机都持有同一 `frame_id` 的数据时才返回，否则返回 `None`：
+
+```python
+# 回调（每个相机 slot × narrow/wide 各一个）
+def _make_callback(self, tag: str, key: str):  # key = 'road' | 'wide'
+    def callback(image: carla.Image):
+        rgb = self._to_rgb(image)
+        with self._lock:
+            self._latest[tag][key] = (image.frame, rgb)
+    return callback
+
+# 采集循环调用
+def get_frames(self) -> dict[str, tuple[np.ndarray, np.ndarray]] | None:
+    """仅在所有 12 个相机（6高度×2）均已汇报当前帧时返回，否则返回 None。"""
+    with self._lock:
+        # 收集所有相机的最新帧号
+        frame_ids = [
+            self._latest[slot.tag][key][0]
+            for slot in self._camera_slots
+            for key in ('road', 'wide')
+            if self._latest[slot.tag][key] is not None
+        ]
+        total = len(self._camera_slots) * 2
+        if len(frame_ids) < total:
+            return None  # 还有相机尚未收到任何数据
+        if len(set(frame_ids)) != 1:
+            return None  # 帧号不一致，等待滞后的回调
+        # 所有相机帧号一致，安全返回
+        return {
+            slot.tag: (
+                self._latest[slot.tag]['road'][1].copy(),
+                self._latest[slot.tag]['wide'][1].copy(),
+            )
+            for slot in self._camera_slots
+        }
+```
+
+**采集主循环：**
+```python
+self.tick()          # world.tick()，推进一步仿真
+frames = None
+while frames is None:
+    frames = self.get_frames()   # 轮询直到 12 个回调全部到达
+    # 无需 sleep：回调通常在 tick() 返回后数毫秒内全部到达
+```
+
+> **为何不会死等：** 在同步模式下，`world.tick()` 完成后 Carla 服务端已生成本 tick 所有 sensor 数据，客户端流线程必然在下一次 `tick()` 前收到全部回调。轮询不会漏帧，也不会跨 tick 混用数据。
+
+> **与 `DashcamCarlaWorld` 的差异：** 现有 `DashcamCarlaWorld` 用 `_new_frame` 布尔标志（以 road camera 为基准），对 2 个相机窗口极短，实践中影响有限。对 12 个相机，滞后窗口扩大 6×，帧号不一致概率显著增加，必须使用 `image.frame` 全匹配方案。
+
+**其他实现细节：**
+- 每个高度对应 2 个相机 Actor（narrow FOV=40°，wide FOV=120°），`attach_to=ego_vehicle`
+- 所有相机设置相同的 `sensor_tick = 1.0 / 20.0`（20 FPS），保证每 tick 同时触发
+- `high_quality=False` 时关闭后处理效果（`enable_postprocess_effects=False`），减少渲染开销
 
 **与现有代码的关系：**
-- 不继承 `DashcamCarlaWorld`，而是单独实现（接口更简洁，不包含 VisionIPC/modeld 相关逻辑）
-- 参考 `DashcamCarlaWorld` 的车辆生成、NPC、速度控制逻辑
+- 不继承 `DashcamCarlaWorld`，单独实现（不含 VisionIPC/modeld 逻辑）
+- 车辆生成、NPC、速度控制逻辑参考 `DashcamCarlaWorld`（`carla_world.py:44-176`）
 
 ---
 
@@ -219,7 +275,7 @@ python tools/dashcam/collect_multi_height.py \
 | phase | heights | scenes | pitch×yaw 组合 | max-frames/session |
 |-------|---------|--------|----------------|-------------------|
 | `quick` | H1, H6 | Town04/ClearNoon | (5°, 0°) 单一组合 | 20000（→1000 训练帧） |
-| `full` | H1~H6 | §4.4 6种 | §4.3.3 34 种 | 800（→40 训练帧/组合） |
+| `full` | H1~H6 | §4.4 6种 | §4.3.3 34 种 | 8000（→400 训练帧/组合） |
 | `custom` | 参数指定 | 参数指定 | 参数指定 | 参数指定 |
 
 **输出：**
@@ -260,16 +316,24 @@ python tools/dashcam/annotate_multi_height.py \
     [--batch-size 8]
     [--min-ll-prob 0.5]    # §5.4 Step3 质量过滤阈值
     [--device cuda]
-    [--heights H1 H2 H6]  # 只生成指定高度（默认全部）
+    [--heights H2 H3 H6]  # 只生成指定高度（默认全部）
 ```
 
 **处理流程：**
 
+> **重要前提：** `PretrainedVisionModel.forward()` 返回 `dict[str, Tensor]`（见 `pretrained_model.py:122`），
+> 不是 977 维 flat tensor。每个键对应 ONNX 的一个输出切片，格式均为原始 MDN flat 向量。
+
 ```python
 # Step 1: 加载配置
-clip_info = json.load(session_dir / 'clip_info.json')
+clip_info_src = session_dir / 'clip_info.json'
+clip_info = json.load(clip_info_src)
 pitch_rad = math.radians(clip_info['camera']['pitch_deg'])
 yaw_rad   = math.radians(clip_info['camera']['yaw_deg'])
+
+# clip_info.json 复制到输出目录，供下游 preprocess_cache.py 通过
+# Path(npz).parent.parent / 'clip_info.json' 定位（output_dir/{H_k}/{帧}.npz → output_dir/）
+shutil.copy(clip_info_src, output_dir / 'clip_info.json')
 
 # 计算 H1 warp 矩阵（方案A：固定已知姿态）
 rpyCalib_h1 = [0, pitch_rad, yaw_rad]   # [roll, pitch, yaw] 弧度
@@ -280,60 +344,152 @@ warp_h1_wide   = get_warp_matrix(rpyCalib_h1, WIDE_CAM_INTRINSICS, bigmodel_fram
 model = PretrainedVisionModel('checkpoints/inadas_original.onnx')
 model.eval().to(device)
 
+X_IDXS = np.array(ModelConstants.X_IDXS, dtype=np.float32)  # (33,) 前向距离序列
+
 # Step 3: 按帧处理
 for frame_npz in sorted(H1_dir.glob('*.npz')):
     data = np.load(frame_npz)
-    road_yuv = rgb_to_modeld_input(data['road_rgb'], warp_h1_narrow)  # (6,128,256)
-    wide_yuv = rgb_to_modeld_input(data['wide_rgb'], warp_h1_wide)
+    road_yuv_tensor = torch.from_numpy(rgb_to_modeld_input(data['road_rgb'], warp_h1_narrow)).unsqueeze(0)
+    wide_yuv_tensor = torch.from_numpy(rgb_to_modeld_input(data['wide_rgb'], warp_h1_wide)).unsqueeze(0)
 
     with torch.no_grad():
-        flat_h1 = model(road_yuv_tensor, wide_yuv_tensor)  # (1, 977)
+        outputs_h1 = model(road_yuv_tensor, wide_yuv_tensor)  # dict[str, Tensor]
+
+    # 解码为 canonical 标注格式（与 extract_targets() / modeld_label_extractor 兼容）
+    canonical_h1 = decode_model_output(outputs_h1, X_IDXS)
 
     # Step 4: 质量过滤（§5.4 Step 3）
-    ll_prob = flat_h1[0, 645-87:653-87]  # lane_lines_prob（相对977维偏移）
-    if not is_high_confidence(ll_prob, min_ll_prob):
+    # lane_lines_prob 原始 (8,)=(4,2) logits，真实概率取第 1 列 sigmoid
+    # 检查内侧两条车道线 L0(idx=1) 和 R0(idx=2)
+    ll_prob = canonical_h1['lane_lines_prob']   # (4,) 已 sigmoid，来自 decode_model_output
+    if not (ll_prob[1] > min_ll_prob and ll_prob[2] > min_ll_prob):
         continue
 
     # Step 5: 为每个高度生成标注
     for h_tag, h_k in heights.items():
-        flat_hk = transform_annotation(flat_h1[0].numpy(), h1=1.22, h_k=h_k)
-        # 从源目录读原始图像
+        canonical_hk = transform_annotation(canonical_h1, h1=1.22, h_k=h_k)
         src_npz = (session_dir / h_tag / frame_npz.name)
         out = dict(np.load(src_npz))
-        out['flat_label'] = flat_hk.astype(np.float32)  # 977 维
-        out['label_source'] = np.array('pretrained_h1')
+        out.update(canonical_hk)          # 写入标注字段（与旧格式兼容）
+        out['label_source'] = b'pretrained_h1'
         np.savez_compressed(output_dir / h_tag / frame_npz.name, **out)
 ```
 
-**`transform_annotation()` 实现（§5.4 Step 2）：**
+**`decode_model_output()` 辅助函数：**
+
+将 `PretrainedVisionModel` 的 dict 输出解码为 canonical 格式，与 `extract_targets()` 完全兼容。
+MDN 布局遵循 openpilot 约定（`custom_modeld.py:decode_outputs` 为参考实现）：
+`[all_means | all_log_sigma]`（前一半为均值，后一半为 log 标准差）。
+
 ```python
-def transform_annotation(flat_h1: np.ndarray, h1: float, h_k: float) -> np.ndarray:
-    """将 977 维 H1 标注变换到高度 h_k（仅 z_height 分量需修正）。"""
-    delta_h = h_k - h1
-    flat = flat_h1.copy()
-    # 注：flat 是 977 维，偏移量 = ONNX 偏移 - 87
-    # lane_lines means: [30:294]，格式 (4,33,2)，[:,:,1] = z_height
-    ll = flat[30:294].reshape(4, 33, 2)
-    ll[:, :, 1] += delta_h
-    flat[30:294] = ll.flatten()
-    # road_edges means: [566:698]，格式 (2,33,2)
-    re = flat[566:698].reshape(2, 33, 2)
-    re[:, :, 1] += delta_h
-    flat[566:698] = re.flatten()
-    # road_transform trans[2]: flat[20]（road_transform 从 [18:30]，trans[2] = [20]）
-    flat[20] += delta_h
-    return flat
+def decode_model_output(outputs: dict[str, torch.Tensor], X_IDXS: np.ndarray) -> dict[str, np.ndarray]:
+    """从 PretrainedVisionModel dict 输出解码为 canonical 标注格式。
+
+    MDN 格式（非交错）：[all_means | all_log_sigma]
+    lane_lines (528,)   = 264 means + 264 log_sigma，means reshape (4,33,2) = [y, z]
+    road_edges (264,)   = 132 means + 132 log_sigma，means reshape (2,33,2) = [y, z]
+    lead (144,)         = 72 means + 72 log_sigma，  means reshape (3,6,4) = [x,y,v,a]
+    pose (12,)          = 6 means + 6 log_sigma，    means = [trans(3), rot(3)]
+    road_transform (12,)= 6 means + 6 log_sigma，    means[:3] = [tx, ty, tz]
+    lane_lines_prob (8,)= (4,2) raw logits，真实概率 = sigmoid([:,1])
+    """
+    def _np(t): return t[0].cpu().numpy()  # (1, N) → (N,)
+
+    # lane_lines: (528,) → means (4,33,2) [y,z] → 拼 x 列 → (4,33,3) [x,y,z]
+    ll_raw = _np(outputs['lane_lines'])     # (528,)
+    ll_means = ll_raw[:264].reshape(4, 33, 2)   # [y, z] per point
+    x_col = np.broadcast_to(X_IDXS[None, :, None], (4, 33, 1))
+    lane_lines = np.concatenate([x_col, ll_means], axis=-1).astype(np.float32)  # (4,33,3)
+
+    # lane_lines_prob: (8,) → (4,2) logits → sigmoid([:,1]) → (4,)
+    ll_prob_raw = _np(outputs['lane_lines_prob']).reshape(4, 2)
+    lane_lines_prob = (1.0 / (1.0 + np.exp(-np.clip(ll_prob_raw[:, 1], -20, 20)))).astype(np.float32)
+
+    # road_edges: (264,) → means (2,33,2) [y,z] → 拼 x 列 → (2,33,3)
+    re_raw = _np(outputs['road_edges'])     # (264,)
+    re_means = re_raw[:132].reshape(2, 33, 2)
+    x_col2 = np.broadcast_to(X_IDXS[None, :, None], (2, 33, 1))
+    road_edges = np.concatenate([x_col2, re_means], axis=-1).astype(np.float32)  # (2,33,3)
+
+    # road_edges_prob: modeld 不输出 per-edge 概率，全 1.0
+    road_edges_prob = np.ones(2, dtype=np.float32)
+
+    # lead: (144,) → means (3,6,4) [x,y,v,a]
+    ld_raw = _np(outputs['lead'])           # (144,)
+    lead = ld_raw[:72].reshape(3, 6, 4).astype(np.float32)
+
+    # lead_prob: (3,) → sigmoid → (3,)
+    lp_raw = _np(outputs['lead_prob'])
+    lead_prob = (1.0 / (1.0 + np.exp(-np.clip(lp_raw, -20, 20)))).astype(np.float32)
+
+    # pose: (12,) means [:6] = [trans(3), rot(3)]
+    pose = _np(outputs['pose'])[:6].astype(np.float32)
+
+    # road_transform: (12,) means [:6]，其中 means[:3] = [tx, ty, tz]
+    road_transform = _np(outputs['road_transform'])[:6].astype(np.float32)
+
+    # wide_from_device_euler: (6,) means [:3] = [roll, pitch, yaw]
+    wfde = _np(outputs['wide_from_device_euler'])[:3].astype(np.float32)
+
+    return {
+        'lane_lines':             lane_lines,        # (4, 33, 3) float32
+        'lane_lines_prob':        lane_lines_prob,   # (4,) float32
+        'road_edges':             road_edges,         # (2, 33, 3) float32
+        'road_edges_prob':        road_edges_prob,   # (2,) float32
+        'lead':                   lead,              # (3, 6, 4) float32
+        'lead_prob':              lead_prob,          # (3,) float32
+        'pose':                   pose,              # (6,) float32
+        'road_transform':         road_transform,    # (6,) float32
+        'wide_from_device_euler': wfde,              # (3,) float32
+    }
 ```
 
-> **索引推导：** ONNX 原始偏移减去 87（跳过 meta/desire_pred）得到 977 维内偏移。
-> - lane_lines: ONNX[117:381] → 977内 [30:294]（仅 means 部分，264 维，reshape(4,33,2)）
-> - road_edges: ONNX[653:785] → 977内 [566:698]（仅 means 部分，132 维，reshape(2,33,2)）
-> - road_transform mean[2]: ONNX[107] → 977内 [20]
+**`transform_annotation()` 实现（§5.4 Step 2）：**
 
-**输出标注格式：**
-- `flat_label`: `[977]` float32 — 完整 977 维输出（含 means + log_sigma）
-- `label_source`: str，`'pretrained_h1'`
-- 保留原始字段：`road_rgb`, `wide_rgb`, `camera_height`, `v_ego`, `world_pose`
+输入/输出均为 `decode_model_output()` 返回的 canonical dict，格式与 `extract_targets()` 兼容。
+z_height 是 lane_lines/road_edges 的第 2 列（index=2），road_transform 的第 2 个 mean（tz）。
+
+```python
+def transform_annotation(canonical: dict[str, np.ndarray], h1: float, h_k: float) -> dict[str, np.ndarray]:
+    """将 canonical 标注的 z_height 分量从高度 h1 变换到 h_k。
+
+    仅修正相机高度差引起的 z 偏移（近场近似，X > 10m 有效）。
+    """
+    delta_h = h_k - h1
+    out = {k: v.copy() for k, v in canonical.items()}
+    # lane_lines: (4, 33, 3) [x, y, z]，z 为列索引 2
+    out['lane_lines'][:, :, 2] += delta_h
+    # road_edges: (2, 33, 3) [x, y, z]，z 为列索引 2
+    out['road_edges'][:, :, 2] += delta_h
+    # road_transform: (6,) means = [tx, ty, tz, rx, ry, rz]，tz 为索引 2
+    out['road_transform'][2] += delta_h
+    return out
+```
+
+> **MDN 偏移推导（以 lane_lines 为例）：**
+> - ONNX 完整切片：`[117:645]`（528 维 = 264 means + 264 log_sigma）
+> - means 子集：ONNX`[117:381]`（264 维），reshape `(4, 33, 2)` = `[y_lat, z_height]`
+> - road_edges 完整：ONNX`[653:917]`（264 维 = 132 means + 132 log_sigma）
+> - road_transform means：ONNX`[105:111]`（前 6 维），`[2]` = tz
+>
+> 以上由 `pretrained_model.py:ONNX_OUTPUT_SLICES` 和 `custom_modeld.py:decode_outputs` 联合确认。
+
+**输出标注格式（与 `extract_targets()` 完全兼容，可直接送入 `preprocess_cache.py`）：**
+
+| 字段 | 形状 | 说明 |
+|------|------|------|
+| `lane_lines` | `(4, 33, 3)` float32 | `[x, y_lat, z_height]`，x = X_IDXS |
+| `lane_lines_prob` | `(4,)` float32 | sigmoid 后的真实概率 |
+| `road_edges` | `(2, 33, 3)` float32 | `[x, y_lat, z_height]` |
+| `road_edges_prob` | `(2,)` float32 | 全 1.0（modeld 无 per-edge 概率） |
+| `lead` | `(3, 6, 4)` float32 | means `[x, y, v, a]` |
+| `lead_prob` | `(3,)` float32 | sigmoid 后概率 |
+| `pose` | `(6,)` float32 | `[trans(3), rot(3)]` means |
+| `road_transform` | `(6,)` float32 | `[tx, ty, tz, 0, 0, 0]` means |
+| `wide_from_device_euler` | `(3,)` float32 | wide camera euler angles means |
+| `label_source` | bytes | `b'pretrained_h1'` |
+| `road_rgb`, `wide_rgb` | 原始 | 保留自 H_k 源 NPZ |
+| `camera_height`, `v_ego`, `world_pose` | 原始 | 保留自 H_k 源 NPZ |
 
 ---
 
@@ -344,22 +500,24 @@ def transform_annotation(flat_h1: np.ndarray, h1: float, h_k: float) -> np.ndarr
 **修改内容：**
 
 1. **支持方案A（固定已知姿态）warp：**
-   - 读取 `../clip_info.json`（上级目录的 session 元数据）
-   - 若存在 `clip_info.json`，优先用 `camera.pitch_deg / camera.yaw_deg` 计算 warp
+   - 读取 `clip_info.json`（由 `annotate_multi_height.py` 复制到 annotated 目录，§3.3）
+   - 若存在，优先用 `camera.pitch_deg / camera.yaw_deg` 计算 warp
    - 若不存在（旧数据），回退到现有的 `npz['rpyCalib']`
 
-2. **支持 `flat_label` 格式：**
-   - 检测 NPZ 中是否有 `flat_label` 字段（新格式，来自 `annotate_multi_height.py`）
-   - 若有：从 `flat_label` 提取各输出字段（lane_lines, road_edges, lead, 等）
-   - 若无：使用现有 `extract_targets(data)` 逻辑（兼容旧 NPZ 格式）
+2. **标注字段兼容（无需新增提取函数）：**
+   - `annotate_multi_height.py` 输出的 annotated NPZ 已存储 canonical 格式字段（lane_lines (4,33,3)、road_edges (2,33,3) 等），与现有 `extract_targets()` 完全兼容
+   - **无需 `extract_targets_from_flat()`**，直接调用 `extract_targets(data)` 即可
 
 3. **保留 `camera_height` 到缓存 NPZ：**
    - 缓存 NPZ 中添加 `camera_height: float32` 字段
-   - 供 dataset.py 读取，为后续显式高度注入做准备
+   - 供 dataset.py 读取，为后续显式高度注入（HeightConditionedHead）预留接口
 
 **修改后的 `_process_one()` 逻辑：**
 ```python
 # 读取 warp 参数（方案A优先）
+# npz_path 形如 session_annotated/H1/000001.npz
+# → parent.parent = session_annotated/
+# annotate_multi_height.py 会把 clip_info.json 复制到 session_annotated/，路径因此可达
 clip_info_path = Path(npz_path).parent.parent / 'clip_info.json'
 if clip_info_path.exists():
     info = json.load(clip_info_path)
@@ -367,14 +525,10 @@ if clip_info_path.exists():
     yaw_rad   = math.radians(info['camera']['yaw_deg'])
     rpyCalib = np.array([0.0, pitch_rad, yaw_rad])
 else:
-    rpyCalib = data['rpyCalib'].astype(np.float64)  # 回退
+    rpyCalib = data['rpyCalib'].astype(np.float64)  # 回退（旧数据）
 
-# 提取标注
-if 'flat_label' in data:
-    targets = extract_targets_from_flat(data['flat_label'])  # 新函数
-else:
-    targets = extract_targets(data)   # 现有函数
-
+# 提取标注：annotated NPZ 已是 canonical 格式，直接调用现有函数
+targets = extract_targets(data)
 targets['camera_height'] = data.get('camera_height', np.float32(1.22))
 ```
 
@@ -389,9 +543,6 @@ targets['camera_height'] = data.get('camera_height', np.float32(1.22))
 1. **`extract_targets()` 和 `CachedDualCameraDrivingDataset` 返回 `camera_height`：**
    - 从缓存 NPZ 加载 `camera_height` 字段（缺省 1.22m）
    - 包含在返回的 targets dict 中
-
-2. **新增 `extract_targets_from_flat()` 辅助函数：**
-   从 977 维 `flat_label` 提取各输出字段（lane_lines, road_edges, lead, pose 等），格式与 `extract_targets()` 一致，供 `preprocess_cache.py` 调用。
 
 **数据集变化影响评估：**
 - `camera_height` 目前不进入 loss 计算，仅作为额外信息字段存储
@@ -418,19 +569,22 @@ targets['camera_height'] = data.get('camera_height', np.float32(1.22))
 
 **标注数据兼容性约定：**
 
-`annotate_multi_height.py` 输出的 NPZ 除 `flat_label`（977维）外，**同时存储展开后的标准字段**：
+`annotate_multi_height.py` 输出的 NPZ 直接存储 canonical 格式字段（由 `decode_model_output()` + `transform_annotation()` 生成），**无 `flat_label` 中间格式**：
 ```
-lane_lines:       [4, 33, 3] float32  — 与旧格式兼容（x, y_lat, z_height）
-lane_lines_prob:  [4] float32
-road_edges:       [2, 33, 3] float32
-road_edges_prob:  [2] float32
-lead:             [3, 6, 4] float32
-lead_prob:        [3] float32
-pose:             [6] float32
-road_transform:   [6] float32
+lane_lines:             [4, 33, 3] float32  — [x, y_lat, z_height]，x = X_IDXS
+lane_lines_prob:        [4] float32         — sigmoid 后的真实概率
+road_edges:             [2, 33, 3] float32
+road_edges_prob:        [2] float32         — 全 1.0
+lead:                   [3, 6, 4] float32   — MDN means [x,y,v,a]
+lead_prob:              [3] float32
+pose:                   [6] float32         — [trans(3), rot(3)] means
+road_transform:         [6] float32         — [tx, ty, tz, 0, 0, 0] means
+wide_from_device_euler: [3] float32
+label_source:           bytes               — b'pretrained_h1'
 ```
 
-这样 `view_dual_data.py` 的全部绘图函数无需修改即可复用于新工具，`view_dual_data.py` 本身也可直接用于查看 annotated NPZ（有 `road_rgb` + `wide_rgb` + 标注字段）。
+此格式与 `extract_targets()`（`dataset.py`）完全兼容，`preprocess_cache.py` 无需特殊处理。
+`view_dual_data.py` 的全部绘图函数也可直接复用于新工具（field 形状一致）。
 
 ---
 
@@ -784,13 +938,13 @@ Day 3: label_stats（P3）+ preprocess_cache + dataset（P3 训练准备）→ �
 |------|------|------|
 | **Warp 参数来源** | 方案A：固定已知 pitch/yaw | §5.4 分析：Carla 真值精确，避免 rpyCalib 前 500 帧错误，34 组合无收敛代价 |
 | **标注生成时机** | 离线（collect 后处理） | 简化采集流程（不需要 VisionIPC/modeld 进程），批量 GPU 处理更高效 |
-| **标注格式** | flat_label（977维）+ 展开字段并存 | flat_label 供 preprocess_cache 使用；展开字段（lane_lines 等）供可视化工具直接复用 view_dual_data.py 绘图函数，无需重新实现 |
+| **标注格式** | canonical 字段直接存储（无 flat_label） | `PretrainedVisionModel` 返回 dict 而非 977-dim flat；decode_model_output() 解码为 canonical 格式（lane_lines (4,33,3) 等），与 extract_targets() 和 view_dual_data.py 绘图函数均兼容，preprocess_cache.py 无需新增提取函数 |
 | **多高度同步方式** | 同一 Carla session 多相机 | §5.1：零额外仿真成本，时序完美对齐，H1 标注对应每帧精确场景 |
 | **快速验证阶段** | H1+H6 仅 2 高度 | 验证 pipeline 端到端，最小资源投入，4 个相机 Carla 性能可接受 |
 | **camera_height 存入缓存** | 是 | 为第二阶段显式高度注入（HeightConditionedHead）预留，无额外开销 |
 | **log_sigma 处理** | 直接复制（不调整） | §5.5 决策：暂不引入额外超参，留作后续研究 |
 | **质量过滤** | 采集后处理时过滤 | §5.4 Step 3 决策：采集时不过滤，标注后统计分析是否需要 |
 | **车型** | 仅特斯拉 | §4.6 决策：暂时不考虑多种车型，减少变量 |
-| **可视化工具基础** | 复用 visualizer.py + view_dual_data.py | 两文件已实现 lane/edge/lead 投影、BEV、置信度着色、键盘导航；新工具只增加多高度网格布局和 flat_label 解析层 |
+| **可视化工具基础** | 复用 visualizer.py + view_dual_data.py | 两文件已实现 lane/edge/lead 投影、BEV、置信度着色、键盘导航；新工具只增加多高度网格布局层 |
 | **可视化工具位置** | `tools/dashcam/viz/` 子目录 | 与采集/训练工具分离；`__init__.py` 导出共用绘制函数供各工具复用 |
 | **warp 后图像显示** | inspect/compare 工具实时计算 warp | 原始 road_rgb 存在 NPZ 中，warp 在工具里从 clip_info.json 参数重建；避免重复存储 warp 后图像（每帧省 ~600KB） |
