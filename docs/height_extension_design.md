@@ -89,17 +89,27 @@ FCW（5–30m） > LDW近场（10–30m） > LDW中场（30–80m） > LDW远场
 
 ### 2.2 模型输出的高度无关性
 
-模型输出采用**设备帧坐标系**（device frame），原则上高度无关：
+模型输出采用**标定帧坐标系**（calibrated frame），原则上高度无关。
+
+**坐标轴约定**（来源：`common/transformations/README.md`）：
+
+| 坐标系 | X | Y | Z | 说明 |
+|--------|---|---|---|------|
+| **Calibrated**（标定帧） | 前（Forward） | 右（Right） | 下（Down） | **模型输出所在坐标系**，与道路平面对齐（pitch/yaw 由 calibrationd 校正） |
+| Device（设备帧） | 前（Forward） | 右（Right） | 下（Down） | 物理相机坐标系，随相机安装角度倾斜 |
+| Road（路面帧） | 前（Forward） | **左（Left）** | **上（Up）** | 与路面对齐，Y/Z 方向与标定帧相反 |
+
+> **注意**：标定帧与设备帧的轴方向相同（均为 Forward/Right/Down），但原点相同而对齐方式不同——标定帧经过 calibrationd 校正，始终与车辆行驶方向和道路法线对齐；设备帧随物理相机倾斜。模型输出在标定帧下，因此对于水平路面，`z_height ≈ +H`（相机高度，正值，道路在标定帧 Z 轴正方向即正下方）。
 
 ```
-lane_lines:    (4, 33, 2) = [y_lateral, z_height] in device frame
-road_edges:    (2, 33, 2) = [y_lateral, z_height] in device frame
-lead:          (3, 6, 4)  = [x_fwd, y_lat, v_rel, a_rel] in device frame
-pose:          (6,)        = [translation(3) + rotation(3)]
-road_transform:(6,)        = 路面几何相对设备帧变换
+lane_lines:    (4, 33, 2) = [y_lateral, z_height] in calibrated frame
+road_edges:    (2, 33, 2) = [y_lateral, z_height] in calibrated frame
+lead:          (3, 6, 4)  = [x_fwd, y_lat, v_rel, a_rel] in calibrated frame
+pose:          (6,)        = [translation(3) + rotation(3)] in calibrated frame
+road_transform:(6,)        = 路面几何相对标定帧变换（trans[2] ≈ +H）
 ```
 
-这意味着：**相同场景的不同安装高度数据，可以共用同一套 GT 标注约定（设备帧坐标系）**，为多高度联合训练奠定基础。
+这意味着：**相同场景的不同安装高度数据，可以共用同一套 GT 标注约定（标定帧坐标系）**，为多高度联合训练奠定基础。
 
 ### 2.3 calibrationd 的在线高度估计
 
@@ -161,16 +171,16 @@ save_dict['camera_height'] = np.float32(self.camera_height)  # 已有字段
 
 `road_transform_trans[2]` 输出相机高度这一事实表明：backbone 23M 参数的内部特征向量中已经包含足够的高度信息，只是没有被显式利用来调制其他输出头。这说明"让模型隐式感知高度"在原理上并不困难——它已经在做了。
 
-**3. 设备帧坐标系使关键输出高度无关**
+**3. 标定帧坐标系使关键输出高度无关**
 
-所有模型输出均在设备帧（device frame）下，对 LDW/FCW 最关键的分量分析：
+所有模型输出均在标定帧（calibrated frame，轴向 Forward/Right/Down）下，对 LDW/FCW 最关键的分量分析：
 
 | 输出分量 | 是否随高度变化 | 分析 |
 |---------|--------------|------|
-| `lane_lines[:, :, 0]`（y_lat 横向） | **否** | 车道线横向位置与相机高度无关 |
-| `lane_lines[:, :, 1]`（z_height） | 是 | z_device ≈ −camera_height（线性相关） |
+| `lane_lines[:, :, 0]`（y_lat 横向，右为正） | **否** | 车道线横向位置在标定帧中与相机高度无关 |
+| `lane_lines[:, :, 1]`（z_height，下为正） | 是 | z_calibrated ≈ +camera_height（Z向下为正，道路在标定帧正下方） |
 | `lead.x_fwd`（前车纵向距离） | 极小 | 车身高度约 1.5m，在 5–30m 距离下高度效应 < 3° |
-| `lead.y_lat`（前车横向） | **否** | 与相机高度无关 |
+| `lead.y_lat`（前车横向，右为正） | **否** | 与相机高度无关 |
 | `pose`（运动状态） | **否** | 纯运动学，与高度无关 |
 
 **结论：LDW（y_lat）和 FCW（x_fwd, y_lat）最关键的输出分量本身就是高度无关的。** 隐式方案在这些维度上不存在原理性障碍。
@@ -1152,7 +1162,209 @@ Carla 以 20FPS 输出视频流，相邻帧间隔仅 50ms。在典型行驶速�
 
 ## 5. 数据标注方案
 
-TODO: 在给定的Carla模拟驾驶场景下，通过在ego车辆上安装高度和姿态不同的多组相机的方法，实现一次采集多组数据的效果。选定高度为H1的一组相机图像输入给openpilot系统进行识别，自动标注数据。根据相机的相对位置和姿态，可以从H1的标注数据映射变换出其他高度和姿态的标注数据。使用本方法可以把openpilot学习到的知识迁移到新的场景，标注出所有高度和姿态的训练数据。
+### 5.1 方案概述：多相机同步采集 + openpilot 伪标签变换
+
+**核心思路**：在 Carla ego 车辆上同时挂载 H1~H6 共 6 组相机（每组含窄+宽双目），一次仿真即可采集所有高度的同步图像。以 H1 相机图像输入 openpilot 系统进行推理，在标准高度下获得高质量设备帧标注；再利用相机间的已知几何关系，将 H1 标注映射变换到其余高度和姿态。
+
+```
+Carla 仿真（单次运行）
+    ├── H1 相机图像 ──→ openpilot 推理 ──→ H1 设备帧标注
+    ├── H2 相机图像 ──→ 标注变换（H1→H2） ──→ H2 设备帧标注
+    ├── H3 相机图像 ──→ 标注变换（H1→H3） ──→ H3 设备帧标注
+    ├── H4 相机图像 ──→ 标注变换（H1→H4） ──→ H4 设备帧标注
+    ├── H5 相机图像 ──→ 标注变换（H1→H5） ──→ H5 设备帧标注
+    └── H6 相机图像 ──→ 标注变换（H1→H6） ──→ H6 设备帧标注
+```
+
+**本方案的优势**：
+- **零额外仿真成本**：一次仿真产生所有高度的同步标注，无需分 6 次运行
+- **时序完美对齐**：所有高度相机在同一物理时刻采集，不存在场景不一致问题
+- **知识迁移**：直接利用 openpilot 在 H1 上的高精度感知能力作为标注源，标注格式与训练目标完全一致
+- **变换数学简单**：标定帧坐标系使绝大多数输出分量高度无关，仅 z_height 分量需要简单的加法修正
+
+---
+
+### 5.2 技术可行性分析
+
+#### 5.2.1 标定帧坐标系约定
+
+模型输出所在坐标系为**标定帧**（calibrated frame），与设备帧轴向相同，但通过 calibrationd 校正与道路平面对齐。
+
+轴向定义（来源：`common/transformations/README.md` 和 `camera.py` 第73行）：
+
+```
+Calibrated frame / Device frame：x→forward（前）, y→right（右）, z→down（下）
+Road frame（对比）：             x→forward（前）, y→left（左）,  z→up（上）
+```
+
+- **X**：正前方（车辆行进方向，Forward）
+- **Y**：**右侧**（Right）— 右侧车道线 y_lat > 0，左侧 < 0
+- **Z**：**向下**（Down）— Z 向下为正，与直觉相反
+
+> 标定帧与路面帧（Road Frame）的 Y、Z 方向**完全相反**：路面帧 Y→左、Z→上；标定帧 Y→右、Z→下（见 `camera.py` 中 `np.diag([1, -1, -1])` 的 Y/Z 符号翻转）。
+
+对于水平路面，相机安装高度 H 处，路面在标定帧中的 z 坐标：
+
+```
+z_road = +H   # 道路在标定帧正下方 H 米；Z 向下为正，故为正值
+```
+
+因此，当相机高度从 H1 升高到 H_k（ΔH = H_k − H1 > 0）时，道路更往下，z_height 增大：
+
+```
+z_height_new = z_height_h1 + ΔH
+其中 ΔH = H_k - H1（正值 = 安装更高）
+```
+
+> **代码验证**：`calibrationd.py` 中 `new_height = road_transform_trans[2]`，初始值 `HEIGHT_INIT = 1.22`（正值）。road_transform_trans[2] ≈ +H，与 `z_road = +H` 完全一致。
+
+#### 5.2.2 各输出分量的变换规则
+
+| 输出分量 | 格式（均值维度） | 是否需要变换 | 变换规则 |
+|---------|--------------|------------|---------|
+| `lane_lines[:, :, 0]`（y_lat） | (4, 33) | **否** | 车道线横向位置在标定帧中与高度无关，直接复制 |
+| `lane_lines[:, :, 1]`（z_height） | (4, 33) | **是** | `z_new = z_h1 + ΔH`（Z向下为正，安装更高则道路更远、z更大） |
+| `road_edges[:, :, 0]`（y_lat） | (2, 33) | **否** | 直接复制 |
+| `road_edges[:, :, 1]`（z_height） | (2, 33) | **是** | `z_new = z_h1 + ΔH` |
+| `lead`（x_fwd, y_lat, v_rel, a_rel） | (3, 6, 4) | **否** | 前车纵横向距离在标定帧中高度无关，直接复制 |
+| `lead_prob` | (3,) | **否** | 直接复制 |
+| `lane_lines_prob` | (8,) | **否** | 直接复制 |
+| `pose`（平移 + 旋转） | (6,) | **否** | 车辆运动学量，与安装高度无关，直接复制 |
+| `road_transform_trans[2]`（高度） | scalar | **是** | `h_new = h_h1 + ΔH`（即 H_k） |
+| `road_transform` 其余分量 | (5,) | **否** | 路面坡度/倾斜，与高度无关，直接复制 |
+| `wide_from_device_euler` | (3,) | **否** | 宽窄相机相对姿态，固定标定量，直接复制 |
+| **log_sigma（所有分量）** | 各对应维度 | **否** | 场景不确定度与高度无关，直接复制（见 §5.4） |
+
+> **关键结论**：6 个输出头中，真正需要数值修正的只有 `z_height`（车道线/路沿）和 `road_transform_trans[2]`（高度估计），且均为简单加法 `+ΔH`。这使得变换在数学上无误差，不引入近似。
+
+---
+
+### 5.3 Carla 多相机同步配置
+
+在同一 ego 车辆上挂载 6 组双目相机（窄+宽各一）。由于使用**恒定 5° 俯仰角策略**（§4.2），所有相机 pitch 相同，仅安装高度不同，进一步简化了变换计算。
+
+```python
+# tools/dashcam/carla_world.py
+MULTI_HEIGHT_CAMERAS = [
+    CameraConfig(height=1.22, pitch=-5.0, yaw=0.0, tag='H1'),  # 标注源
+    CameraConfig(height=1.3,  pitch=-5.0, yaw=0.0, tag='H2'),
+    CameraConfig(height=1.5,  pitch=-5.0, yaw=0.0, tag='H3'),
+    CameraConfig(height=2.0,  pitch=-5.0, yaw=0.0, tag='H4'),
+    CameraConfig(height=2.5,  pitch=-5.0, yaw=0.0, tag='H5'),
+    CameraConfig(height=3.0,  pitch=-5.0, yaw=0.0, tag='H6'),
+]
+```
+
+每组相机输出一路窄焦图像 + 一路宽焦图像，同步写入各自 NPZ 文件（含 `camera_height` 字段）。
+
+**姿态扰动的处理**：正式训练阶段需覆盖 §4.3.3 中 34 种 pitch×yaw 组合。每个组合为 6 组相机统一设置该 pitch/yaw 偏移，H1 标注变换到其余高度时复制相同的 pitch/yaw（各相机实际安装的 pitch 一致，差异仅在高度）。
+
+---
+
+### 5.4 标注生成流程
+
+#### Step 1：H1 图像预处理与 openpilot 推理
+
+```python
+# 为 H1 计算 warp 矩阵（已知精确 pitch，无需 calibrationd 收敛）
+warp_h1 = get_warp_matrix(
+    device_from_calib_euler=[0, 0, -math.radians(5.0)],  # pitch=5°
+    intrinsics=NARROW_CAM_INTRINSICS
+)
+
+# 输入 openpilot 模型推理
+flat_h1 = pretrained_model(warp(img_narrow_h1), warp(img_wide_h1))
+# → 977 维设备帧标注（含 MDN 均值 + log_sigma）
+```
+
+#### Step 2：标注变换到 H_k
+
+```python
+def transform_annotation(flat_h1: np.ndarray, h1: float, h_k: float) -> np.ndarray:
+    """将 H1 的 977 维标注变换到高度 H_k。"""
+    delta_h = h_k - h1  # 正值 = 安装更高
+    flat = flat_h1.copy()
+
+    # --- lane_lines (528 dims, 全均值在前格式) ---
+    n_ll = 4 * 33 * 2  # 264
+    ll_means = flat[117:117+n_ll].reshape(4, 33, 2)
+    ll_means[:, :, 1] += delta_h          # z_height 分量加 ΔH（Z向下为正，更高则道路z更大）
+    flat[117:117+n_ll] = ll_means.flatten()
+    # log_sigma [381:645] 不变
+
+    # --- road_edges (264 dims) ---
+    n_re = 2 * 33 * 2  # 132
+    re_means = flat[653:653+n_re].reshape(2, 33, 2)
+    re_means[:, :, 1] += delta_h
+    flat[653:653+n_re] = re_means.flatten()
+
+    # --- road_transform_trans[2]（高度分量，位于输出索引 107）---
+    # road_transform: slice(105, 117) = 12 dims (6 mean + 6 log_sigma)
+    # trans[2] = road_transform_mean[2]（第 3 个均值分量）
+    flat[107] += delta_h   # h_k = h1 + ΔH
+
+    # 其余分量（lead, lead_prob, lane_lines_prob, pose, wide_from_device_euler）不变
+    return flat
+```
+
+> **索引说明**（对应附录B ONNX_OUTPUT_SLICES）：
+> - `lane_lines` means: `[117 : 117+264]`，log_sigma: `[117+264 : 645]`
+> - `road_edges` means: `[653 : 653+132]`，log_sigma: `[653+132 : 917]`
+> - `road_transform` mean: `[105:111]`，其中 `[107]` = trans[2] = 高度
+
+#### Step 3：质量过滤
+
+仅保留高置信度帧作为标注：
+
+```python
+def is_high_confidence(flat_h1: np.ndarray, min_ll_prob: float = 0.5) -> bool:
+    """过滤 H1 推理置信度低的帧，避免低质量标注传播到其他高度。"""
+    ll_prob = flat_h1[645:653]  # lane_lines_prob (8 dims)
+    # 至少左右两条车道线中心车道概率 > 阈值
+    center_lanes_prob = ll_prob[[1, 2]]  # 内侧两条（L0/R0）
+    return np.all(center_lanes_prob > min_ll_prob)
+```
+
+同时结合 §4.7 的低速帧过滤（speed < 18 km/h 丢弃），确保标注帧质量。
+
+---
+
+### 5.5 log_sigma 的处理策略
+
+openpilot 在 H1 下输出的 log_sigma 反映模型对当前场景的感知置信度（车道线清晰度、遮挡情况等），这些不确定来源与相机高度无关，因此直接复制到其他高度是合理的。
+
+然而，对于 **H4~H6（高度差异大）** 的训练帧，直接复制 H1 的 sigma 可能过于自信（H1 sigma 反映的是 H1 视角下的清晰度，而模型在 H4~H6 视角下面对 OOD 输入）。建议对 z_height 分量的 log_sigma 做保守调整：
+
+```python
+# 对 z_height 的 log_sigma 按高度差做轻微放大（可选）
+z_sigma_scale = 1.0 + 0.1 * abs(delta_h)  # 每米高度差增加 10% 不确定度
+flat[117+264+1::2] *= z_sigma_scale  # lane_lines z_log_sigma 分量
+```
+
+实践中，若训练时使用 `GaussianNLLLoss`，适度放大 sigma 等价于对该分量给予较低的损失权重，有助于防止模型过度拟合变换后的 z_height 标注。
+
+---
+
+### 5.6 实现文件规划
+
+| 文件 | 职责 |
+|------|------|
+| `tools/dashcam/carla_world.py` | 挂载多高度相机，同步采集各高度图像 |
+| `tools/dashcam/multi_height_annotator.py`（新建） | Step1: openpilot H1 推理；Step2: 标注变换；Step3: 质量过滤；输出各高度 NPZ |
+| `tools/dashcam/train/preprocess_cache.py` | 读取各高度 NPZ，执行 1FPS 抽样 + warp 预处理，写入缓存 |
+
+`multi_height_annotator.py` 是本方案的核心新增脚本，独立于现有训练管线，可在数据采集后批量处理。
+
+---
+
+### 5.7 本方案的局限性
+
+| 局限 | 影响 | 缓解措施 |
+|------|------|---------|
+| 依赖 H1 推理精度 | openpilot 在 H1 的偶发误检（如虚线错误关联）会传播到所有高度 | 置信度过滤（§5.4 Step3） |
+| z_height 标注质量下降 | z_height = -(camera height) 本身信噪比低，变换后的标注质量与 H1 相同 | z_height 对 LDW/FCW 不是关键量（§2.2），影响有限 |
+| 不覆盖 H1 本身无法识别的场景 | 若场景中无清晰车道线，H1 也无法标注，其他高度同样缺标 | 在 §4.4 天气/地图多样性中已考虑；Town07 等场景可用 Carla GT 补充 |
+| 宽相机标注的对应关系 | 各高度宽相机的视野不同，wide_from_device_euler 为固定值复制 | 在恒定 5° 俯仰角策略下，宽相机视野差异小，可接受 |
 
 ## 6. 模型训练方案
 
