@@ -97,13 +97,18 @@ FCW（5–30m） > LDW近场（10–30m） > LDW中场（30–80m） > LDW远场
 
 **坐标轴约定**（来源：`common/transformations/README.md`）：
 
-| 坐标系 | X | Y | Z | 说明 |
-|--------|---|---|---|------|
-| **Calibrated**（标定帧） | 前（Forward） | 右（Right） | 下（Down） | **模型输出所在坐标系**，与道路平面对齐（pitch/yaw 由 calibrationd 校正） |
-| Device（设备帧） | 前（Forward） | 右（Right） | 下（Down） | 物理相机坐标系，随相机安装角度倾斜 |
-| Road（路面帧） | 前（Forward） | **左（Left）** | **上（Up）** | 与路面对齐，Y/Z 方向与标定帧相反 |
+| 坐标系 | X | Y | Z | 原点 | 说明 |
+|--------|---|---|---|------|------|
+| **Calibrated**（标定帧） | 前 | 右 | 下 | 相机位置 | **模型输出所在坐标系**。pitch/yaw 与 Car frame 对齐，roll 与设备帧对齐 |
+| **Car**（车辆帧） | 前 | 右 | 下 | 路面（相机正下方） | 适合估算路面上各点位置。与标定帧轴向相同，原点在路面 |
+| Device（设备帧） | 前 | 右 | 下 | 相机位置 | 物理相机坐标系，随相机安装角度倾斜，与标定帧共享原点 |
+| `camera.py` road frame | 前 | **左** | **上** | — | `get_view_frame_from_road_frame()` 内部约定，**非 README 定义的标准帧**。与 Car/Calibrated/Device 的 Y、Z 方向相反（差一个 `np.diag([1,-1,-1])` 翻转） |
 
-> **注意**：标定帧与设备帧的轴方向相同（均为 Forward/Right/Down），但原点相同而对齐方式不同——标定帧经过 calibrationd 校正，始终与车辆行驶方向和道路法线对齐；设备帧随物理相机倾斜。模型输出在标定帧下，因此对于水平路面，`z_height ≈ +H`（相机高度，正值，道路在标定帧 Z 轴正方向即正下方）。
+> **注意**：
+> - Calibrated、Car、Device 三个帧的轴方向**完全相同**（均为 Forward/Right/Down）。
+> - 区别在于**原点**和**对齐方式**：标定帧与设备帧同原点（相机位置），但标定帧经 calibrationd 在 pitch/yaw 上与 Car frame 对齐；设备帧随物理相机倾斜；Car frame 原点在路面。
+> - `camera.py` 内部的 road frame [前, 左, 上] 是外参矩阵计算的中间约定，**不同于** README 定义的 Car frame [前, 右, 下]。
+> - 对于水平路面，标定帧原点在相机（高度 H），路面在 Z 轴正方向（下方）H 处，故 `z_height ≈ +H`。
 
 ```
 lane_lines:    (4, 33, 2) = [y_lateral, z_height] in calibrated frame
@@ -1197,15 +1202,18 @@ Carla 仿真（单次运行）
 轴向定义（来源：`common/transformations/README.md` 和 `camera.py` 第73行）：
 
 ```
-Calibrated frame / Device frame：x→forward（前）, y→right（右）, z→down（下）
-Road frame（对比）：             x→forward（前）, y→left（左）,  z→up（上）
+Calibrated frame（标定帧，模型输出）：x→forward（前）, y→right（右）, z→down（下）
+Car frame（车辆帧，README 官方）：     x→forward（前）, y→right（右）, z→down（下）
+Device frame（设备帧）：               x→forward（前）, y→right（右）, z→down（下）
+camera.py 内部 road frame（非标准）：   x→forward（前）, y→left（左）,  z→up（上）
 ```
 
 - **X**：正前方（车辆行进方向，Forward）
 - **Y**：**右侧**（Right）— 右侧车道线 y_lat > 0，左侧 < 0
 - **Z**：**向下**（Down）— Z 向下为正，与直觉相反
 
-> 标定帧与路面帧（Road Frame）的 Y、Z 方向**完全相反**：路面帧 Y→左、Z→上；标定帧 Y→右、Z→下（见 `camera.py` 中 `np.diag([1, -1, -1])` 的 Y/Z 符号翻转）。
+> **重要**：README 中定义的 Car frame（路面对齐帧）与标定帧/设备帧的轴向**完全相同**，均为 [前, 右, 下]，差别只在原点（Car frame 原点在路面，标定帧原点在相机）。
+> `camera.py` 内部的 road frame [前, 左, 上] 是 `get_view_frame_from_road_frame()` 函数使用的中间约定，Y/Z 方向与上述三个标准帧相反，通过 `np.diag([1, -1, -1])` 翻转后才得到设备帧风格的坐标。
 
 对于水平路面，相机安装高度 H 处，路面在标定帧中的 z 坐标：
 
