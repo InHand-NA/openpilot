@@ -8,7 +8,7 @@ Usage:
   python tools/dashcam/annotate_multi_height.py \\
       data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0/ \\
       --onnx selfdrive/modeld/models/driving_vision.onnx \\
-      --output data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0_annotated/
+      --output data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0/annotations/
 
   # Only annotate specific heights
   python tools/dashcam/annotate_multi_height.py ... --heights H2 H3 H6
@@ -376,7 +376,7 @@ def main():
   parser.add_argument('--onnx', default='selfdrive/modeld/models/driving_vision.onnx',
                       help='Path to driving_vision.onnx (default: selfdrive/modeld/models/driving_vision.onnx)')
   parser.add_argument('--output', default=None,
-                      help='Output directory (default: <session_dir>_annotated)')
+                      help='Output directory (default: <session_dir>/annotations/)')
   parser.add_argument('--heights', nargs='+', default=None,
                       help='Heights to annotate (default: all in clip_info.json)')
   parser.add_argument('--min-ll-prob', type=float, default=0.1,
@@ -395,7 +395,7 @@ def main():
   if args.output:
     output_dir = Path(args.output).resolve()
   else:
-    output_dir = session_dir.parent / (session_dir.name + '_annotated')
+    output_dir = session_dir / 'annotations'
 
   try:
     annotate_session(
