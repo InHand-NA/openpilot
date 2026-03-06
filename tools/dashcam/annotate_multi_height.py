@@ -13,15 +13,16 @@ Usage:
   # Only annotate specific heights
   python tools/dashcam/annotate_multi_height.py ... --heights H2 H3 H6
 
-  # GPU inference
-  python tools/dashcam/annotate_multi_height.py ... --device cuda --batch-size 8
+  # CPU preprocessing fallback (default uses GPU OpenCL)
+  python tools/dashcam/annotate_multi_height.py ... --device cuda --no-gpu-preprocess
 """
 
 import argparse
 import json
 import math
-import shutil
 import sys
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -32,11 +33,17 @@ from openpilot.common.transformations.model import get_warp_matrix as compute_wa
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.tools.dashcam.train.dataset import rgb_to_modeld_input
 
+TEMPORAL_SKIP = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ  # 4
+
 
 X_IDXS = np.array(ModelConstants.X_IDXS, dtype=np.float32)  # (33,) forward distances
 
 # Default H1 height (meters)
 H1_HEIGHT = 1.22
+
+# Number of frames to prefetch ahead of the current processing position.
+# Each prefetch slot holds futures for H1 + all non-H1 height files.
+PREFETCH_AHEAD = 8
 
 
 def decode_model_output(outputs: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:
@@ -130,8 +137,8 @@ def annotate_session(
   onnx_path: str,
   heights_to_annotate: list[str] | None,
   min_ll_prob: float,
-  batch_size: int,
   device: str,
+  use_gpu_preprocess: bool = False,
 ) -> dict:
   """Annotate all H1 frames in session_dir, write to output_dir.
 
@@ -178,8 +185,12 @@ def annotate_session(
   output_dir.mkdir(parents=True, exist_ok=True)
   for tag in heights:
     (output_dir / tag).mkdir(exist_ok=True)
-  # Copy clip_info.json so preprocess_cache.py can find it via parent.parent
-  shutil.copy(clip_info_path, output_dir / 'clip_info.json')
+  # Write clip_info.json with source_session_dir so preprocess_cache.py can locate
+  # the original RGB frames (annotated NPZs store only labels, not road_rgb/wide_rgb).
+  clip_info_out = dict(clip_info)
+  clip_info_out['source_session_dir'] = str(session_dir)
+  with open(output_dir / 'clip_info.json', 'w') as f:
+    json.dump(clip_info_out, f, indent=2)
 
   # Camera intrinsics
   dc = DEVICE_CAMERAS[('pc', 'unknown')]
@@ -199,69 +210,155 @@ def annotate_session(
   stats = {tag: {'total': 0, 'pass': 0, 'fail': 0} for tag in heights}
   stats['H1_inferred'] = 0
 
+  # Circular buffers for temporal context: store last TEMPORAL_SKIP+1 preprocessed frames.
+  # Model input = [prev_frame(t-TEMPORAL_SKIP), curr_frame(t)] → 12ch total.
+  road_buf: deque[np.ndarray] = deque(maxlen=TEMPORAL_SKIP + 1)
+  wide_buf: deque[np.ndarray] = deque(maxlen=TEMPORAL_SKIP + 1)
+
+  # Optionally use GPU OpenCL pipeline (pixel-identical to modeld)
+  cl_prep_road = None
+  cl_prep_wide = None
+  if use_gpu_preprocess:
+    from openpilot.tools.dashcam.modeld_preprocess_cl import ModeldInputPreprocessorCL
+    print("  Using GPU OpenCL preprocessor (modeld_preprocess_cl)...")
+    cl_prep_road = ModeldInputPreprocessorCL()
+    cl_prep_wide = ModeldInputPreprocessorCL()
+
   import time
   t_start = time.monotonic()
 
-  for frame_path in frame_files:
-    h1_data = dict(np.load(frame_path, allow_pickle=True))
+  # Separate read and write thread pools so prefetch reads and async writes
+  # never compete for workers.
+  #
+  # read_pool: one worker per height (H1~H6 = up to 6). Each _submit_prefetch()
+  #   submits len(heights) futures — at most 6 concurrent reads, one per height dir.
+  #
+  # write_pool: one worker per height. Each frame writes up to len(heights) NPZs.
+  #   np.savez (uncompressed) is used because annotated NPZs are intermediate files;
+  #   preprocess_cache.py converts RGB→YUV and discards the raw images.
+  #
+  # PREFETCH_AHEAD frames: GPU processes frame i while read_pool has already started
+  # reading frame i+PREFETCH_AHEAD. With 6 readers and ~50ms/file, all 6 height files
+  # for one frame finish in ~50ms — well within the PREFETCH_AHEAD × GPU_time budget.
+  n_heights = len(heights)
+  read_pool  = ThreadPoolExecutor(max_workers=n_heights)
+  write_pool = ThreadPoolExecutor(max_workers=n_heights)
 
-    # Preprocess H1 frame to model input
-    road_yuv = rgb_to_modeld_input(h1_data['road_rgb'], warp_road)  # (6, 128, 256)
-    wide_yuv = rgb_to_modeld_input(h1_data['wide_rgb'], warp_wide)
+  # Prefetch slot: {tag: Future[dict|None]}
+  # H1 future loads from h1_dir; non-H1 futures load from session_dir/tag/.
+  PrefetchSlot = dict[str, Future]
 
-    # Stack two identical frames (model expects temporal pair)
-    road_tensor = torch.from_numpy(np.concatenate([road_yuv, road_yuv], axis=0)).unsqueeze(0).to(device)
-    wide_tensor = torch.from_numpy(np.concatenate([wide_yuv, wide_yuv], axis=0)).unsqueeze(0).to(device)
+  def _load_npz(path: str) -> dict | None:
+    p = Path(path)
+    return dict(np.load(path, allow_pickle=True)) if p.exists() else None
 
-    with torch.no_grad():
-      outputs_h1 = model(road_tensor, wide_tensor)
+  def _write_npz(path: str, data: dict) -> None:
+    np.savez(path, **data)
 
-    canonical_h1 = decode_model_output(outputs_h1)
-    stats['H1_inferred'] += 1
+  def _submit_prefetch(fp: Path) -> PrefetchSlot:
+    slot: PrefetchSlot = {'H1': read_pool.submit(_load_npz, str(fp))}
+    for tag in heights:
+      if tag != 'H1':
+        slot[tag] = read_pool.submit(_load_npz, str(session_dir / tag / fp.name))
+    return slot
 
-    # Quality filter: check inner lane lines L0(idx=1) and R0(idx=2)
-    ll_prob = canonical_h1['lane_lines_prob']
-    passes = bool(ll_prob[1] > min_ll_prob and ll_prob[2] > min_ll_prob)
+  # Pre-fill the prefetch pipeline before the main loop
+  prefetch_queue: deque[PrefetchSlot] = deque()
+  for fp in frame_files[:PREFETCH_AHEAD]:
+    prefetch_queue.append(_submit_prefetch(fp))
 
-    for tag, h_k in heights.items():
-      stats[tag]['total'] += 1
-      if passes:
-        stats[tag]['pass'] += 1
+  try:
+    for i, frame_path in enumerate(frame_files):
+      # Submit read for the frame PREFETCH_AHEAD steps ahead while processing frame i
+      next_idx = i + PREFETCH_AHEAD
+      if next_idx < len(frame_files):
+        prefetch_queue.append(_submit_prefetch(frame_files[next_idx]))
+
+      # Collect current frame's data — .result() returns immediately if already done
+      slot = prefetch_queue.popleft()
+      h1_data = slot['H1'].result()
+      if h1_data is None:
+        continue
+
+      # Preprocess H1 frame to model input (BGR channel order, matching Carla output)
+      if cl_prep_road is not None:
+        road_yuv = cl_prep_road.process(h1_data['road_rgb'], warp_road)  # (6, 128, 256)
+        wide_yuv = cl_prep_wide.process(h1_data['wide_rgb'], warp_wide)
       else:
-        stats[tag]['fail'] += 1
+        road_yuv = rgb_to_modeld_input(h1_data['road_rgb'], warp_road)
+        wide_yuv = rgb_to_modeld_input(h1_data['wide_rgb'], warp_wide)
 
-      # Generate annotation for height h_k
-      if tag == 'H1':
-        canonical_hk = canonical_h1
-      else:
-        canonical_hk = transform_annotation(canonical_h1, h1=h1_height, h_k=h_k)
+      road_buf.append(road_yuv)
+      wide_buf.append(wide_yuv)
 
-      # Load source frame for this height (for road_rgb, wide_rgb, meta)
-      src_path = session_dir / tag / frame_path.name
-      if not src_path.exists():
-        continue  # height frame missing (partial collection)
-      src_data = dict(np.load(src_path, allow_pickle=True))
+      # Use frame from TEMPORAL_SKIP steps ago as previous frame (matching modeld's context)
+      road_yuv_prev = road_buf[0]   # oldest in buffer (t-TEMPORAL_SKIP or t if not enough history)
+      wide_yuv_prev = wide_buf[0]
 
-      # Merge: source meta + canonical annotation
-      out_data = {}
-      for k in ('road_rgb', 'wide_rgb', 'camera_height', 'v_ego', 'world_pose'):
-        if k in src_data:
-          out_data[k] = src_data[k]
-      out_data.update(canonical_hk)
-      out_data['label_source'] = np.bytes_(b'pretrained_h1')
-      out_data['ll_quality_pass'] = np.bool_(passes)
+      road_tensor = torch.from_numpy(np.concatenate([road_yuv_prev, road_yuv], axis=0)).unsqueeze(0).to(device)
+      wide_tensor = torch.from_numpy(np.concatenate([wide_yuv_prev, wide_yuv], axis=0)).unsqueeze(0).to(device)
 
-      out_path = output_dir / tag / frame_path.name
-      np.savez_compressed(str(out_path), **out_data)
+      with torch.no_grad():
+        outputs_h1 = model(road_tensor, wide_tensor)
 
-    # Progress log
-    n_done = stats['H1_inferred']
-    if n_done % 500 == 0 or n_done == len(frame_files):
-      elapsed = time.monotonic() - t_start
-      fps = n_done / elapsed if elapsed > 0 else 0
-      eta = (len(frame_files) - n_done) / fps if fps > 0 else 0
-      pass_rate = stats[list(heights.keys())[0]]['pass'] / max(n_done, 1) * 100
-      print(f"  {n_done}/{len(frame_files)} | {fps:.1f} fps | ETA {eta:.0f}s | PASS {pass_rate:.1f}%")
+      canonical_h1 = decode_model_output(outputs_h1)
+      stats['H1_inferred'] += 1
+
+      # Quality filter: check inner lane lines L0(idx=1) and R0(idx=2)
+      ll_prob = canonical_h1['lane_lines_prob']
+      passes = bool(ll_prob[1] > min_ll_prob and ll_prob[2] > min_ll_prob)
+
+      for tag, h_k in heights.items():
+        stats[tag]['total'] += 1
+        if passes:
+          stats[tag]['pass'] += 1
+        else:
+          stats[tag]['fail'] += 1
+
+        # Generate annotation for height h_k
+        if tag == 'H1':
+          canonical_hk = canonical_h1
+        else:
+          canonical_hk = transform_annotation(canonical_h1, h1=h1_height, h_k=h_k)
+
+        # Get prefetched src_data (H1 reuses h1_data to avoid a redundant read)
+        if tag == 'H1':
+          src_data = h1_data
+        else:
+          src_data = slot[tag].result()
+          if src_data is None:
+            continue  # height frame missing (partial collection)
+
+        # Merge: small metadata + canonical annotation (no road_rgb/wide_rgb).
+        # RGB is omitted to keep annotated NPZs tiny (<1KB vs 14MB), eliminating
+        # disk write pressure. preprocess_cache.py reads RGB from source_session_dir
+        # recorded in clip_info.json.
+        out_data = {}
+        for k in ('camera_height', 'v_ego', 'world_pose'):
+          if k in src_data:
+            out_data[k] = src_data[k]
+        out_data.update(canonical_hk)
+        out_data['label_source'] = np.bytes_(b'pretrained_h1')
+        out_data['ll_quality_pass'] = np.bool_(passes)
+
+        # Async write (uncompressed — intermediate files only)
+        write_pool.submit(_write_npz, str(output_dir / tag / frame_path.name), out_data)
+
+      # Progress log
+      n_done = stats['H1_inferred']
+      if n_done % 500 == 0 or n_done == len(frame_files):
+        elapsed = time.monotonic() - t_start
+        fps = n_done / elapsed if elapsed > 0 else 0
+        eta = (len(frame_files) - n_done) / fps if fps > 0 else 0
+        pass_rate = stats[list(heights.keys())[0]]['pass'] / max(n_done, 1) * 100
+        print(f"  {n_done}/{len(frame_files)} | {fps:.1f} fps | ETA {eta:.0f}s | PASS {pass_rate:.1f}%")
+
+  finally:
+    write_pool.shutdown(wait=True)  # flush all pending writes before returning
+    read_pool.shutdown(wait=False)  # reads are already done; cancel any remaining prefetch
+    if cl_prep_road is not None:
+      cl_prep_road.close()
+      cl_prep_wide.close()
 
   elapsed = time.monotonic() - t_start
   print(f"\n  Done in {elapsed:.1f}s ({stats['H1_inferred'] / elapsed:.1f} fps)")
@@ -283,11 +380,11 @@ def main():
   parser.add_argument('--heights', nargs='+', default=None,
                       help='Heights to annotate (default: all in clip_info.json)')
   parser.add_argument('--min-ll-prob', type=float, default=0.1,
-                      help='Min lane line probability for quality filter (default: 0.5)')
-  parser.add_argument('--batch-size', type=int, default=1,
-                      help='Inference batch size (default: 1; model is fixed batch=1, this is unused but kept for CLI compatibility)')
+                      help='Min lane line probability for quality filter (default: 0.1)')
   parser.add_argument('--device', default='cpu', choices=['cpu', 'cuda', 'mps'],
                       help='Inference device (default: cpu)')
+  parser.add_argument('--no-gpu-preprocess', action='store_true',
+                      help='Disable GPU OpenCL preprocessing, fall back to CPU (slower)')
   args = parser.parse_args()
 
   session_dir = Path(args.session_dir).resolve()
@@ -307,8 +404,8 @@ def main():
       onnx_path=args.onnx,
       heights_to_annotate=args.heights,
       min_ll_prob=args.min_ll_prob,
-      batch_size=args.batch_size,
       device=args.device,
+      use_gpu_preprocess=not args.no_gpu_preprocess,
     )
     print(f"\nAnnotated data saved to: {output_dir}")
   except KeyboardInterrupt:

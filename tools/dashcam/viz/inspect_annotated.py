@@ -558,6 +558,17 @@ def main():
   K_wide    = dc.ecam.intrinsics
 
   heights_info: dict[str, float] = clip_info.get('heights', {})
+
+  # Annotated NPZs no longer embed road_rgb/wide_rgb (removed to reduce file size).
+  # source_session_dir in clip_info.json points to the original session for RGB lookup.
+  source_session_dir: Path | None = None
+  src = clip_info.get('source_session_dir')
+  if src:
+    p = Path(src)
+    source_session_dir = p if p.exists() else None
+    if source_session_dir is None:
+      print(f"WARN: source_session_dir not found: {src}", file=sys.stderr)
+
   all_tags = sorted([d.name for d in annotated_dir.iterdir()
                      if d.is_dir() and d.name.startswith('H') and d.name[1:].isdigit()])
   if not all_tags:
@@ -597,6 +608,16 @@ def main():
   while True:
     data     = dict(np.load(frame_files[idx], allow_pickle=True))
     height_m = heights_info.get(height_tag, float(data.get('camera_height', 1.22)))
+
+    # Load RGB from original session if not embedded in annotated NPZ
+    if 'road_rgb' not in data and source_session_dir is not None:
+      src_path = source_session_dir / height_tag / frame_files[idx].name
+      if src_path.exists():
+        src_npz = np.load(str(src_path), allow_pickle=True)
+        if 'road_rgb' in src_npz:
+          data['road_rgb'] = src_npz['road_rgb']
+        if 'wide_rgb' in src_npz:
+          data['wide_rgb'] = src_npz['wide_rgb']
 
     img = render_frame(
       data=data, frame_idx=idx, total=total,

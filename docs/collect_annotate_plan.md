@@ -844,7 +844,7 @@ python tools/dashcam/annotate_multi_height.py \
     ${SESSION_DIR} \
     --onnx checkpoints/inadas_original.onnx \
     --output ${ANNOTATED_DIR} \
-    --batch-size 8 --device cuda
+    --device cuda
 
 # 【人工检查 B1】查看标注质量，确认车道线叠加合理
 python tools/dashcam/viz/inspect_annotated.py ${ANNOTATED_DIR} --height H1
