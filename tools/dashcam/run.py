@@ -282,6 +282,8 @@ def main():
   # road-only / dual: display the narrow road camera, use fcam.intrinsics
   dc = DEVICE_CAMERAS[("pc", "unknown")]
   vis_intrinsics = dc.ecam.intrinsics if args.wide_road_only else dc.fcam.intrinsics
+  # Tab key toggles road ↔ wide view in dual-camera mode
+  show_wide = False
 
   from openpilot.tools.dashcam.visualizer import Visualizer
 
@@ -344,7 +346,12 @@ def main():
       else:
         if road_rgb is None:
           continue
-        display_rgb = road_rgb
+        if show_wide and wide_rgb is not None:
+          display_rgb = wide_rgb
+          vis_intrinsics = dc.ecam.intrinsics
+        else:
+          display_rgb = road_rgb
+          vis_intrinsics = dc.fcam.intrinsics
 
       # Send frames to modeld via VisionIPC
       if args.wide_road_only:
@@ -417,6 +424,12 @@ def main():
         cur_cal_perc = 0
       model_msg = sm['modelV2'] if sm.seen['modelV2'] else None
 
+      # Camera label for dual mode Tab toggle
+      if not args.wide_road_only and not args.road_only:
+        cam_label = 'WIDE' if show_wide else 'ROAD'
+      else:
+        cam_label = ''
+
       ok = visualizer.draw(
         display_rgb,
         model_msg,
@@ -428,10 +441,17 @@ def main():
         cur_valid_blocks,
         cur_cal_perc,
         fps,
+        camera_label=cam_label,
       )
 
       if not ok:
         break
+
+      # Tab key: toggle road ↔ wide view in dual-camera mode
+      if not args.wide_road_only and not args.road_only:
+        if visualizer.last_key == ord('\t'):
+          show_wide = not show_wide
+          print(f"[VIEW] Switched to {'wide' if show_wide else 'road'} camera")
 
       if args.max_frames > 0 and tick_count // TICKS_PER_FRAME >= args.max_frames:
         print(f"Reached max frames ({args.max_frames})")

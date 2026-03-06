@@ -227,6 +227,7 @@ class Visualizer:
     self._gt_probs = None
     self._eval_metrics = None
     self.no_display = no_display
+    self.last_key = -1
     self.writer = None
     if save_video_path:
       fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -239,7 +240,7 @@ class Visualizer:
 
   def draw(self, frame_rgb, model_msg, fcam_intrinsics_3x3, rpyCalib,
            camera_height, vehicle_speed, cal_status, valid_blocks, cal_perc, fps,
-           gt_lines=None, gt_probs=None, eval_metrics=None):
+           gt_lines=None, gt_probs=None, eval_metrics=None, camera_label=''):
     """Draw all perception results on frame and display/record.
 
     Args:
@@ -294,6 +295,8 @@ class Visualizer:
                           cal_status, valid_blocks, cal_perc, camera_height, fps)
     if self._eval_metrics is not None:
       self._draw_eval_panel(display)
+    if camera_label:
+      self._draw_camera_label(display, camera_label)
 
     if self.writer is not None:
       self.writer.write(display)
@@ -301,10 +304,23 @@ class Visualizer:
     if not self.no_display:
       cv2.imshow('dashcam', display)
       key = cv2.waitKey(1) & 0xFF
+      self.last_key = key
       if key == ord('q') or key == 27:  # q or ESC
         return False
 
     return True
+
+  def _draw_camera_label(self, img, label):
+    """Draw camera view label (e.g. 'ROAD' or 'WIDE') in the top-center of the display."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 1.0
+    thickness = 2
+    (tw, th), _ = cv2.getTextSize(label, font, scale, thickness)
+    x = (img.shape[1] - tw) // 2
+    y = th + 12
+    # Shadow for readability
+    cv2.putText(img, label, (x + 1, y + 1), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(img, label, (x, y), font, scale, (0, 220, 255), thickness, cv2.LINE_AA)
 
   def _draw_lane_lines(self, img, model, K, rpyCalib):
     """Draw 4 lane lines as filled polygons with alpha blending.
