@@ -142,11 +142,11 @@ def write_summary(stats_per_height: dict, z_check: dict, output_dir: Path,
                   session_name: str, min_ll_prob: float, heights_info: dict):
   """Write stats_summary.txt."""
   lines = [
-    "=== 多高度标注质量统计摘要 ===",
+    "=== Multi-Height Annotation Quality Summary ===",
     f"Session: {session_name}",
-    f"min_ll_prob 阈值: {min_ll_prob:.2f}",
+    f"min_ll_prob threshold: {min_ll_prob:.2f}",
     "",
-    f"{'高度':<10}{'总帧数':>8}{'PASS帧':>8}{'过滤率':>8}{'L0中位':>10}{'R0中位':>10}{'Lead率':>8}",
+    f"{'Height':<10}{'Total':>8}{'Pass':>8}{'PassRate':>10}{'L0 Med':>10}{'R0 Med':>10}{'Lead%':>8}",
     "-" * 60,
   ]
 
@@ -166,22 +166,22 @@ def write_summary(stats_per_height: dict, z_check: dict, output_dir: Path,
   lines += ["", "-" * 60]
 
   z_status = z_check.get('status', 'SKIP')
-  z_icon = "✅" if z_status == 'PASS' else ("❌" if z_status == 'FAIL' else "⏭")
-  lines.append(f"z_height 变换一致性: {z_icon} {z_status}")
+  z_icon = "[OK]" if z_status == 'PASS' else ("[FAIL]" if z_status == 'FAIL' else "[SKIP]")
+  lines.append(f"z_height transform consistency: {z_icon} {z_status}")
   if z_status not in ('SKIP',):
-    lines.append(f"  最大误差: {z_check.get('max_error', 0):.4f}m (阈值 0.1m)")
+    lines.append(f"  max error: {z_check.get('max_error', 0):.4f}m (threshold 0.1m)")
     for tag, r in z_check.get('per_height', {}).items():
-      ok_icon = "✅" if r['ok'] else "❌"
+      ok_icon = "[OK]" if r['ok'] else "[FAIL]"
       lines.append(
-        f"  {tag}: 期望ΔH={r['expected_delta']:.2f}m  "
-        f"实测={r['measured_delta']:.3f}m  误差={r['error']:.4f}m {ok_icon}"
+        f"  {tag}: expected ΔH={r['expected_delta']:.2f}m  "
+        f"measured={r['measured_delta']:.3f}m  error={r['error']:.4f}m {ok_icon}"
       )
 
   path = output_dir / 'stats_summary.txt'
   with open(path, 'w', encoding='utf-8') as f:
     f.write('\n'.join(lines) + '\n')
   print('\n'.join(lines))
-  print(f"\n摘要已保存: {path}")
+  print(f"\nSummary saved: {path}")
 
 
 def plot_lane_prob_distribution(stats_per_height: dict, output_dir: Path, min_ll_prob: float):
@@ -227,7 +227,7 @@ def plot_lane_prob_distribution(stats_per_height: dict, output_dir: Path, min_ll
   path = output_dir / 'lane_prob_distribution.png'
   fig.savefig(path, dpi=120)
   plt.close(fig)
-  print(f"图表已保存: {path}")
+  print(f"Plot saved: {path}")
 
 
 def plot_filter_rates(stats_per_height: dict, heights_info: dict, output_dir: Path):
@@ -245,9 +245,9 @@ def plot_filter_rates(stats_per_height: dict, heights_info: dict, output_dir: Pa
 
   fig, ax = plt.subplots(figsize=(8, 4))
   bars = ax.bar(h_labels, pass_rates, color=colors)
-  ax.axhline(80, color='green', linestyle='--', alpha=0.5, label='目标 80%')
-  ax.set_ylabel('过滤后帧占比 (%)')
-  ax.set_title('各高度质量过滤通过率')
+  ax.axhline(80, color='green', linestyle='--', alpha=0.5, label='target 80%')
+  ax.set_ylabel('Pass rate (%)')
+  ax.set_title('Quality filter pass rate per height')
   ax.set_ylim(0, 105)
   ax.legend()
   for bar, r in zip(bars, pass_rates):
@@ -257,7 +257,7 @@ def plot_filter_rates(stats_per_height: dict, heights_info: dict, output_dir: Pa
   path = output_dir / 'filter_rates.png'
   fig.savefig(path, dpi=120)
   plt.close(fig)
-  print(f"图表已保存: {path}")
+  print(f"Plot saved: {path}")
 
 
 def plot_z_height_transform(frames_per_height: dict, heights_info: dict,
@@ -296,16 +296,16 @@ def plot_z_height_transform(frames_per_height: dict, heights_info: dict,
       h_m = heights_info.get(tag, 0.0)
       ax.plot(x_idxs, z_mean, label=f"{tag} {h_m:.2f}m", color=color)
 
-  ax.set_xlabel('前向距离 X (m)')
-  ax.set_ylabel('z_height 均值 (m)')
-  ax.set_title('各高度车道线 z_height vs 距离（期望各曲线近似平行，间距≈ΔH）')
+  ax.set_xlabel('Forward distance X (m)')
+  ax.set_ylabel('z_height mean (m)')
+  ax.set_title('Lane line z_height vs distance per height (expect parallel curves, gap ~ delta_H)')
   ax.legend()
   ax.grid(True, alpha=0.3)
   plt.tight_layout()
   path = output_dir / 'z_height_transform.png'
   fig.savefig(path, dpi=120)
   plt.close(fig)
-  print(f"图表已保存: {path}")
+  print(f"Plot saved: {path}")
 
 
 def plot_lead_detection(stats_per_height: dict, heights_info: dict, output_dir: Path):
@@ -322,9 +322,9 @@ def plot_lead_detection(stats_per_height: dict, heights_info: dict, output_dir: 
 
   fig, ax = plt.subplots(figsize=(8, 4))
   ax.plot(h_labels, lead_rates, 'o-', color='steelblue', linewidth=2, markersize=8)
-  ax.axhline(30, color='orange', linestyle='--', alpha=0.5, label='参考 30%')
-  ax.set_ylabel('前车检测率 (%)')
-  ax.set_title('各高度前车检测率 (lead_prob > 0.3)')
+  ax.axhline(30, color='orange', linestyle='--', alpha=0.5, label='ref 30%')
+  ax.set_ylabel('Lead detection rate (%)')
+  ax.set_title('Lead vehicle detection rate per height (lead_prob > 0.3)')
   ax.set_ylim(0, 105)
   ax.legend()
   ax.grid(True, alpha=0.3)
@@ -334,7 +334,7 @@ def plot_lead_detection(stats_per_height: dict, heights_info: dict, output_dir: 
   path = output_dir / 'lead_detection_rate.png'
   fig.savefig(path, dpi=120)
   plt.close(fig)
-  print(f"图表已保存: {path}")
+  print(f"Plot saved: {path}")
 
 
 def main():
