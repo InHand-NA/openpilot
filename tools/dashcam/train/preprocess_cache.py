@@ -63,7 +63,11 @@ def _get_source_rgb(npz_path: str, clip_info: dict) -> tuple[np.ndarray, np.ndar
   """Load road_rgb/wide_rgb from the original session dir recorded in clip_info.
 
   Annotated NPZs omit RGB to keep file size small. clip_info.json stores
-  source_session_dir so we can find the original frame by height tag + filename.
+  source_session_dir (relative to annotations/ dir) so we can find the original
+  frame by height tag + filename.
+
+  source_session_dir = '..' means the session dir is the parent of annotations/.
+  Relative paths are resolved against the annotations/ directory (parent.parent of npz).
 
   Returns (road_rgb, wide_rgb) or None if source not found.
   """
@@ -71,9 +75,12 @@ def _get_source_rgb(npz_path: str, clip_info: dict) -> tuple[np.ndarray, np.ndar
   if not source_session_dir:
     return None
   p = Path(npz_path)
-  # p = output_dir/H1/000001.npz  →  tag = H1, name = 000001.npz
+  # p = annotations/H1/000001.npz  →  annotations/ = p.parent.parent
+  # Resolve source_session_dir relative to annotations/ so '..' -> session_dir
+  clip_info_dir = p.parent.parent
+  source_dir = (clip_info_dir / source_session_dir).resolve()
   tag = p.parent.name
-  source_path = Path(source_session_dir) / tag / p.name
+  source_path = source_dir / tag / p.name
   if not source_path.exists():
     return None
   src = np.load(str(source_path), allow_pickle=True)

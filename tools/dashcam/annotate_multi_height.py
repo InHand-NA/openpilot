@@ -257,8 +257,9 @@ def annotate_session(
     (output_dir / tag).mkdir(exist_ok=True)
   # Write clip_info.json with source_session_dir so preprocess_cache.py can locate
   # the original RGB frames (annotated NPZs store only labels, not road_rgb/wide_rgb).
+  # Use '..' (relative to annotations/) so data stays portable across machines.
   clip_info_out = dict(clip_info)
-  clip_info_out['source_session_dir'] = str(session_dir)
+  clip_info_out['source_session_dir'] = '..'
   with open(output_dir / 'clip_info.json', 'w') as f:
     json.dump(clip_info_out, f, indent=2)
 
