@@ -4,6 +4,15 @@
 Uses tinygrad (TinyJit pkl) for inference, matching the custom_modeld.py pipeline.
 ONNX model is auto-compiled to a tinygrad pkl on first run.
 
+Output per annotated height directory:
+  <output_dir>/<tag>/<frame_id>.json          ← labels (JSON)
+  <output_dir>/<tag>/road_input_<frame_id>.png ← preprocessed road YUV (768×256 grayscale)
+  <output_dir>/<tag>/wide_input_<frame_id>.png ← preprocessed wide YUV (768×256 grayscale)
+
+The YUV input PNGs encode the model input tensor (6, 128, 256) uint8 stacked
+vertically as a (768, 256) grayscale image. Reconstruction:
+  yuv = cv2.imread(path, cv2.IMREAD_GRAYSCALE).reshape(6, 128, 256)
+
 Usage:
   python tools/dashcam/annotate_multi_height.py \\
       data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0/ \\
@@ -49,9 +58,6 @@ from openpilot.tools.dashcam.train.dataset import rgb_to_modeld_input
 TEMPORAL_SKIP = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ  # 4
 
 X_IDXS = np.array(ModelConstants.X_IDXS, dtype=np.float32)  # (33,) forward distances
-
-# Default H1 height (meters)
-H1_HEIGHT = 1.22
 
 # Number of frames to prefetch ahead of the current processing position.
 PREFETCH_AHEAD = 8
@@ -204,6 +210,45 @@ def _run_inference(vision_run, input_shapes: dict, output_slices: dict,
   return {k: raw_output[np.newaxis, v] for k, v in output_slices.items()}
 
 
+def _write_annotation(
+  out_dir: Path,
+  frame_id: str,
+  src_data: dict,
+  canonical: dict,
+  passes: bool,
+  road_yuv: np.ndarray,
+  wide_yuv: np.ndarray,
+) -> None:
+  """Write annotation JSON + preprocessed model input PNGs to out_dir.
+
+  JSON contains all scalar metadata and label arrays (as nested Python lists).
+  PNG files encode the model input YUV tensor (6, 128, 256) uint8 as a
+  (768, 256) grayscale image (6 planes stacked vertically).
+  """
+  # Build JSON record: scalars and numpy arrays → Python native types
+  record: dict = {
+    'frame_id':        frame_id,
+    'camera_height':   float(src_data.get('camera_height', 1.22)),
+    'v_ego':           float(src_data.get('v_ego', 0.0)),
+    'world_pose':      [float(x) for x in src_data.get('world_pose', np.zeros(6))],
+    'label_source':    'pretrained_h1',
+    'll_quality_pass': bool(passes),
+  }
+  for k, v in canonical.items():
+    record[k] = v.tolist() if isinstance(v, np.ndarray) else v
+  with open(out_dir / f'{frame_id}.json', 'w') as f:
+    json.dump(record, f)
+
+  # Preprocessed YUV inputs: (6, 128, 256) uint8 → stacked (768, 256) grayscale PNG
+  # Reconstruction: cv2.imread(path, cv2.IMREAD_GRAYSCALE).reshape(6, 128, 256)
+  cv2.imwrite(str(out_dir / f'road_input_{frame_id}.png'),
+              road_yuv.reshape(6 * 128, 256),
+              [cv2.IMWRITE_PNG_COMPRESSION, 1])
+  cv2.imwrite(str(out_dir / f'wide_input_{frame_id}.png'),
+              wide_yuv.reshape(6 * 128, 256),
+              [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
+
 def annotate_session(
   session_dir: Path,
   output_dir: Path,
@@ -212,7 +257,7 @@ def annotate_session(
   min_ll_prob: float,
   use_gpu_preprocess: bool = True,
 ) -> dict:
-  """Annotate all H1 frames in session_dir, write to output_dir.
+  """Annotate all frames in session_dir, write JSON + input PNGs to output_dir.
 
   Returns stats dict with counts per height.
   """
@@ -227,6 +272,16 @@ def annotate_session(
   yaw_rad = math.radians(clip_info['camera']['yaw_deg'])
   rpyCalib = np.array([0.0, pitch_rad, yaw_rad], dtype=np.float64)
 
+  # save_every: how many Carla ticks between consecutive saved frames.
+  # Affects the temporal buffer depth needed to feed the model's context window.
+  #   save_every=1 → frames are 1 tick apart → need 5-frame buffer (buf[0] = 4 ticks back)
+  #   save_every=4 → frames are 4 ticks apart → need 2-frame buffer (buf[0] = 4 ticks back)
+  # Formula: buf_depth = TEMPORAL_SKIP // save_every + 1
+  save_every: int = clip_info.get('save_every', 1)
+  if save_every not in (1, 4):
+    raise ValueError(f"Unsupported save_every={save_every} in clip_info.json (must be 1 or 4)")
+  buf_depth = TEMPORAL_SKIP // save_every + 1  # 5 for save_every=1, 2 for save_every=4
+
   # Determine which heights to annotate
   available_heights = {tag: h for tag, h in clip_info['heights'].items()}
   if heights_to_annotate:
@@ -238,7 +293,7 @@ def annotate_session(
     raise ValueError(f"H1 not found in session heights: {list(available_heights.keys())}")
   h1_height = available_heights['H1']
 
-  # H1 source directory
+  # H1 source directory — used for inference
   h1_dir = session_dir / 'H1'
   if not h1_dir.exists():
     raise FileNotFoundError(f"H1 directory not found: {h1_dir}")
@@ -256,15 +311,13 @@ def annotate_session(
   output_dir.mkdir(parents=True, exist_ok=True)
   for tag in heights:
     (output_dir / tag).mkdir(exist_ok=True)
-  # Write clip_info.json with source_session_dir so preprocess_cache.py can locate
-  # the original RGB frames (annotated NPZs store only labels, not road_rgb/wide_rgb).
-  # Use '..' (relative to annotations/) so data stays portable across machines.
+  # Write clip_info.json; keep source_session_dir for viz scripts that load original RGB
   clip_info_out = dict(clip_info)
   clip_info_out['source_session_dir'] = '..'
   with open(output_dir / 'clip_info.json', 'w') as f:
     json.dump(clip_info_out, f, indent=2)
 
-  # Camera intrinsics and warp matrices for H1
+  # Camera intrinsics and warp matrices (same pitch/yaw applies to all height slots)
   dc = DEVICE_CAMERAS[('pc', 'unknown')]
   warp_road = compute_warp_matrix(rpyCalib, dc.fcam.intrinsics, bigmodel_frame=False)
   warp_wide = compute_warp_matrix(rpyCalib, dc.ecam.intrinsics, bigmodel_frame=True)
@@ -282,13 +335,26 @@ def annotate_session(
     cl_prep_road = ModeldInputPreprocessorCL()
     cl_prep_wide = ModeldInputPreprocessorCL()
 
+  def _preprocess(frame_data: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Preprocess road + wide RGB → (6, 128, 256) uint8 YUV each."""
+    if cl_prep_road is not None:
+      road_yuv = cl_prep_road.process(frame_data['road_rgb'], warp_road).copy()
+      wide_yuv = cl_prep_wide.process(frame_data['wide_rgb'], warp_wide).copy()
+    else:
+      road_yuv = rgb_to_modeld_input(frame_data['road_rgb'], warp_road)
+      wide_yuv = rgb_to_modeld_input(frame_data['wide_rgb'], warp_wide)
+    return road_yuv, wide_yuv
+
   stats = {tag: {'total': 0, 'pass': 0, 'fail': 0} for tag in heights}
   stats['H1_inferred'] = 0
 
-  # Circular buffers for temporal context: store last TEMPORAL_SKIP+1 preprocessed frames.
-  # Model input = [prev_frame(t-TEMPORAL_SKIP), curr_frame(t)] → 12 channels total.
-  road_buf: deque[np.ndarray] = deque(maxlen=TEMPORAL_SKIP + 1)
-  wide_buf: deque[np.ndarray] = deque(maxlen=TEMPORAL_SKIP + 1)
+  # Circular buffers for temporal context.
+  # Model input = [frame(t − TEMPORAL_SKIP ticks), frame(t)] → 12 channels total.
+  # buf_depth is chosen so that buf[0] is always exactly TEMPORAL_SKIP real ticks behind buf[-1]:
+  #   save_every=1: buf_depth=5, buf[0] is 4 list-steps back = 4 ticks back ✓
+  #   save_every=4: buf_depth=2, buf[0] is 1 list-step  back = 4 ticks back ✓
+  road_buf: deque[np.ndarray] = deque(maxlen=buf_depth)
+  wide_buf: deque[np.ndarray] = deque(maxlen=buf_depth)
 
   # Load metadata.jsonl for each height (eager, O(N) once per height)
   def _load_metadata(height_dir: Path) -> dict[str, dict]:
@@ -316,8 +382,8 @@ def annotate_session(
       return None
     m = meta.get(frame_id, {})
     return {
-      'road_rgb': cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB),
-      'wide_rgb': cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB),
+      'road_rgb':      cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB),
+      'wide_rgb':      cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB),
       'camera_height': np.float32(m.get('camera_height', 1.22)),
       'v_ego':         np.float32(m.get('v_ego', 0.0)),
       'world_pose':    np.array(m.get('world_pose', [0.0]*6), dtype=np.float32),
@@ -335,9 +401,6 @@ def annotate_session(
   write_pool = ThreadPoolExecutor(max_workers=n_heights)
 
   PrefetchSlot = dict[str, Future]
-
-  def _write_npz(path: str, data: dict) -> None:
-    np.savez(path, **data)
 
   def _submit_prefetch(fid: str) -> PrefetchSlot:
     slot: PrefetchSlot = {
@@ -368,13 +431,8 @@ def annotate_session(
       if h1_data is None:
         continue
 
-      # Preprocess H1 frame → (6, 128, 256) uint8 YUV
-      if cl_prep_road is not None:
-        road_yuv = cl_prep_road.process(h1_data['road_rgb'], warp_road)
-        wide_yuv = cl_prep_wide.process(h1_data['wide_rgb'], warp_wide)
-      else:
-        road_yuv = rgb_to_modeld_input(h1_data['road_rgb'], warp_road)
-        wide_yuv = rgb_to_modeld_input(h1_data['wide_rgb'], warp_wide)
+      # Preprocess H1 frame → (6, 128, 256) uint8 YUV for inference
+      road_yuv, wide_yuv = _preprocess(h1_data)
 
       road_buf.append(road_yuv)
       wide_buf.append(wide_yuv)
@@ -394,47 +452,36 @@ def annotate_session(
       passes = bool(ll_prob[1] > min_ll_prob and ll_prob[2] > min_ll_prob)
 
       for tag, h_k in heights.items():
-        stats[tag]['total'] += 1
-        if passes:
-          stats[tag]['pass'] += 1
-        else:
-          stats[tag]['fail'] += 1
-
-        # Generate annotation for height h_k
-        if tag == 'H1':
-          canonical_hk = canonical_h1
-        else:
-          canonical_hk = transform_annotation(canonical_h1, h1=h1_height, h_k=h_k)
-
-        # Get prefetched src_data
+        # Get source frame data and preprocess this height's camera images
         if tag == 'H1':
           src_data = h1_data
+          road_yuv_hk = road_yuv
+          wide_yuv_hk = wide_yuv
+          canonical_hk = canonical_h1
         else:
           src_data = slot[tag].result()
           if src_data is None:
-            continue  # height frame missing (partial collection)
+            continue
+          canonical_hk = transform_annotation(canonical_h1, h1=h1_height, h_k=h_k)
+          road_yuv_hk, wide_yuv_hk = _preprocess(src_data)
 
-        # Merge: small metadata + canonical annotation (no road_rgb/wide_rgb).
-        # RGB is omitted to keep annotated NPZs tiny (<1KB vs 14MB).
-        # preprocess_cache.py reads RGB from source_session_dir in clip_info.json.
-        out_data = {}
-        for k in ('camera_height', 'v_ego', 'world_pose'):
-          if k in src_data:
-            out_data[k] = src_data[k]
-        out_data.update(canonical_hk)
-        out_data['label_source'] = np.bytes_(b'pretrained_h1')
-        out_data['ll_quality_pass'] = np.bool_(passes)
+        stats[tag]['total'] += 1
+        stats[tag]['pass' if passes else 'fail'] += 1
 
-        write_pool.submit(_write_npz, str(output_dir / tag / f'{frame_id}.npz'), out_data)
+        write_pool.submit(
+          _write_annotation,
+          output_dir / tag, frame_id, src_data, canonical_hk, passes,
+          road_yuv_hk, wide_yuv_hk,
+        )
 
       # Progress log
       n_done = stats['H1_inferred']
       if n_done % 500 == 0 or n_done == len(frame_ids):
         elapsed = time.monotonic() - t_start
         fps = n_done / elapsed if elapsed > 0 else 0
-        eta = (len(frame_files) - n_done) / fps if fps > 0 else 0
+        eta = (len(frame_ids) - n_done) / fps if fps > 0 else 0
         pass_rate = stats[list(heights.keys())[0]]['pass'] / max(n_done, 1) * 100
-        print(f"  {n_done}/{len(frame_files)} | {fps:.1f} fps | ETA {eta:.0f}s | PASS {pass_rate:.1f}%")
+        print(f"  {n_done}/{len(frame_ids)} | {fps:.1f} fps | ETA {eta:.0f}s | PASS {pass_rate:.1f}%")
 
   finally:
     write_pool.shutdown(wait=True)

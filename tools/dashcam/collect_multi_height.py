@@ -135,8 +135,9 @@ def collect_session(
       speed_interval=speed_interval,
     )
 
-    # Save clip_info.json
+    # Save clip_info.json (include save_every so downstream annotation is correct)
     clip_info = world.get_clip_metadata(session_tag)
+    clip_info['save_every'] = save_every
     clip_info_path = session_dir / 'clip_info.json'
     with open(clip_info_path, 'w') as f:
       json.dump(clip_info, f, indent=2)
