@@ -37,9 +37,40 @@ KEY_HOME  = 65360
 KEY_END   = 65367
 
 
+def _load_metadata(height_dir: Path) -> dict[str, dict]:
+  """Load metadata.jsonl → {frame_id: meta_dict}."""
+  meta_path = height_dir / 'metadata.jsonl'
+  result: dict[str, dict] = {}
+  if not meta_path.exists():
+    return result
+  with open(meta_path) as f:
+    for line in f:
+      line = line.strip()
+      if line:
+        m = json.loads(line)
+        result[f"{m['frame']:06d}"] = m
+  return result
+
+
 def load_frame(path: Path) -> dict | None:
   try:
-    return dict(np.load(path, allow_pickle=True))
+    frame_id = path.stem.replace('road_', '')
+    height_dir = path.parent
+    meta = _load_metadata(height_dir)
+    m = meta.get(frame_id, {})
+    road_bgr = cv2.imread(str(path))
+    wide_bgr = cv2.imread(str(height_dir / f'wide_{frame_id}.png'))
+    if road_bgr is None:
+      return None
+    result = {
+      'road_rgb':      cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB),
+      'camera_height': np.float32(m.get('camera_height', 1.22)),
+      'v_ego':         np.float32(m.get('v_ego', 0.0)),
+      'world_pose':    np.array(m.get('world_pose', [0.0]*6), dtype=np.float32),
+    }
+    if wide_bgr is not None:
+      result['wide_rgb'] = cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB)
+    return result
   except Exception as e:
     print(f"  WARN: failed to load {path}: {e}")
     return None
@@ -162,11 +193,12 @@ def main():
   # Collect frame file lists per height
   frame_files_per_height: dict[str, list[Path]] = {}
   for tag in tags:
-    files = sorted((session_dir / tag).glob('*.npz'))
+    height_dir = session_dir / tag
+    files = sorted(height_dir.glob('road_*.png'))
     if files:
       frame_files_per_height[tag] = files
     else:
-      print(f"  WARN: no frames in {session_dir / tag}")
+      print(f"  WARN: no frames in {height_dir}")
   tags = [t for t in tags if t in frame_files_per_height]
 
   if not tags:

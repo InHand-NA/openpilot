@@ -21,6 +21,7 @@ import math
 import multiprocessing as mp
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
@@ -80,15 +81,17 @@ def _get_source_rgb(npz_path: str, clip_info: dict) -> tuple[np.ndarray, np.ndar
   clip_info_dir = p.parent.parent
   source_dir = (clip_info_dir / source_session_dir).resolve()
   tag = p.parent.name
-  source_path = source_dir / tag / p.name
-  if not source_path.exists():
+  stem = p.stem  # e.g. '000001'
+
+  road_png = source_dir / tag / f'road_{stem}.png'
+  wide_png  = source_dir / tag / f'wide_{stem}.png'
+  if not road_png.exists() or not wide_png.exists():
     return None
-  src = np.load(str(source_path), allow_pickle=True)
-  road_rgb = src.get('road_rgb')
-  wide_rgb = src.get('wide_rgb')
-  if road_rgb is None or wide_rgb is None:
+  road_bgr = cv2.imread(str(road_png))
+  wide_bgr = cv2.imread(str(wide_png))
+  if road_bgr is None or wide_bgr is None:
     return None
-  return road_rgb, wide_rgb
+  return cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB), cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB)
 
 
 def _process_one(args: tuple) -> str | None:

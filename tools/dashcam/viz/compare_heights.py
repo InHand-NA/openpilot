@@ -102,17 +102,24 @@ def draw_z_values(img: np.ndarray, data: dict, T_disp: np.ndarray) -> None:
 
 def _load_rgb(source_session_dir: Path | None,
               tag: str, frame_name: str) -> tuple[np.ndarray | None, np.ndarray | None]:
-  """Load road_rgb / wide_rgb from the original session directory."""
+  """Load road_rgb / wide_rgb from the original session directory.
+
+  Supports PNG format (road_*.png / wide_*.png).
+  frame_name is the annotated npz filename, e.g. '000001.npz'.
+  """
   if source_session_dir is None:
     return None, None
-  src_path = source_session_dir / tag / frame_name
-  if not src_path.exists():
+  stem = Path(frame_name).stem  # '000001'
+  height_dir = source_session_dir / tag
+  road_png = height_dir / f'road_{stem}.png'
+  wide_png  = height_dir / f'wide_{stem}.png'
+  if not road_png.exists():
     return None, None
-  try:
-    src = np.load(str(src_path), allow_pickle=True)
-    return src.get('road_rgb'), src.get('wide_rgb')
-  except Exception:
-    return None, None
+  road_bgr = cv2.imread(str(road_png))
+  wide_bgr = cv2.imread(str(wide_png)) if wide_png.exists() else None
+  road_rgb = cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB) if road_bgr is not None else None
+  wide_rgb = cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB) if wide_bgr is not None else None
+  return road_rgb, wide_rgb
 
 
 # ---------------------------------------------------------------------------

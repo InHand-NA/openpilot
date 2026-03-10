@@ -611,13 +611,16 @@ def main():
 
     # Load RGB from original session if not embedded in annotated NPZ
     if 'road_rgb' not in data and source_session_dir is not None:
-      src_path = source_session_dir / height_tag / frame_files[idx].name
-      if src_path.exists():
-        src_npz = np.load(str(src_path), allow_pickle=True)
-        if 'road_rgb' in src_npz:
-          data['road_rgb'] = src_npz['road_rgb']
-        if 'wide_rgb' in src_npz:
-          data['wide_rgb'] = src_npz['wide_rgb']
+      stem = frame_files[idx].stem  # e.g. '000001'
+      height_dir = source_session_dir / height_tag
+      road_png = height_dir / f'road_{stem}.png'
+      wide_png  = height_dir / f'wide_{stem}.png'
+      road_bgr = cv2.imread(str(road_png))
+      if road_bgr is not None:
+        data['road_rgb'] = cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB)
+      wide_bgr = cv2.imread(str(wide_png))
+      if wide_bgr is not None:
+        data['wide_rgb'] = cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB)
 
     img = render_frame(
       data=data, frame_idx=idx, total=total,

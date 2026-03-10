@@ -24,6 +24,7 @@ Image preprocessing per frame (faithful modeld pipeline):
      Dual-cam: keep uint8, model normalizes internally
 """
 
+import json
 from pathlib import Path
 
 import cv2
@@ -39,6 +40,40 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 
 
 TEMPORAL_SKIP = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ  # 4
+
+
+def _load_metadata_jsonl(height_dir: Path) -> dict[str, dict]:
+  """Load metadata.jsonl → {frame_id_str: meta_dict}. Returns {} if not found."""
+  meta_path = height_dir / 'metadata.jsonl'
+  if not meta_path.exists():
+    return {}
+  result: dict[str, dict] = {}
+  with open(meta_path) as f:
+    for line in f:
+      line = line.strip()
+      if line:
+        m = json.loads(line)
+        result[f"{m['frame']:06d}"] = m
+  return result
+
+
+def _load_frame_data(path_str: str, meta_cache: dict[str, dict] | None = None) -> dict:
+  """Load a frame as a dict with road_rgb, wide_rgb, and metadata fields."""
+  p = Path(path_str)
+  frame_id = p.stem.replace('road_', '')
+  height_dir = p.parent
+  if meta_cache is None:
+    meta_cache = _load_metadata_jsonl(height_dir)
+  m = meta_cache.get(frame_id, {})
+  road_bgr = cv2.imread(str(p))
+  wide_bgr = cv2.imread(str(height_dir / f'wide_{frame_id}.png'))
+  return {
+    'road_rgb':      cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB) if road_bgr is not None else None,
+    'wide_rgb':      cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB) if wide_bgr is not None else None,
+    'camera_height': np.float32(m.get('camera_height', 1.22)),
+    'v_ego':         np.float32(m.get('v_ego', 0.0)),
+    'world_pose':    np.array(m.get('world_pose', [0.0]*6), dtype=np.float32),
+  }
 
 
 def transform_scale_buffer(M: np.ndarray, s: float) -> np.ndarray:
@@ -261,17 +296,20 @@ class DrivingDataset(Dataset):
     self.files: list[str] = []
     self.dir_boundaries: list[int] = []  # track directory boundaries for frame pairing
 
+    self._meta_cache: dict[str, dict[str, dict]] = {}
+
     for data_dir in sorted(data_dirs):
       data_path = Path(data_dir)
-      npz_files = sorted(data_path.glob("*.npz"))
-      if not npz_files:
+      frame_files = sorted(data_path.glob("road_*.png"))
+      if not frame_files:
         continue
       start_idx = len(self.files)
       self.dir_boundaries.append(start_idx)
-      self.files.extend([str(f) for f in npz_files])
+      self.files.extend([str(f) for f in frame_files])
+      self._meta_cache[str(data_path)] = _load_metadata_jsonl(data_path)
 
     if not self.files:
-      raise ValueError(f"No NPZ files found in {data_dirs}")
+      raise ValueError(f"No PNG frame files found in {data_dirs}")
 
     # Build set of directory start indices for efficient boundary check
     self._dir_starts = set(self.dir_boundaries)
@@ -288,11 +326,16 @@ class DrivingDataset(Dataset):
         return max(start, prev)
     return max(0, prev)
 
+  def _load(self, path_str: str) -> dict:
+    p = Path(path_str)
+    meta = self._meta_cache.get(str(p.parent))
+    return _load_frame_data(path_str, meta)
+
   def __getitem__(self, idx: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     # Load current and previous frames
-    curr_data = dict(np.load(self.files[idx], allow_pickle=True))
+    curr_data = self._load(self.files[idx])
     prev_idx = self._get_prev_idx(idx)
-    prev_data = dict(np.load(self.files[prev_idx], allow_pickle=True))
+    prev_data = self._load(self.files[prev_idx])
 
     # Preprocess frames to YUV420 6-channel
     prev_yuv = load_and_preprocess_frame(prev_data, self.camera_intrinsics)
@@ -404,21 +447,23 @@ class DualCameraDrivingDataset(Dataset):
     self.fcam_intrinsics = dc.fcam.intrinsics  # narrow camera
     self.ecam_intrinsics = dc.ecam.intrinsics  # wide camera
 
-    # Collect and sort all NPZ files per directory
+    # Collect and sort all frame files per directory
     self.files: list[str] = []
     self.dir_boundaries: list[int] = []
+    self._meta_cache: dict[str, dict[str, dict]] = {}
 
     for data_dir in sorted(data_dirs):
       data_path = Path(data_dir)
-      npz_files = sorted(data_path.glob("*.npz"))
-      if not npz_files:
+      frame_files = sorted(data_path.glob("road_*.png"))
+      if not frame_files:
         continue
       start_idx = len(self.files)
       self.dir_boundaries.append(start_idx)
-      self.files.extend([str(f) for f in npz_files])
+      self.files.extend([str(f) for f in frame_files])
+      self._meta_cache[str(data_path)] = _load_metadata_jsonl(data_path)
 
     if not self.files:
-      raise ValueError(f"No NPZ files found in {data_dirs}")
+      raise ValueError(f"No PNG frame files found in {data_dirs}")
 
     self._dir_starts = set(self.dir_boundaries)
 
@@ -433,6 +478,11 @@ class DualCameraDrivingDataset(Dataset):
         return max(start, prev)
     return max(0, prev)
 
+  def _load(self, path_str: str) -> dict:
+    p = Path(path_str)
+    meta = self._meta_cache.get(str(p.parent))
+    return _load_frame_data(path_str, meta)
+
   def _preprocess(self, rgb: np.ndarray, rpyCalib: np.ndarray,
                   intrinsics: np.ndarray, bigmodel_frame: bool) -> np.ndarray:
     """Preprocess raw RGB using faithful modeld pipeline (NV12 → warp Y/UV → loadyuv 6ch)."""
@@ -440,9 +490,9 @@ class DualCameraDrivingDataset(Dataset):
     return rgb_to_modeld_input(rgb, M)
 
   def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-    curr_data = dict(np.load(self.files[idx], allow_pickle=True))
+    curr_data = self._load(self.files[idx])
     prev_idx = self._get_prev_idx(idx)
-    prev_data = dict(np.load(self.files[prev_idx], allow_pickle=True))
+    prev_data = self._load(self.files[prev_idx])
 
     curr_rpyCalib = curr_data['rpyCalib'].astype(np.float64)
     prev_rpyCalib = prev_data['rpyCalib'].astype(np.float64)

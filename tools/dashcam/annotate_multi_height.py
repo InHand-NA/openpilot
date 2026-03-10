@@ -30,6 +30,7 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 # DEV must be set before importing tinygrad (same requirement as custom_modeld.py)
@@ -241,13 +242,13 @@ def annotate_session(
   h1_dir = session_dir / 'H1'
   if not h1_dir.exists():
     raise FileNotFoundError(f"H1 directory not found: {h1_dir}")
-  frame_files = sorted(h1_dir.glob('*.npz'))
-  if not frame_files:
-    raise ValueError(f"No NPZ files in {h1_dir}")
+  frame_ids = sorted(p.stem.replace('road_', '') for p in h1_dir.glob('road_*.png'))
+  if not frame_ids:
+    raise ValueError(f"No frames found in {h1_dir}")
 
   dev = os.environ.get('DEV', 'CUDA')
   print(f"Session: {session_dir.name}")
-  print(f"  Frames: {len(frame_files)}  Heights to annotate: {list(heights.keys())}")
+  print(f"  Frames: {len(frame_ids)}  Heights to annotate: {list(heights.keys())}")
   print(f"  pitch={clip_info['camera']['pitch_deg']:.1f}°  yaw={clip_info['camera']['yaw_deg']:.1f}°")
   print(f"  min_ll_prob={min_ll_prob}  DEV={dev}")
 
@@ -289,6 +290,44 @@ def annotate_session(
   road_buf: deque[np.ndarray] = deque(maxlen=TEMPORAL_SKIP + 1)
   wide_buf: deque[np.ndarray] = deque(maxlen=TEMPORAL_SKIP + 1)
 
+  # Load metadata.jsonl for each height (eager, O(N) once per height)
+  def _load_metadata(height_dir: Path) -> dict[str, dict]:
+    meta_path = height_dir / 'metadata.jsonl'
+    result: dict[str, dict] = {}
+    if not meta_path.exists():
+      return result
+    with open(meta_path) as f:
+      for line in f:
+        line = line.strip()
+        if line:
+          m = json.loads(line)
+          result[f"{m['frame']:06d}"] = m
+    return result
+
+  def _load_frame(frame_id: str, height_dir: Path, meta: dict[str, dict]) -> dict | None:
+    """Load one raw frame: PNG images + metadata."""
+    road_path = height_dir / f'road_{frame_id}.png'
+    wide_path  = height_dir / f'wide_{frame_id}.png'
+    if not road_path.exists() or not wide_path.exists():
+      return None
+    road_bgr = cv2.imread(str(road_path))
+    wide_bgr = cv2.imread(str(wide_path))
+    if road_bgr is None or wide_bgr is None:
+      return None
+    m = meta.get(frame_id, {})
+    return {
+      'road_rgb': cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB),
+      'wide_rgb': cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB),
+      'camera_height': np.float32(m.get('camera_height', 1.22)),
+      'v_ego':         np.float32(m.get('v_ego', 0.0)),
+      'world_pose':    np.array(m.get('world_pose', [0.0]*6), dtype=np.float32),
+    }
+
+  # Load per-height metadata caches
+  meta_cache: dict[str, dict[str, dict]] = {}
+  for tag_t in list(heights.keys()) + (['H1'] if 'H1' not in heights else []):
+    meta_cache[tag_t] = _load_metadata(session_dir / tag_t)
+
   # Separate read and write thread pools so prefetch reads and async writes
   # never compete for workers.
   n_heights = len(heights)
@@ -297,34 +336,32 @@ def annotate_session(
 
   PrefetchSlot = dict[str, Future]
 
-  def _load_npz(path: str) -> dict | None:
-    p = Path(path)
-    return dict(np.load(path, allow_pickle=True)) if p.exists() else None
-
   def _write_npz(path: str, data: dict) -> None:
     np.savez(path, **data)
 
-  def _submit_prefetch(fp: Path) -> PrefetchSlot:
-    slot: PrefetchSlot = {'H1': read_pool.submit(_load_npz, str(fp))}
+  def _submit_prefetch(fid: str) -> PrefetchSlot:
+    slot: PrefetchSlot = {
+      'H1': read_pool.submit(_load_frame, fid, h1_dir, meta_cache['H1'])
+    }
     for tag in heights:
       if tag != 'H1':
-        slot[tag] = read_pool.submit(_load_npz, str(session_dir / tag / fp.name))
+        slot[tag] = read_pool.submit(_load_frame, fid, session_dir / tag, meta_cache[tag])
     return slot
 
   # Pre-fill the prefetch pipeline before the main loop
   prefetch_queue: deque[PrefetchSlot] = deque()
-  for fp in frame_files[:PREFETCH_AHEAD]:
-    prefetch_queue.append(_submit_prefetch(fp))
+  for fid in frame_ids[:PREFETCH_AHEAD]:
+    prefetch_queue.append(_submit_prefetch(fid))
 
   import time
   t_start = time.monotonic()
 
   try:
-    for i, frame_path in enumerate(frame_files):
+    for i, frame_id in enumerate(frame_ids):
       # Submit read for the frame PREFETCH_AHEAD steps ahead
       next_idx = i + PREFETCH_AHEAD
-      if next_idx < len(frame_files):
-        prefetch_queue.append(_submit_prefetch(frame_files[next_idx]))
+      if next_idx < len(frame_ids):
+        prefetch_queue.append(_submit_prefetch(frame_ids[next_idx]))
 
       slot = prefetch_queue.popleft()
       h1_data = slot['H1'].result()
@@ -388,11 +425,11 @@ def annotate_session(
         out_data['label_source'] = np.bytes_(b'pretrained_h1')
         out_data['ll_quality_pass'] = np.bool_(passes)
 
-        write_pool.submit(_write_npz, str(output_dir / tag / frame_path.name), out_data)
+        write_pool.submit(_write_npz, str(output_dir / tag / f'{frame_id}.npz'), out_data)
 
       # Progress log
       n_done = stats['H1_inferred']
-      if n_done % 500 == 0 or n_done == len(frame_files):
+      if n_done % 500 == 0 or n_done == len(frame_ids):
         elapsed = time.monotonic() - t_start
         fps = n_done / elapsed if elapsed > 0 else 0
         eta = (len(frame_files) - n_done) / fps if fps > 0 else 0
