@@ -232,6 +232,7 @@ def render_grid(
   heights_info: dict[str, float],
   idx: int,
   total: int,
+  frame_num: str,
   rpyCalib: np.ndarray,
   warp_road: np.ndarray,
   warp_wide: np.ndarray,
@@ -274,7 +275,7 @@ def render_grid(
   cam = clip_info.get('camera', {})
   pitch, yaw = cam.get('pitch_deg', 0.0), cam.get('yaw_deg', 0.0)
   cam_name = 'NARROW' if cam_idx == 0 else 'WIDE'
-  status = (f"Frame {idx}/{total - 1}   "
+  status = (f"Frame {frame_num}   "
             f"{clip_info.get('map', '?')} {clip_info.get('weather', '?')}   "
             f"pitch={pitch:.1f}° yaw={yaw:.1f}°   [{cam_name}]   "
             f"Tab=cam  g=single  a/z/l/e/v/r  f=filter  s=shot  q=quit")
@@ -307,6 +308,7 @@ def render_single(
   min_ll_prob: float,
   idx: int,
   total: int,
+  frame_num: str,
 ) -> np.ndarray:
   panel = render_panel(
     data=data, tag=tag, height_m=height_m,
@@ -322,7 +324,7 @@ def render_single(
   ll_prob  = data.get('lane_lines_prob', np.zeros(4))
   prob_bar = np.zeros((30, DISPLAY_W, 3), dtype=np.uint8)
   draw_prob_bar(prob_bar, ll_prob, 1, min_ll_prob)
-  hint = (f"Frame {idx}/{total - 1}   1-6=height  g=grid  Tab=cam  "
+  hint = (f"Frame {frame_num}   1-6=height  g=grid  Tab=cam  "
           f"a/z/l/e/v/b/r  f=filter  s=screenshot  q=quit")
   cv2.putText(prob_bar, hint, (6, 24),
               cv2.FONT_HERSHEY_SIMPLEX, 0.40, (160, 160, 160), 1, cv2.LINE_AA)
@@ -427,6 +429,7 @@ def main():
 
   while True:
     frame_name = frame_files_per_height[tags[0]][idx].name
+    frame_num  = frame_files_per_height[tags[0]][idx].stem  # original tick-based frame id
 
     data_per_height: dict[str, dict | None] = {}
     for tag in tags:
@@ -460,7 +463,7 @@ def main():
     if grid_mode:
       img = render_grid(
         data_per_height=data_per_height, tags=tags,
-        heights_info=heights_info, idx=idx, total=total,
+        heights_info=heights_info, idx=idx, total=total, frame_num=frame_num,
         rpyCalib=rpyCalib,
         warp_road=warp_road, warp_wide=warp_wide, K_road=K_road, K_wide=K_wide,
         clip_info=clip_info, cam_idx=cam_idx,
@@ -480,12 +483,12 @@ def main():
         show_ann=show_ann, show_lanes=show_lanes, show_edges=show_edges,
         show_leads=show_leads, show_z=show_z, show_bev=show_bev,
         show_raw=show_raw, min_ll_prob=min_ll_prob,
-        idx=idx, total=total,
+        idx=idx, total=total, frame_num=frame_num,
       )
 
     cam_name = 'NARROW' if cam_idx == 0 else 'WIDE'
     mode_str = 'GRID' if grid_mode else f'SINGLE {tags[single_tag_idx % len(tags)]}'
-    cv2.setWindowTitle(win, f"[{idx}/{total-1}] {mode_str} [{cam_name}] | {annotated_dir.name}")
+    cv2.setWindowTitle(win, f"[{frame_num}] {mode_str} [{cam_name}] | {annotated_dir.name}")
     cv2.imshow(win, img)
 
     key = cv2.waitKeyEx(0)

@@ -119,9 +119,11 @@ def render_grid(
     cv2.rectangle(bgr, (0, 0), (180, 28), (0, 0, 0), -1)
     cv2.putText(bgr, label, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 1, cv2.LINE_AA)
 
-    # Frame number (top-right)
+    # Frame number (top-right) — show original tick-based frame id from filename
     total_h = len(files)
-    fn_text = f"{idx:06d}/{total_h - 1:06d}"
+    frame_id = files[idx].stem.replace('road_', '')
+    last_id  = files[-1].stem.replace('road_', '')
+    fn_text = f"{frame_id}/{last_id}"
     (tw, _), _ = cv2.getTextSize(fn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
     cv2.putText(bgr, fn_text, (panel_w - tw - 6, 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
@@ -144,7 +146,11 @@ def render_grid(
     pitch = cam.get('pitch_deg', 0.0)
     yaw = cam.get('yaw_deg', 0.0)
     cam_label = 'wide' if show_wide else 'road'
-    info = (f"Frame {idx}   map={map_name}  weather={weather}  "
+    # Derive original frame number from first height's filename
+    first_tag = list(frame_files_per_height.keys())[0]
+    first_files = frame_files_per_height[first_tag]
+    disp_frame_id = first_files[idx].stem.replace('road_', '') if idx < len(first_files) else f"{idx:06d}"
+    info = (f"Frame {disp_frame_id}   map={map_name}  weather={weather}  "
             f"pitch={pitch:.1f}°  yaw={yaw:.1f}°   [{cam_label.upper()} cam]   "
             f"w=toggle wide  s=screenshot  q=quit")
     cv2.putText(bar, info, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
@@ -224,7 +230,8 @@ def main():
   while True:
     img = render_grid(frame_files_per_height, heights_info, idx, clip_info,
                       show_wide, show_info)
-    cv2.setWindowTitle(win, f"[{idx}/{total - 1}] {session_dir.name}")
+    fid = frame_files_per_height[tags[0]][idx].stem.replace('road_', '')
+    cv2.setWindowTitle(win, f"[{fid}] {session_dir.name}")
     cv2.imshow(win, img)
 
     key = cv2.waitKeyEx(0)

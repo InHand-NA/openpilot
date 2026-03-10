@@ -408,7 +408,7 @@ def draw_prob_bar(img: np.ndarray, probs: np.ndarray, y0: int, min_prob: float) 
 
 def render_frame(
   data: dict,
-  frame_idx: int,
+  frame_idx: str,
   total: int,
   height_tag: str,
   height_m: float,
@@ -484,7 +484,7 @@ def render_frame(
     yaw_d     = math.degrees(rpyCalib[2])
 
     lines = [
-      (f"Frame: {frame_idx}/{total - 1}", (255, 255, 255)),
+      (f"Frame: {frame_idx}", (255, 255, 255)),
       (f"Speed: {v_ego:.1f} m/s  ({v_ego * 3.6:.1f} km/h)", (255, 255, 255)),
       (f"pitch={pitch_d:+.2f}deg  yaw={yaw_d:+.2f}deg  h={camera_height:.2f}m",
        (255, 255, 255)),
@@ -622,8 +622,9 @@ def main():
       if wide_bgr is not None:
         data['wide_rgb'] = cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB)
 
+    frame_num = frame_files[idx].stem  # original tick-based frame id from filename
     img = render_frame(
-      data=data, frame_idx=idx, total=total,
+      data=data, frame_idx=frame_num, total=total,
       height_tag=height_tag, height_m=height_m,
       rpyCalib=rpyCalib,
       warp_road=warp_road, warp_wide=warp_wide,
@@ -636,7 +637,7 @@ def main():
 
     cam_name = 'NARROW' if cam_idx == 0 else 'WIDE'
     cv2.setWindowTitle(win,
-      f"[{idx}/{total-1}] {height_tag} {height_m:.2f}m  [{cam_name}] | {annotated_dir.name}")
+      f"[{frame_num}] {height_tag} {height_m:.2f}m  [{cam_name}] | {annotated_dir.name}")
     cv2.imshow(win, img)
 
     key = cv2.waitKeyEx(0)
