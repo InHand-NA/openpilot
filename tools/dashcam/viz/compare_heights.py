@@ -54,6 +54,7 @@ from openpilot.tools.dashcam.viz.inspect_annotated import (
   draw_leads,
   draw_bev,
   draw_prob_bar,
+  _load_json_annotation,
   KEY_LEFT, KEY_RIGHT, KEY_PGUP, KEY_PGDN, KEY_HOME, KEY_END, KEY_TAB,
   MODEL_W, MODEL_H,
   DISPLAY_W, DISPLAY_H,    # 1024 × 512 — full render size
@@ -104,8 +105,8 @@ def _load_rgb(source_session_dir: Path | None,
               tag: str, frame_name: str) -> tuple[np.ndarray | None, np.ndarray | None]:
   """Load road_rgb / wide_rgb from the original session directory.
 
-  Supports PNG format (road_*.png / wide_*.png).
-  frame_name is the annotated npz filename, e.g. '000001.npz'.
+  frame_name is the annotation filename, e.g. '000004.json'; stem is used to
+  locate the matching 'road_000004.png' / 'wide_000004.png' source images.
   """
   if source_session_dir is None:
     return None, None
@@ -379,10 +380,11 @@ def main():
   source_session_dir: Path | None = None
   src = clip_info.get('source_session_dir')
   if src:
-    p = Path(src)
+    # Resolve relative to annotated_dir (e.g. '..' → parent session dir)
+    p = (annotated_dir / src).resolve()
     source_session_dir = p if p.exists() else None
     if source_session_dir is None:
-      print(f"WARN: source_session_dir not found: {src}", file=sys.stderr)
+      print(f"WARN: source_session_dir not found: {p}", file=sys.stderr)
 
   all_tags = sorted([d.name for d in annotated_dir.iterdir()
                      if d.is_dir() and d.name.startswith('H') and d.name[1:].isdigit()])
@@ -392,12 +394,12 @@ def main():
 
   frame_files_per_height: dict[str, list[Path]] = {}
   for tag in tags:
-    files = sorted((annotated_dir / tag).glob('*.npz'))
+    files = sorted((annotated_dir / tag).glob('*.json'))
     if files:
       frame_files_per_height[tag] = files
   tags = [t for t in tags if t in frame_files_per_height]
   if not tags:
-    print("ERROR: no NPZ frames found", file=sys.stderr); sys.exit(1)
+    print("ERROR: no JSON annotation files found", file=sys.stderr); sys.exit(1)
 
   total = min(len(frame_files_per_height[t]) for t in tags)
   idx   = max(0, min(args.start, total - 1))
@@ -438,17 +440,16 @@ def main():
         data_per_height[tag] = None
         continue
       try:
-        d = dict(np.load(files[idx], allow_pickle=True))
+        d = _load_json_annotation(files[idx])
       except Exception:
         data_per_height[tag] = None
         continue
-      # Load RGB from source_session_dir if not embedded in annotated NPZ
-      if 'road_rgb' not in d or 'wide_rgb' not in d:
-        road_rgb, wide_rgb = _load_rgb(source_session_dir, tag, frame_name)
-        if road_rgb is not None:
-          d['road_rgb'] = road_rgb
-        if wide_rgb is not None:
-          d['wide_rgb'] = wide_rgb
+      # JSON never embeds images — always load RGB from source_session_dir
+      road_rgb, wide_rgb = _load_rgb(source_session_dir, tag, frame_name)
+      if road_rgb is not None:
+        d['road_rgb'] = road_rgb
+      if wide_rgb is not None:
+        d['wide_rgb'] = wide_rgb
       data_per_height[tag] = d
 
     # Filter-low: advance past frames where all heights are PASS

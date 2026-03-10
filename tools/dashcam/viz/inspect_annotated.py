@@ -61,6 +61,34 @@ X_IDXS = np.array(ModelConstants.X_IDXS, dtype=np.float32)   # (33,) forward dis
 MIN_DRAW_DISTANCE = 2.0
 MAX_DRAW_DISTANCE = 100.0
 
+# ---------------------------------------------------------------------------
+# JSON annotation loader
+# ---------------------------------------------------------------------------
+
+# Fields stored as nested lists in JSON that must be converted back to float32 arrays.
+_ARRAY_FIELDS: dict[str, type] = {
+  'lane_lines':             np.float32,
+  'lane_lines_prob':        np.float32,
+  'road_edges':             np.float32,
+  'road_edges_prob':        np.float32,
+  'lead':                   np.float32,
+  'lead_prob':              np.float32,
+  'pose':                   np.float32,
+  'road_transform':         np.float32,
+  'wide_from_device_euler': np.float32,
+  'world_pose':             np.float32,
+}
+
+
+def _load_json_annotation(path: Path) -> dict:
+  """Load a JSON annotation file and convert list fields back to numpy arrays."""
+  with open(path) as f:
+    record = json.load(f)
+  for key, dtype in _ARRAY_FIELDS.items():
+    if key in record:
+      record[key] = np.array(record[key], dtype=dtype)
+  return record
+
 # Polygon clip margin beyond display bounds (pixels)
 CLIP_MARGIN = 200
 
@@ -564,10 +592,11 @@ def main():
   source_session_dir: Path | None = None
   src = clip_info.get('source_session_dir')
   if src:
-    p = Path(src)
+    # Resolve relative to annotated_dir (e.g. '..' → parent session dir)
+    p = (annotated_dir / src).resolve()
     source_session_dir = p if p.exists() else None
     if source_session_dir is None:
-      print(f"WARN: source_session_dir not found: {src}", file=sys.stderr)
+      print(f"WARN: source_session_dir not found: {p}", file=sys.stderr)
 
   all_tags = sorted([d.name for d in annotated_dir.iterdir()
                      if d.is_dir() and d.name.startswith('H') and d.name[1:].isdigit()])
@@ -578,7 +607,7 @@ def main():
   height_tag = all_tags[current_height_idx]
 
   def get_frame_files(tag: str) -> list[Path]:
-    return sorted((annotated_dir / tag).glob('*.npz'))
+    return sorted((annotated_dir / tag).glob('*.json'))
 
   frame_files = get_frame_files(height_tag)
   total = len(frame_files)
@@ -606,23 +635,21 @@ def main():
   cv2.resizeWindow(win, DISPLAY_W + BEV_W, DISPLAY_H + 30)
 
   while True:
-    data     = dict(np.load(frame_files[idx], allow_pickle=True))
+    data     = _load_json_annotation(frame_files[idx])
     height_m = heights_info.get(height_tag, float(data.get('camera_height', 1.22)))
 
-    # Load RGB from original session if not embedded in annotated NPZ
-    if 'road_rgb' not in data and source_session_dir is not None:
-      stem = frame_files[idx].stem  # e.g. '000001'
+    # JSON never embeds images — always load RGB from source_session_dir
+    stem = frame_files[idx].stem  # original tick-based frame id, e.g. '000004'
+    if source_session_dir is not None:
       height_dir = source_session_dir / height_tag
-      road_png = height_dir / f'road_{stem}.png'
-      wide_png  = height_dir / f'wide_{stem}.png'
-      road_bgr = cv2.imread(str(road_png))
+      road_bgr = cv2.imread(str(height_dir / f'road_{stem}.png'))
+      wide_bgr = cv2.imread(str(height_dir / f'wide_{stem}.png'))
       if road_bgr is not None:
         data['road_rgb'] = cv2.cvtColor(road_bgr, cv2.COLOR_BGR2RGB)
-      wide_bgr = cv2.imread(str(wide_png))
       if wide_bgr is not None:
         data['wide_rgb'] = cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB)
 
-    frame_num = frame_files[idx].stem  # original tick-based frame id from filename
+    frame_num = stem  # already computed above
     img = render_frame(
       data=data, frame_idx=frame_num, total=total,
       height_tag=height_tag, height_m=height_m,

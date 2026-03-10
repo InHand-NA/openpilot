@@ -5,13 +5,13 @@ Uses tinygrad (TinyJit pkl) for inference, matching the custom_modeld.py pipelin
 ONNX model is auto-compiled to a tinygrad pkl on first run.
 
 Output per annotated height directory:
-  <output_dir>/<tag>/<frame_id>.json          ← labels (JSON)
-  <output_dir>/<tag>/road_input_<frame_id>.png ← preprocessed road YUV (768×256 grayscale)
-  <output_dir>/<tag>/wide_input_<frame_id>.png ← preprocessed wide YUV (768×256 grayscale)
+  <output_dir>/<tag>/<frame_id>.json  ← labels + metadata (JSON)
 
-The YUV input PNGs encode the model input tensor (6, 128, 256) uint8 stacked
-vertically as a (768, 256) grayscale image. Reconstruction:
-  yuv = cv2.imread(path, cv2.IMREAD_GRAYSCALE).reshape(6, 128, 256)
+The JSON contains scalar metadata (camera_height, v_ego, world_pose) and all
+model output arrays serialised as nested Python lists (lane_lines, road_edges,
+lead, pose, road_transform, lane_lines_prob, lead_prob, wide_from_device_euler).
+Preprocessed model input images are NOT saved here; the training pipeline reads
+original RGB frames from source_session_dir and preprocesses on the fly.
 
 Usage:
   python tools/dashcam/annotate_multi_height.py \\
@@ -216,16 +216,12 @@ def _write_annotation(
   src_data: dict,
   canonical: dict,
   passes: bool,
-  road_yuv: np.ndarray,
-  wide_yuv: np.ndarray,
 ) -> None:
-  """Write annotation JSON + preprocessed model input PNGs to out_dir.
+  """Write annotation JSON to out_dir.
 
-  JSON contains all scalar metadata and label arrays (as nested Python lists).
-  PNG files encode the model input YUV tensor (6, 128, 256) uint8 as a
-  (768, 256) grayscale image (6 planes stacked vertically).
+  JSON contains scalar metadata (camera_height, v_ego, world_pose) and all
+  label arrays serialised as nested Python lists.
   """
-  # Build JSON record: scalars and numpy arrays → Python native types
   record: dict = {
     'frame_id':        frame_id,
     'camera_height':   float(src_data.get('camera_height', 1.22)),
@@ -239,15 +235,6 @@ def _write_annotation(
   with open(out_dir / f'{frame_id}.json', 'w') as f:
     json.dump(record, f)
 
-  # Preprocessed YUV inputs: (6, 128, 256) uint8 → stacked (768, 256) grayscale PNG
-  # Reconstruction: cv2.imread(path, cv2.IMREAD_GRAYSCALE).reshape(6, 128, 256)
-  cv2.imwrite(str(out_dir / f'road_input_{frame_id}.png'),
-              road_yuv.reshape(6 * 128, 256),
-              [cv2.IMWRITE_PNG_COMPRESSION, 1])
-  cv2.imwrite(str(out_dir / f'wide_input_{frame_id}.png'),
-              wide_yuv.reshape(6 * 128, 256),
-              [cv2.IMWRITE_PNG_COMPRESSION, 1])
-
 
 def annotate_session(
   session_dir: Path,
@@ -257,7 +244,7 @@ def annotate_session(
   min_ll_prob: float,
   use_gpu_preprocess: bool = True,
 ) -> dict:
-  """Annotate all frames in session_dir, write JSON + input PNGs to output_dir.
+  """Annotate all frames in session_dir, write JSON labels to output_dir.
 
   Returns stats dict with counts per height.
   """
@@ -452,18 +439,15 @@ def annotate_session(
       passes = bool(ll_prob[1] > min_ll_prob and ll_prob[2] > min_ll_prob)
 
       for tag, h_k in heights.items():
-        # Get source frame data and preprocess this height's camera images
+        # Get source frame metadata for this height
         if tag == 'H1':
           src_data = h1_data
-          road_yuv_hk = road_yuv
-          wide_yuv_hk = wide_yuv
           canonical_hk = canonical_h1
         else:
           src_data = slot[tag].result()
           if src_data is None:
             continue
           canonical_hk = transform_annotation(canonical_h1, h1=h1_height, h_k=h_k)
-          road_yuv_hk, wide_yuv_hk = _preprocess(src_data)
 
         stats[tag]['total'] += 1
         stats[tag]['pass' if passes else 'fail'] += 1
@@ -471,7 +455,6 @@ def annotate_session(
         write_pool.submit(
           _write_annotation,
           output_dir / tag, frame_id, src_data, canonical_hk, passes,
-          road_yuv_hk, wide_yuv_hk,
         )
 
       # Progress log
