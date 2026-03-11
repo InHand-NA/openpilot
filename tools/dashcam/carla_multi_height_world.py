@@ -166,9 +166,11 @@ class MultiHeightCarlaWorld:
       return cam
 
     for slot in camera_slots:
+      # Convert openpilot convention (positive pitch=down, positive yaw=right)
+      # to Carla/UE4 left-handed convention (positive pitch=up, positive yaw=left)
       t = carla.Transform(
         carla.Location(x=camera_forward_offset_m, z=slot.height),
-        carla.Rotation(pitch=-camera_pitch_deg, yaw=camera_yaw_deg),
+        carla.Rotation(pitch=-camera_pitch_deg, yaw=-camera_yaw_deg),
       )
       road_cam = create_camera(fov=40, transform=t, callback=self._make_callback(slot.tag, 'road'))
       wide_cam = create_camera(fov=120, transform=t, callback=self._make_callback(slot.tag, 'wide'))
