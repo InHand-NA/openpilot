@@ -7,25 +7,30 @@
 
 ## 目录
 
-- [1. 总体数据流程](#1-总体数据流程)
-- [2. 目录结构与数据格式](#2-目录结构与数据格式)
-- [3. 采集与标注工具](#3-采集与标注工具)
-  - [3.1 carla\_multi\_height\_world.py — Carla 多高度仿真环境](#31-carla_multi_height_worldpy--carla-多高度仿真环境)
-  - [3.2 collect\_multi\_height.py — 单 session 采集](#32-collect_multi_heightpy--单-session-采集)
-  - [3.3 run\_full\_collection.py — 批量采集编排器](#33-run_full_collectionpy--批量采集编排器)
-  - [3.4 annotate\_multi\_height.py — 离线标注](#34-annotate_multi_heightpy--离线标注)
-  - [3.5 annotate\_batch.py — 批量标注](#35-annotate_batchpy--批量标注)
-- [4. 辅助模块](#4-辅助模块)
-  - [4.1 modeld\_preprocess\_cl.py — GPU 预处理](#41-modeld_preprocess_clpy--gpu-预处理)
-  - [4.2 lead\_ground\_truth.py — 前车真值提取](#42-lead_ground_truthpy--前车真值提取)
-  - [4.3 pose\_ground\_truth.py — 位姿真值提取](#43-pose_ground_truthpy--位姿真值提取)
-  - [4.4 modeld\_label\_extractor.py — 在线标签提取](#44-modeld_label_extractorpy--在线标签提取)
-- [5. 可视化工具](#5-可视化工具)
-  - [5.1 viz/inspect\_annotated.py — 单高度标注检查](#51-vizinspect_annotatedpy--单高度标注检查)
-  - [5.2 viz/compare\_heights.py — 多高度对比](#52-vizcompare_heightspy--多高度对比)
-  - [5.3 viz/label\_stats.py — 定量统计](#53-vizlabel_statspy--定量统计)
-- [6. 端到端运行示例](#6-端到端运行示例)
-- [7. 关键设计决策](#7-关键设计决策)
+- [多高度数据采集与标注工具技术文档](#多高度数据采集与标注工具技术文档)
+  - [目录](#目录)
+  - [1. 总体数据流程](#1-总体数据流程)
+  - [2. 目录结构与数据格式](#2-目录结构与数据格式)
+    - [2.1 采集输出目录结构](#21-采集输出目录结构)
+    - [2.2 clip\_info.json 格式](#22-clip_infojson-格式)
+    - [2.3 metadata.jsonl 格式（每帧一行）](#23-metadatajsonl-格式每帧一行)
+    - [2.4 标注 JSON 格式（canonical）](#24-标注-json-格式canonical)
+  - [3. 采集与标注工具](#3-采集与标注工具)
+    - [3.1 `carla_multi_height_world.py` — Carla 多高度仿真环境](#31-carla_multi_height_worldpy--carla-多高度仿真环境)
+    - [3.2 `collect_multi_height.py` — 单 session 采集](#32-collect_multi_heightpy--单-session-采集)
+    - [3.3 `run_full_collection.py` — 批量采集编排器](#33-run_full_collectionpy--批量采集编排器)
+    - [3.4 `annotate_multi_height.py` — 离线标注](#34-annotate_multi_heightpy--离线标注)
+    - [3.5 `annotate_batch.py` — 批量标注](#35-annotate_batchpy--批量标注)
+  - [4. 辅助模块](#4-辅助模块)
+    - [4.1 `modeld_preprocess_cl.py` — GPU 预处理](#41-modeld_preprocess_clpy--gpu-预处理)
+  - [5. 可视化工具](#5-可视化工具)
+    - [5.1 `viz/inspect_annotated.py` — 单高度标注检查](#51-vizinspect_annotatedpy--单高度标注检查)
+    - [5.2 `viz/compare_heights.py` — 多高度对比](#52-vizcompare_heightspy--多高度对比)
+    - [5.3 `viz/label_stats.py` — 定量统计](#53-vizlabel_statspy--定量统计)
+  - [6. 端到端运行示例](#6-端到端运行示例)
+    - [6.1 快速验证（单 session）](#61-快速验证单-session)
+    - [6.2 批量训练数据采集](#62-批量训练数据采集)
+  - [7. 关键设计决策](#7-关键设计决策)
 
 ---
 
@@ -498,37 +503,6 @@ Stage 3 (loadyuv.cl):      Y/U/V → 6-channel [y0, y1, y2, y3, U, V] (6×128×2
 with ModeldInputPreprocessorCL() as pp:
     yuv = pp.process(bgr, warp_matrix)  # (6, 128, 256) uint8
 ```
-
-### 4.2 `lead_ground_truth.py` — 前车真值提取
-
-**文件路径：** `tools/dashcam/lead_ground_truth.py`（类名 `LeadGroundTruth`）
-
-从 Carla world actors 中提取前方车辆的 3D 位置、速度、加速度，转为 openpilot lead 格式。
-
-**输出格式：** `lead_data (3,6,4)` + `lead_prob (3,)` — 与模型输出完全一致
-
-**过滤条件：**
-- 前向距离：2.0 ~ 200.0m
-- 横向距离：< 2.0m（同车道宽度）
-- 高度：-1.0 ~ 5.0m（排除天桥）
-- 加速度 clip：-10 ~ 5 m/s²
-
-**三个 lead 选择对应时间偏移 0s / 2s / 4s（非三辆车）。**
-
-### 4.3 `pose_ground_truth.py` — 位姿真值提取
-
-**文件路径：** `tools/dashcam/pose_ground_truth.py`（类名 `PoseGroundTruth`）
-
-从连续 Carla 帧计算：
-- `pose (6,)`：平移速度(m/s) + 角速度(rad/s)，calibrated frame
-- `road_transform (6,)`：`[0, 0, camera_height, 0, 0, 0]`
-- `wide_from_device_euler (3,)`：广角相机相对窄焦的固定欧拉角
-
-### 4.4 `modeld_label_extractor.py` — 在线标签提取
-
-**文件路径：** `tools/dashcam/modeld_label_extractor.py`（类名 `ModeldLabelExtractor`）
-
-从 cereal `modelV2` + `cameraOdometry` 消息提取标签，用于在线采集（`run.py` 流水线）。输出格式与离线标注完全一致。
 
 ---
 
