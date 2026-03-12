@@ -1,116 +1,122 @@
-# 多高度数据采集与标注软件工具开发规划
+# 多高度数据采集与标注工具技术文档
 
-> 本文件是 [height_extension_design.md](height_extension_design.md) 第 4、5 节的软件实现规划。
-> 目标：开发 Carla 多高度同步采集 + 离线标注流水线，为多高度模型微调提供训练数据。
+> 本文档描述 Carla 多高度同步数据采集 + 离线标注流水线的完整实现。
+> 基于 [height_extension_design.md](height_extension_design.md) 第 4、5 节的设计，已全部完成开发。
 
 ---
 
 ## 目录
 
-- [多高度数据采集与标注软件工具开发规划](#多高度数据采集与标注软件工具开发规划)
-  - [目录](#目录)
-  - [1. 总体数据流程](#1-总体数据流程)
-  - [2. 目录结构设计](#2-目录结构设计)
-  - [3. 软件工具规划（采集与标注）](#3-软件工具规划采集与标注)
-    - [3.1 `carla_multi_height_world.py`（新建）](#31-carla_multi_height_worldpy新建)
-    - [3.2 `collect_multi_height.py`（新建）](#32-collect_multi_heightpy新建)
-    - [3.3 `annotate_multi_height.py`（新建）](#33-annotate_multi_heightpy新建)
-    - [3.4 `preprocess_cache.py`（修改）](#34-preprocess_cachepy修改)
-    - [3.5 `dataset.py`（修改）](#35-datasetpy修改)
-  - [4. 可视化工具规划](#4-可视化工具规划)
-    - [4.0 可视化基础设施与复用策略](#40-可视化基础设施与复用策略)
-    - [4.1 `viz/browse_raw_session.py`（新建）](#41-vizbrowse_raw_sessionpy新建)
-    - [4.2 `viz/inspect_annotated.py`（新建）](#42-vizinspect_annotatedpy新建)
-    - [4.3 `viz/compare_heights.py`（新建）](#43-vizcompare_heightspy新建)
-    - [4.4 `viz/label_stats.py`（新建）](#44-vizlabel_statspy新建)
-  - [5. 快速验证阶段运行步骤](#5-快速验证阶段运行步骤)
-  - [6. 实施顺序与依赖关系](#6-实施顺序与依赖关系)
-  - [7. 关键设计决策记录](#7-关键设计决策记录)
+- [1. 总体数据流程](#1-总体数据流程)
+- [2. 目录结构与数据格式](#2-目录结构与数据格式)
+- [3. 采集与标注工具](#3-采集与标注工具)
+  - [3.1 carla\_multi\_height\_world.py — Carla 多高度仿真环境](#31-carla_multi_height_worldpy--carla-多高度仿真环境)
+  - [3.2 collect\_multi\_height.py — 单 session 采集](#32-collect_multi_heightpy--单-session-采集)
+  - [3.3 run\_full\_collection.py — 批量采集编排器](#33-run_full_collectionpy--批量采集编排器)
+  - [3.4 annotate\_multi\_height.py — 离线标注](#34-annotate_multi_heightpy--离线标注)
+  - [3.5 annotate\_batch.py — 批量标注](#35-annotate_batchpy--批量标注)
+- [4. 辅助模块](#4-辅助模块)
+  - [4.1 modeld\_preprocess\_cl.py — GPU 预处理](#41-modeld_preprocess_clpy--gpu-预处理)
+  - [4.2 lead\_ground\_truth.py — 前车真值提取](#42-lead_ground_truthpy--前车真值提取)
+  - [4.3 pose\_ground\_truth.py — 位姿真值提取](#43-pose_ground_truthpy--位姿真值提取)
+  - [4.4 modeld\_label\_extractor.py — 在线标签提取](#44-modeld_label_extractorpy--在线标签提取)
+- [5. 可视化工具](#5-可视化工具)
+  - [5.1 viz/inspect\_annotated.py — 单高度标注检查](#51-vizinspect_annotatedpy--单高度标注检查)
+  - [5.2 viz/compare\_heights.py — 多高度对比](#52-vizcompare_heightspy--多高度对比)
+  - [5.3 viz/label\_stats.py — 定量统计](#53-vizlabel_statspy--定量统计)
+- [6. 端到端运行示例](#6-端到端运行示例)
+- [7. 关键设计决策](#7-关键设计决策)
 
 ---
 
 ## 1. 总体数据流程
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│  Step A：Carla 多高度同步采集                                          │
-│  collect_multi_height.py + carla_multi_height_world.py               │
-│                                                                      │
-│  Carla 仿真（单次运行）                                                │
-│    ├── H1 窄焦+宽焦相机 ──→ H1/{帧号}.npz  (road_rgb, wide_rgb, meta) │
-│    ├── H2 窄焦+宽焦相机 ──→ H2/{帧号}.npz                             │
-│    ├── ...                                                           │
-│    └── H6 窄焦+宽焦相机 ──→ H6/{帧号}.npz                             │
-│                                                                      │
-│  clip_info.json：记录本 session 的 pitch, yaw, height, map, weather   │
-└──────────────────────────────────────────┬───────────────────────────┘
-                                           │
-                                           ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  Step B：离线标注（annotate_multi_height.py）                          │
-│                                                                      │
-│  H1/{帧号}.npz (road_rgb, wide_rgb)                                  │
-│    → 从 clip_info.json 读取 pitch/yaw（方案A）                        │
-│    → get_warp_matrix([0, pitch_rad, yaw_rad], NARROW_CAM_INTRINSICS) │
-│    → PretrainedVisionModel 推理 → 977 维标注 flat_h1                  │
-│    → 质量过滤：lane_lines_prob[1,2] > 0.5                             │
-│    → transform_annotation(flat_h1, h1=1.22, h_k) × 5 次             │
-│    → 写回 H1~H6/{帧号}.npz（追加标注字段）                             │
-└──────────────────────────────────────────┬───────────────────────────┘
-                                           │
-                                           ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  Step C：预处理缓存（preprocess_cache.py，已有，小幅修改）              │
-│                                                                      │
-│  H1~H6/{帧号}.npz（含 road_rgb, wide_rgb, 标注）                      │
-│    → 从 clip_info.json 读 pitch/yaw（方案A，替代 rpyCalib）            │
-│    → get_warp_matrix → warp → YUV420 (6,128,256) uint8               │
-│    → 1FPS 抽样（每 20 帧保留 1 帧）                                    │
-│    → H1~H6_cache/{帧号}.npz（road_yuv, wide_yuv, 标注张量）           │
-└──────────────────────────────────────────┬───────────────────────────┘
-                                           │
-                                           ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  Step D：模型训练（train.py，后续规划）                                 │
-│  输入：H1~H6_cache/ 多目录                                            │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Step A：Carla 多高度同步采集                                              │
+│  run_full_collection.py → collect_multi_height.py                        │
+│  + carla_multi_height_world.py                                           │
+│                                                                          │
+│  Carla 仿真（单次运行，6高度×2相机同步）                                     │
+│    ├── H1/ road_000000.png, wide_000000.png, metadata.jsonl              │
+│    ├── H2/ road_000000.png, wide_000000.png, metadata.jsonl              │
+│    ├── ...                                                               │
+│    └── H6/ road_000000.png, wide_000000.png, metadata.jsonl              │
+│  clip_info.json：记录 pitch, yaw, heights, map, weather, save_every      │
+└──────────────────────────────────┬───────────────────────────────────────┘
+                                   │
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Step B：离线标注（annotate_batch.py → annotate_multi_height.py）          │
+│                                                                          │
+│  H1/*.png (road + wide 双目图像)                                          │
+│    → 从 clip_info.json 读取 pitch/yaw                                     │
+│    → get_warp_matrix([0, pitch_rad, yaw_rad], K) 计算 warp 矩阵           │
+│    → GPU OpenCL 预处理 → YUV420 (6,128,256) uint8                        │
+│    → tinygrad TinyJit pkl 推理（prev + curr 双帧输入）                     │
+│    → decode_model_output() 解码 MDN → canonical 标注                      │
+│    → 质量过滤：lane_lines_prob[L-inn] > threshold AND [R-inn] > threshold │
+│    → transform_annotation(h1→h_k) × 5 次：z += delta_h                   │
+│    → 写入 annotations/{H1..H6}/{frame_id}.json                           │
+└──────────────────────────────────┬───────────────────────────────────────┘
+                                   │
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Step C：预处理缓存（preprocess_cache.py）                                 │
+│                                                                          │
+│  annotations/{H_k}/{frame}.json + 源 session PNG 图像                     │
+│    → 从 clip_info.json 读取 pitch/yaw                                     │
+│    → get_warp_matrix → warp → YUV420 (6,128,256) uint8                   │
+│    → 提取标注张量 + camera_height                                          │
+│    → {H_k}_cache/{frame}.npz（road_yuv, wide_yuv, 标注张量）              │
+└──────────────────────────────────┬───────────────────────────────────────┘
+                                   │
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Step D：模型训练（train.py）                                              │
+│  输入：多个 {H_k}_cache/ 目录                                              │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. 目录结构设计
+## 2. 目录结构与数据格式
+
+### 2.1 采集输出目录结构
 
 ```
-data/multi_height/
-  {session_tag}/               # 单次采集 session（一种 pitch×yaw×map×weather 组合）
-    H1/                        # 标准高度（1.22m），窄+宽相机
-      000001.npz               # 含 road_rgb, wide_rgb, camera_height, v_ego, world_pose
-      000002.npz
-      ...
-    H2/                        # 1.3m
-    H3/                        # 1.5m
-    H4/                        # 2.0m
-    H5/                        # 2.5m
-    H6/                        # 3.0m
-    clip_info.json             # session 元数据（见下方说明）
-
-  {session_tag}_annotated/     # 标注完成后的副本（Step B 输出）
-    H1/                        # road_rgb, wide_rgb, flat_h1（977维）, 质量标志
-    H2/                        # road_rgb, wide_rgb, flat_h2（变换后）
+data/multi_height_0311/                    # 批量采集根目录
+  Town04_ClearNoon_p5.0_y0.0/              # 单 session（map_weather_pitch_yaw）
+    clip_info.json                          # session 元数据
+    H1/                                     # 高度 1.22m
+      road_000000.png                       # 窄焦相机 RGB (1928×1208)
+      wide_000000.png                       # 广角相机 RGB (1928×1208)
+      road_000004.png                       # save_every=4 时跳 4 tick
+      wide_000004.png
+      metadata.jsonl                        # 每帧一行 JSON 元数据
+    H2/                                     # 高度 1.30m（同结构）
+    ...
+    H6/                                     # 高度 3.00m
+  Town04_ClearNoon_p5.0_y0.0/annotations/  # 标注输出（与采集同级）
+    clip_info.json                          # 复制自父 session + source_session_dir
+    H1/
+      000000.json                           # 标注 JSON（每帧一个）
+      000004.json
+    H2/
     ...
     H6/
-
-  {session_tag}_annotated/H1_cache/  # warp+YUV预处理缓存（Step C 输出）
-  {session_tag}_annotated/H2_cache/
-  ...
-  {session_tag}_annotated/H6_cache/
+  collection_progress.json                  # 采集进度（仅供参考）
+  stats/                                    # label_stats.py 批量统计输出
+    stats_summary.txt
+    pitch_yaw_heatmap.png
+    ...
 ```
 
-**`clip_info.json` 关键字段：**
+### 2.2 clip_info.json 格式
+
 ```json
 {
-  "session_id": "quick_H1H6_Town04_ClearNoon_p5.0_y0.0",
-  "phase": "quick",
+  "session_id": "Town04_ClearNoon_p5.0_y0.0",
   "map": "Town04",
   "weather": "ClearNoon",
   "camera": {
@@ -120,831 +126,643 @@ data/multi_height/
   },
   "heights": {
     "H1": 1.22,
-    "H2": 1.3,
-    "H6": 3.0
+    "H2": 1.30,
+    "H3": 1.50,
+    "H4": 2.00,
+    "H5": 2.50,
+    "H6": 3.00
   },
   "simulation": {
     "fps": 20.0,
     "fixed_delta_seconds": 0.05,
     "num_npc": 40
-  }
+  },
+  "spawn": {
+    "x": 123.4, "y": 456.7, "z": 0.5, "yaw": 45.3
+  },
+  "save_every": 4
 }
 ```
 
-> `pitch_deg` / `yaw_deg` 是所有高度相机共用的安装角度，供标注器（Step B）和预处理器（Step C）读取（方案A：固定已知姿态）。
+> `pitch_deg` / `yaw_deg` 遵循 openpilot 约定（正值=nose-down/右偏），所有高度相机共用。
+> 标注目录的 `clip_info.json` 额外包含 `source_session_dir` 字段，指向原始采集目录的相对路径。
+
+### 2.3 metadata.jsonl 格式（每帧一行）
+
+```json
+{"frame": 0, "camera_height": 1.22, "v_ego": 15.5, "world_pose": [123.4, 456.7, 0.1, 0.0, 0.05, 45.3]}
+```
+
+### 2.4 标注 JSON 格式（canonical）
+
+```json
+{
+  "frame_id": "000000",
+  "camera_height": 1.22,
+  "v_ego": 15.5,
+  "world_pose": [123.4, 456.7, 0.1, 0.0, 0.05, 45.3],
+  "label_source": "pretrained_h1",
+  "ll_quality_pass": true,
+  "lane_lines":             "...(4, 33, 3) [x, y_lat, z_height]",
+  "lane_lines_prob":        "...(4,) sigmoid 后概率",
+  "road_edges":             "...(2, 33, 3) [x, y_lat, z_height]",
+  "road_edges_prob":        "...(2,) 全 1.0",
+  "lead":                   "...(3, 6, 4) MDN means [x, y, v, a]",
+  "lead_prob":              "...(3,) sigmoid 后概率",
+  "pose":                   "...(6,) [trans(3), rot(3)] means",
+  "road_transform":         "...(6,) [tx, ty, tz, 0, 0, 0] means",
+  "wide_from_device_euler": "...(3,) [roll, pitch, yaw] means"
+}
+```
+
+**标注字段说明：**
+
+| 字段 | 形状 | 说明 |
+|------|------|------|
+| `lane_lines` | `(4, 33, 3)` float32 | 4 条车道线 × 33 距离点 × (x, y_lat, z_height)，x = X_IDXS |
+| `lane_lines_prob` | `(4,)` float32 | 各车道线置信度 [L-outer, L-inner, R-inner, R-outer] |
+| `road_edges` | `(2, 33, 3)` float32 | 2 条路沿 × 33 距离点 × (x, y_lat, z_height) |
+| `road_edges_prob` | `(2,)` float32 | 全 1.0（模型无 per-edge 概率输出） |
+| `lead` | `(3, 6, 4)` float32 | 3 个时间偏移(0/2/4s) × 6 未来时刻 × (x, y, v_abs, a) |
+| `lead_prob` | `(3,)` float32 | 各前车预测的存在概率 |
+| `pose` | `(6,)` float32 | [前进速度, 右偏速度, 下沉速度, roll角速度, pitch角速度, yaw角速度] |
+| `road_transform` | `(6,)` float32 | [tx, ty, tz(=camera_height), 0, 0, 0] |
+| `wide_from_device_euler` | `(3,)` float32 | 广角相机相对窄焦的欧拉角 [roll, pitch, yaw] |
 
 ---
 
-## 3. 软件工具规划（采集与标注）
+## 3. 采集与标注工具
 
-### 3.1 `carla_multi_height_world.py`（新建）
+### 3.1 `carla_multi_height_world.py` — Carla 多高度仿真环境
 
 **文件路径：** `tools/dashcam/carla_multi_height_world.py`
 
-**职责：** 在单次 Carla 仿真中同时挂载多套（窄+宽）相机，按高度同步采集。
+**职责：** 在单次 Carla 仿真中同时挂载 N×2（窄焦+广角）相机，按高度同步采集。
 
 **核心类：**
 
 ```python
 @dataclass
 class CameraSlot:
-    tag: str          # 'H1', 'H2', ..., 'H6'
-    height: float     # 离地高度（米）
+    tag: str       # 'H1', 'H2', ..., 'H6'
+    height: float  # 离地高度（米）
 
 class MultiHeightCarlaWorld:
     def __init__(
         self,
-        host: str = '127.0.0.1',
-        port: int = 2000,
-        town: str = 'Town04',
-        spawn_point: int = 16,
-        random_spawn: bool = False,
-        camera_pitch_deg: float = 5.0,   # 所有高度共用同一 pitch
-        camera_yaw_deg: float = 0.0,     # 所有高度共用同一 yaw
-        camera_slots: list[CameraSlot],  # 要挂载的高度列表
-        num_npc: int = 40,
-        high_quality: bool = False,
-        speed_range: tuple = (40.0, 100.0),
+        host='127.0.0.1', port=2000,
+        town='Town04', weather='ClearNoon',
+        spawn_point=16, random_spawn=False,
+        camera_pitch_deg=5.0,            # openpilot 约定：正值=nose-down
+        camera_yaw_deg=0.0,              # openpilot 约定：正值=右偏
+        camera_forward_offset_m=0.8,     # 相机前向偏移
+        camera_slots=None,               # 默认 [H1(1.22m), H6(3.0m)]
+        num_npc=40,
+        high_quality=False,
+        speed_range=(40.0, 100.0),       # 目标速度范围 (km/h)
+        speed_interval=(8.0, 20.0),      # 变速间隔 (秒)
     )
-
-    def get_frames(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        """返回 {tag: (road_rgb, wide_rgb)}，未就绪返回 None"""
-
-    def tick(self) -> None
-    def get_vehicle_speed(self) -> float
-    def get_vehicle_transform(self) -> carla.Transform
-    def get_clip_metadata(self) -> dict
-    def close(self) -> None
 ```
 
-**帧同步设计（Carla 同步模式）：**
+**关键参数：**
 
-Carla 同步模式（`synchronous_mode = True`）在物理层面保证：**同一 `world.tick()` 触发的所有 sensor，其数据来自相同的物理状态，携带相同的 `image.frame` 帧序号**。12 个相机（6高度×2）只要 `sensor_tick` 相同，就一定产生于同一仿真 tick，天然帧对齐。
+- 相机分辨率：`1928×1208`（openpilot 标准）
+- 窄焦 FOV：40°，广角 FOV：120°
+- 仿真帧率：20 FPS（`fixed_delta_seconds=0.05`）
+- 角度约定转换：openpilot → Carla/UE4 左手系（`pitch=-pitch_deg, yaw=-yaw_deg`）
 
-但 Carla 的 sensor 回调通过**独立流线程**（streaming thread）异步送达 Python，`world.tick()` 返回时不保证 12 个回调全部执行完毕。若以"H1 narrow 先到达"为同步基准（类似 `DashcamCarlaWorld._cam_callback_road` 第186行的做法），读取其他相机时其回调可能还未到达，产生帧号不一致的数据混用。
+**帧同步设计：**
 
-**正确方案：`image.frame` 帧号全匹配检查**
-
-每个回调写入 `(frame_id, rgb)` 二元组，`get_frames()` 仅在所有相机都持有同一 `frame_id` 的数据时才返回，否则返回 `None`：
+Carla 同步模式保证同一 `world.tick()` 的所有 sensor 共享相同物理状态和 `image.frame` 帧号。但 sensor 回调通过独立流线程异步送达，`tick()` 返回时不保证全部到达。
 
 ```python
-# 回调（每个相机 slot × narrow/wide 各一个）
-def _make_callback(self, tag: str, key: str):  # key = 'road' | 'wide'
-    def callback(image: carla.Image):
-        rgb = self._to_rgb(image)
-        with self._lock:
-            self._latest[tag][key] = (image.frame, rgb)
-    return callback
-
-# 采集循环调用
 def get_frames(self) -> dict[str, tuple[np.ndarray, np.ndarray]] | None:
-    """仅在所有 12 个相机（6高度×2）均已汇报当前帧时返回，否则返回 None。"""
+    """仅当所有相机（N高度×2）帧号完全一致时返回，否则返回 None。"""
     with self._lock:
-        # 收集所有相机的最新帧号
-        frame_ids = [
-            self._latest[slot.tag][key][0]
-            for slot in self._camera_slots
-            for key in ('road', 'wide')
-            if self._latest[slot.tag][key] is not None
-        ]
-        total = len(self._camera_slots) * 2
-        if len(frame_ids) < total:
-            return None  # 还有相机尚未收到任何数据
+        entries = [self._latest[slot.tag][key]
+                   for slot in self._camera_slots for key in ('road', 'wide')]
+        if any(e is None for e in entries):
+            return None  # 尚有相机未收到数据
+        frame_ids = [e[0] for e in entries]
         if len(set(frame_ids)) != 1:
-            return None  # 帧号不一致，等待滞后的回调
-        # 所有相机帧号一致，安全返回
-        return {
-            slot.tag: (
-                self._latest[slot.tag]['road'][1].copy(),
-                self._latest[slot.tag]['wide'][1].copy(),
-            )
-            for slot in self._camera_slots
-        }
+            return None  # 帧号不一致，等待滞后回调
+        return {slot.tag: (road_rgb.copy(), wide_rgb.copy()) for ...}
 ```
 
-**采集主循环：**
-```python
-self.tick()          # world.tick()，推进一步仿真
-frames = None
-while frames is None:
-    frames = self.get_frames()   # 轮询直到 12 个回调全部到达
-    # 无需 sleep：回调通常在 tick() 返回后数毫秒内全部到达
-```
+**天气预设支持：** ClearNoon, ClearSunset, CloudyNoon, WetNoon, WetSunset, MidRainSunset, SoftRainNoon
 
-> **为何不会死等：** 在同步模式下，`world.tick()` 完成后 Carla 服务端已生成本 tick 所有 sensor 数据，客户端流线程必然在下一次 `tick()` 前收到全部回调。轮询不会漏帧，也不会跨 tick 混用数据。
-
-> **与 `DashcamCarlaWorld` 的差异：** 现有 `DashcamCarlaWorld` 用 `_new_frame` 布尔标志（以 road camera 为基准），对 2 个相机窗口极短，实践中影响有限。对 12 个相机，滞后窗口扩大 6×，帧号不一致概率显著增加，必须使用 `image.frame` 全匹配方案。
-
-**其他实现细节：**
-- 每个高度对应 2 个相机 Actor（narrow FOV=40°，wide FOV=120°），`attach_to=ego_vehicle`
-- 所有相机设置相同的 `sensor_tick = 1.0 / 20.0`（20 FPS），保证每 tick 同时触发
-- `high_quality=False` 时关闭后处理效果（`enable_postprocess_effects=False`），减少渲染开销
-
-**与现有代码的关系：**
-- 不继承 `DashcamCarlaWorld`，单独实现（不含 VisionIPC/modeld 逻辑）
-- 车辆生成、NPC、速度控制逻辑参考 `DashcamCarlaWorld`（`carla_world.py:44-176`）
+**关闭顺序：** 禁用 autopilot → 停止 sensor listener → 禁用 TM 同步 → 最后 tick → 批量 destroy actors → 切换 async 模式
 
 ---
 
-### 3.2 `collect_multi_height.py`（新建）
+### 3.2 `collect_multi_height.py` — 单 session 采集
 
 **文件路径：** `tools/dashcam/collect_multi_height.py`
 
-**职责：** 多高度批量数据采集主入口脚本。
+**职责：** 运行单个 Carla session，多高度同步采集原始 RGB 帧（PNG）+ 元数据（JSONL）。采集阶段不运行模型推理。
 
 **命令行接口：**
 
-```
+```bash
 python tools/dashcam/collect_multi_height.py \
-    --phase quick          # quick | full | custom
+    --phase quick                 # quick | full | custom
     --output-base data/multi_height
-    --max-frames 20000     # 每 session 的 Carla 原始帧数（20FPS，默认20000）
-    [--heights H1 H6]      # 仅用于 custom 模式
-    [--map Town04]         # 仅用于 custom 模式
-    [--weather ClearNoon]  # 仅用于 custom 模式
-    [--pitch 5.0]          # 仅用于 custom 模式
-    [--yaw 0.0]            # 仅用于 custom 模式
+    --max-frames 20000            # 每 session 采集帧数
+    --save-every 4                # 每 N tick 保存一帧（1或4）
+    [--heights H1 H6]             # custom 模式
+    [--map Town04]                # custom 模式
+    [--weather ClearNoon]         # custom 模式
+    [--pitch 5.0] [--yaw 0.0]    # custom 模式
     [--num-npc 40]
-    [--spawn-point 16]
+    [--random-spawn]              # 随机出生点
     [--no-display]
-    [--host 127.0.0.1] [--port 2000]
+    [--speed-range 40.0 100.0]
+    [--speed-interval 8.0 20.0]
 ```
 
 **Phase 配置：**
 
-| phase | heights | scenes | pitch×yaw 组合 | max-frames/session |
-|-------|---------|--------|----------------|-------------------|
-| `quick` | H1, H6 | Town04/ClearNoon | (5°, 0°) 单一组合 | 20000（→1000 训练帧） |
-| `full` | H1~H6 | §4.4 6种 | §4.3.3 34 种 | 8000（→400 训练帧/组合） |
+| phase | heights | scenes | pitch×yaw | max-frames |
+|-------|---------|--------|-----------|------------|
+| `quick` | H1, H6 | Town04/ClearNoon | (5°, 0°) | 20000 |
+| `full` | H1~H6 | 6 种 map×weather | 34 种 pitch×yaw | 8000 |
 | `custom` | 参数指定 | 参数指定 | 参数指定 | 参数指定 |
 
-**输出：**
+**`save_every` 机制：**
+- `save_every=4`：每 4 个 tick 保存一帧（等效 5 FPS），采集速度提升 4×
+- 帧文件名按 `abs_tick` 编号：`road_000000.png`, `road_000004.png`, `road_000008.png`, ...
+- 约束：`save_every` 必须为 1 或 4（与 `TEMPORAL_SKIP=4` 对齐）
 
-```
-data/multi_height/
-  quick_Town04_ClearNoon_p5.0_y0.0/
-    H1/  H2/  ...  H6/        # 各含 000001.npz ~ 020000.npz
-    clip_info.json
+**核心函数 `collect_session()`：**
+
+```python
+def collect_session(
+    output_base, session_tag, heights, map_name, weather,
+    pitch_deg, yaw_deg, max_frames, host, port, num_npc,
+    spawn_point, random_spawn, high_quality, display,
+    speed_range, speed_interval, save_every,
+) -> Path:
+    """采集单个 session，返回 session 目录路径。支持断点续采。"""
 ```
 
-**每帧 NPZ 字段：**
-```
-road_rgb:     [1208, 1928, 3] uint8  ← 原始分辨率，未 warp
-wide_rgb:     [1208, 1928, 3] uint8
-camera_height: float32
-v_ego:        float32  (m/s)
-world_pose:   [6] float32  [x, y, z, roll, pitch, yaw]（Carla 世界坐标）
-```
-
-**注意：** 采集阶段**不运行 modeld**，不存储任何标注，只存原始图像。warp 和标注均在后续步骤完成。
+- 创建高度子目录，初始化 `MultiHeightCarlaWorld`
+- 保存 `clip_info.json`（含 `save_every` 字段）
+- 10 tick 热身等待车辆物理稳定
+- 主循环：`tick()` → `get_frames()`（轮询直到帧号一致）→ 按 `save_every` 间隔写 PNG + JSONL
+- 异步 PNG 写入（`ThreadPoolExecutor`），每 100 帧 drain futures
+- 支持断点续采：读取已有帧数，从 `len(existing) * save_every` tick 继续
+- OpenCV 预览窗口（可选）
 
 ---
 
-### 3.3 `annotate_multi_height.py`（新建）
+### 3.3 `run_full_collection.py` — 批量采集编排器
 
-**文件路径：** `tools/dashcam/annotate_multi_height.py`
+**文件路径：** `tools/dashcam/run_full_collection.py`
 
-**职责：** 离线标注器。对采集目录中的 H1 图像批量推理，并将标注变换到所有高度，输出含标注的 NPZ。
+**职责：** 编排多 scene × 多 pitch-yaw 的批量采集，支持自动重试、断点续跑、进度追踪。
 
 **命令行接口：**
 
+```bash
+python tools/dashcam/run_full_collection.py \
+    --output-base data/multi_height     # 输出根目录
+    --max-frames 120                    # 每 session 帧数（名义中心 2×）
+    --num-npc 40                        # NPC 数量
+    --save-every 4                      # 每 N tick 保存
+    --max-retries 3                     # 每 session 最大重试次数
+    --retry-delay 30                    # 重试间隔（秒）
+    --start-from 0                      # 跳过前 N 个 session
+    --speed-range 40.0 100.0
+    --speed-interval 8.0 20.0
+    [--list]                            # 仅列出 session 计划
+    [--no-display]
 ```
+
+**场景矩阵：**
+
+```
+SCENES = [
+    ('Town03', 'ClearNoon'),    ('Town03', 'WetSunset'),
+    ('Town05', 'ClearSunset'),  ('Town05', 'CloudyNoon'),
+    ('Town06', 'ClearNoon'),    ('Town06', 'ClearSunset'),
+    ('Town06', 'CloudySunset'), ('Town06', 'WetNoon'),
+]
+```
+
+**Pitch-Yaw 姿态矩阵（33 个采样点）：**
+
+```
+pitch \ yaw  | -3°  | -1.5° | 0°  | +1.5° | +3°
+-------------|------|-------|-----|-------|------
+  -1.5°      |  ○   |       |  ○  |       |  ○     3 个
+   0.0°      |  ○   |       |  ○  |       |  ○     3 个
+  +1.5°      |      |  ○    |  ○  |  ○    |        3 个
+  +3.0°      |  ○   |  ○    |  ○  |  ○    |  ○     5 个
+  +4.0°      |  ○   |  ○    |  ○  |  ○    |  ○     5 个
+  +5.0°(名义)|  ○   |  ○    |  ●  |  ○    |  ○     5+1 (中心2×)
+  +6.0°      |  ○   |  ○    |  ○  |  ○    |  ○     5 个
+  +7.0°      |      |  ○    |  ○  |  ○    |        3 个
+```
+
+`●` = 名义中心 (5°, 0°)，采集 `2 × max_frames`。
+
+**总 session 数：** 8 scenes × 33 poses = 264 sessions
+
+**断点续跑机制：**
+- 跳过已完成的 session（检查 H1 目录中的 PNG 帧数）
+- 部分采集的 session 自动从已有帧数处继续
+- `collection_progress.json`：纯信息性，不影响续跑逻辑
+- 优雅 Ctrl+C：完成当前 session 清理后停止；再次 Ctrl+C 强制退出
+
+---
+
+### 3.4 `annotate_multi_height.py` — 离线标注
+
+**文件路径：** `tools/dashcam/annotate_multi_height.py`
+
+**职责：** 对采集的 H1 图像运行 tinygrad 推理，解码标注，变换到所有高度，输出 JSON 标注。
+
+**命令行接口：**
+
+```bash
 python tools/dashcam/annotate_multi_height.py \
-    data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0/ \
-    --onnx checkpoints/inadas_original.onnx \
-    --output data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0_annotated/ \
-    [--batch-size 8]
-    [--min-ll-prob 0.5]    # §5.4 Step3 质量过滤阈值
-    [--device cuda]
-    [--heights H2 H3 H6]  # 只生成指定高度（默认全部）
+    data/multi_height_0311/Town04_ClearNoon_p5.0_y0.0/ \
+    --onnx selfdrive/modeld/models/driving_vision.onnx \
+    --output .../annotations/              # 默认 session_dir/annotations/
+    --heights H1 H6                        # 指定高度（默认全部）
+    --min-ll-prob 0.1                      # 质量过滤阈值
+    --no-gpu-preprocess                    # 禁用 GPU OpenCL，回退 CPU
 ```
+
+**推理引擎：** tinygrad TinyJit（非 PyTorch/onnx2torch）
+- 首次运行自动编译 ONNX → `driving_vision_tinygrad_CUDA.pkl`
+- 同时生成 `driving_vision_metadata.pkl`（含 input_shapes、output_slices）
+- 后续运行直接加载 pkl，跳过编译
+
+**模型输入：**
+- 当前帧 + 前一帧的 YUV420 拼接 → `(1, 12, 128, 256)` uint8
+- 时序间隔 `TEMPORAL_SKIP=4`：当前帧与前第 4 个 tick 的帧配对
+- `save_every=4` 时 buffer 深度=2（相邻两帧刚好间隔 4 tick）
+- `save_every=1` 时 buffer 深度=5（跳 4 帧取 prev）
 
 **处理流程：**
 
-> **重要前提：** `PretrainedVisionModel.forward()` 返回 `dict[str, Tensor]`（见 `pretrained_model.py:122`），
-> 不是 977 维 flat tensor。每个键对应 ONNX 的一个输出切片，格式均为原始 MDN flat 向量。
-
-```python
-# Step 1: 加载配置
-clip_info_src = session_dir / 'clip_info.json'
-clip_info = json.load(clip_info_src)
-pitch_rad = math.radians(clip_info['camera']['pitch_deg'])
-yaw_rad   = math.radians(clip_info['camera']['yaw_deg'])
-
-# clip_info.json 复制到输出目录，供下游 preprocess_cache.py 通过
-# Path(npz).parent.parent / 'clip_info.json' 定位（output_dir/{H_k}/{帧}.npz → output_dir/）
-shutil.copy(clip_info_src, output_dir / 'clip_info.json')
-
-# 计算 H1 warp 矩阵（方案A：固定已知姿态）
-rpyCalib_h1 = [0, pitch_rad, yaw_rad]   # [roll, pitch, yaw] 弧度
-warp_h1_narrow = get_warp_matrix(rpyCalib_h1, NARROW_CAM_INTRINSICS)
-warp_h1_wide   = get_warp_matrix(rpyCalib_h1, WIDE_CAM_INTRINSICS, bigmodel_frame=True)
-
-# Step 2: 加载 PretrainedVisionModel
-model = PretrainedVisionModel('checkpoints/inadas_original.onnx')
-model.eval().to(device)
-
-X_IDXS = np.array(ModelConstants.X_IDXS, dtype=np.float32)  # (33,) 前向距离序列
-
-# Step 3: 按帧处理
-for frame_npz in sorted(H1_dir.glob('*.npz')):
-    data = np.load(frame_npz)
-    road_yuv_tensor = torch.from_numpy(rgb_to_modeld_input(data['road_rgb'], warp_h1_narrow)).unsqueeze(0)
-    wide_yuv_tensor = torch.from_numpy(rgb_to_modeld_input(data['wide_rgb'], warp_h1_wide)).unsqueeze(0)
-
-    with torch.no_grad():
-        outputs_h1 = model(road_yuv_tensor, wide_yuv_tensor)  # dict[str, Tensor]
-
-    # 解码为 canonical 标注格式（与 extract_targets() / modeld_label_extractor 兼容）
-    canonical_h1 = decode_model_output(outputs_h1, X_IDXS)
-
-    # Step 4: 质量过滤（§5.4 Step 3）
-    # lane_lines_prob 原始 (8,)=(4,2) logits，真实概率取第 1 列 sigmoid
-    # 检查内侧两条车道线 L0(idx=1) 和 R0(idx=2)
-    ll_prob = canonical_h1['lane_lines_prob']   # (4,) 已 sigmoid，来自 decode_model_output
-    if not (ll_prob[1] > min_ll_prob and ll_prob[2] > min_ll_prob):
-        continue
-
-    # Step 5: 为每个高度生成标注
-    for h_tag, h_k in heights.items():
-        canonical_hk = transform_annotation(canonical_h1, h1=1.22, h_k=h_k)
-        src_npz = (session_dir / h_tag / frame_npz.name)
-        out = dict(np.load(src_npz))
-        out.update(canonical_hk)          # 写入标注字段（与旧格式兼容）
-        out['label_source'] = b'pretrained_h1'
-        np.savez_compressed(output_dir / h_tag / frame_npz.name, **out)
+```
+1. 加载 clip_info.json → pitch/yaw → rpyCalib = [0, pitch_rad, yaw_rad]
+2. 计算 warp 矩阵（narrow + wide）
+3. 加载/编译 tinygrad 模型
+4. 逐帧处理 H1 图像：
+   a. GPU OpenCL 预处理：BGR → NV12 → warp → loadyuv → (6,128,256) uint8
+   b. 拼接 [prev, curr] → (1, 12, 128, 256)
+   c. tinygrad 推理 → 解码 MDN 输出
+   d. 质量过滤：ll_prob[1] > threshold AND ll_prob[2] > threshold
+   e. 对每个高度 h_k：transform_annotation(h1→h_k) + 写入 JSON
 ```
 
-**`decode_model_output()` 辅助函数：**
+**`decode_model_output()` — MDN 解码：**
 
-将 `PretrainedVisionModel` 的 dict 输出解码为 canonical 格式，与 `extract_targets()` 完全兼容。
-MDN 布局遵循 openpilot 约定（`custom_modeld.py:decode_outputs` 为参考实现）：
-`[all_means | all_log_sigma]`（前一半为均值，后一半为 log 标准差）。
+遵循 openpilot 非交错格式 `[all_means | all_log_sigma]`：
 
-```python
-def decode_model_output(outputs: dict[str, torch.Tensor], X_IDXS: np.ndarray) -> dict[str, np.ndarray]:
-    """从 PretrainedVisionModel dict 输出解码为 canonical 标注格式。
+| 模型输出 | 原始维度 | 解码方式 | canonical 输出 |
+|----------|---------|---------|---------------|
+| lane_lines | (528,) | 前 264 = means → reshape(4,33,2) [y,z] + 拼 x | (4,33,3) |
+| lane_lines_prob | (8,) | reshape(4,2) → sigmoid([:,1]) | (4,) |
+| road_edges | (264,) | 前 132 = means → reshape(2,33,2) [y,z] + 拼 x | (2,33,3) |
+| lead | (144,) | 前 72 = means → reshape(3,6,4) [x,y,v,a] | (3,6,4) |
+| lead_prob | (3,) | sigmoid | (3,) |
+| pose | (12,) | 前 6 = means [trans(3), rot(3)] | (6,) |
+| road_transform | (12,) | 前 6 = means | (6,) |
+| wide_from_device_euler | (6,) | 前 3 = means [roll, pitch, yaw] | (3,) |
 
-    MDN 格式（非交错）：[all_means | all_log_sigma]
-    lane_lines (528,)   = 264 means + 264 log_sigma，means reshape (4,33,2) = [y, z]
-    road_edges (264,)   = 132 means + 132 log_sigma，means reshape (2,33,2) = [y, z]
-    lead (144,)         = 72 means + 72 log_sigma，  means reshape (3,6,4) = [x,y,v,a]
-    pose (12,)          = 6 means + 6 log_sigma，    means = [trans(3), rot(3)]
-    road_transform (12,)= 6 means + 6 log_sigma，    means[:3] = [tx, ty, tz]
-    lane_lines_prob (8,)= (4,2) raw logits，真实概率 = sigmoid([:,1])
-    """
-    def _np(t): return t[0].cpu().numpy()  # (1, N) → (N,)
-
-    # lane_lines: (528,) → means (4,33,2) [y,z] → 拼 x 列 → (4,33,3) [x,y,z]
-    ll_raw = _np(outputs['lane_lines'])     # (528,)
-    ll_means = ll_raw[:264].reshape(4, 33, 2)   # [y, z] per point
-    x_col = np.broadcast_to(X_IDXS[None, :, None], (4, 33, 1))
-    lane_lines = np.concatenate([x_col, ll_means], axis=-1).astype(np.float32)  # (4,33,3)
-
-    # lane_lines_prob: (8,) → (4,2) logits → sigmoid([:,1]) → (4,)
-    ll_prob_raw = _np(outputs['lane_lines_prob']).reshape(4, 2)
-    lane_lines_prob = (1.0 / (1.0 + np.exp(-np.clip(ll_prob_raw[:, 1], -20, 20)))).astype(np.float32)
-
-    # road_edges: (264,) → means (2,33,2) [y,z] → 拼 x 列 → (2,33,3)
-    re_raw = _np(outputs['road_edges'])     # (264,)
-    re_means = re_raw[:132].reshape(2, 33, 2)
-    x_col2 = np.broadcast_to(X_IDXS[None, :, None], (2, 33, 1))
-    road_edges = np.concatenate([x_col2, re_means], axis=-1).astype(np.float32)  # (2,33,3)
-
-    # road_edges_prob: modeld 不输出 per-edge 概率，全 1.0
-    road_edges_prob = np.ones(2, dtype=np.float32)
-
-    # lead: (144,) → means (3,6,4) [x,y,v,a]
-    ld_raw = _np(outputs['lead'])           # (144,)
-    lead = ld_raw[:72].reshape(3, 6, 4).astype(np.float32)
-
-    # lead_prob: (3,) → sigmoid → (3,)
-    lp_raw = _np(outputs['lead_prob'])
-    lead_prob = (1.0 / (1.0 + np.exp(-np.clip(lp_raw, -20, 20)))).astype(np.float32)
-
-    # pose: (12,) means [:6] = [trans(3), rot(3)]
-    pose = _np(outputs['pose'])[:6].astype(np.float32)
-
-    # road_transform: (12,) means [:6]，其中 means[:3] = [tx, ty, tz]
-    road_transform = _np(outputs['road_transform'])[:6].astype(np.float32)
-
-    # wide_from_device_euler: (6,) means [:3] = [roll, pitch, yaw]
-    wfde = _np(outputs['wide_from_device_euler'])[:3].astype(np.float32)
-
-    return {
-        'lane_lines':             lane_lines,        # (4, 33, 3) float32
-        'lane_lines_prob':        lane_lines_prob,   # (4,) float32
-        'road_edges':             road_edges,         # (2, 33, 3) float32
-        'road_edges_prob':        road_edges_prob,   # (2,) float32
-        'lead':                   lead,              # (3, 6, 4) float32
-        'lead_prob':              lead_prob,          # (3,) float32
-        'pose':                   pose,              # (6,) float32
-        'road_transform':         road_transform,    # (6,) float32
-        'wide_from_device_euler': wfde,              # (3,) float32
-    }
-```
-
-**`transform_annotation()` 实现（§5.4 Step 2）：**
-
-输入/输出均为 `decode_model_output()` 返回的 canonical dict，格式与 `extract_targets()` 兼容。
-z_height 是 lane_lines/road_edges 的第 2 列（index=2），road_transform 的第 2 个 mean（tz）。
+**`transform_annotation()` — 高度变换：**
 
 ```python
-def transform_annotation(canonical: dict[str, np.ndarray], h1: float, h_k: float) -> dict[str, np.ndarray]:
-    """将 canonical 标注的 z_height 分量从高度 h1 变换到 h_k。
-
-    仅修正相机高度差引起的 z 偏移（近场近似，X > 10m 有效）。
-    """
+def transform_annotation(canonical, h1, h_k):
     delta_h = h_k - h1
     out = {k: v.copy() for k, v in canonical.items()}
-    # lane_lines: (4, 33, 3) [x, y, z]，z 为列索引 2
-    out['lane_lines'][:, :, 2] += delta_h
-    # road_edges: (2, 33, 3) [x, y, z]，z 为列索引 2
-    out['road_edges'][:, :, 2] += delta_h
-    # road_transform: (6,) means = [tx, ty, tz, rx, ry, rz]，tz 为索引 2
-    out['road_transform'][2] += delta_h
+    out['lane_lines'][:, :, 2] += delta_h      # z_height 列
+    out['road_edges'][:, :, 2] += delta_h      # z_height 列
+    out['road_transform'][2]   += delta_h      # tz 分量
     return out
 ```
 
-> **MDN 偏移推导（以 lane_lines 为例）：**
-> - ONNX 完整切片：`[117:645]`（528 维 = 264 means + 264 log_sigma）
-> - means 子集：ONNX`[117:381]`（264 维），reshape `(4, 33, 2)` = `[y_lat, z_height]`
-> - road_edges 完整：ONNX`[653:917]`（264 维 = 132 means + 132 log_sigma）
-> - road_transform means：ONNX`[105:111]`（前 6 维），`[2]` = tz
->
-> 以上由 `pretrained_model.py:ONNX_OUTPUT_SLICES` 和 `custom_modeld.py:decode_outputs` 联合确认。
+仅修正 z 分量（相机高度差的线性偏移），近场近似在 X > ~10m 有效。
 
-**输出标注格式（与 `extract_targets()` 完全兼容，可直接送入 `preprocess_cache.py`）：**
-
-| 字段 | 形状 | 说明 |
-|------|------|------|
-| `lane_lines` | `(4, 33, 3)` float32 | `[x, y_lat, z_height]`，x = X_IDXS |
-| `lane_lines_prob` | `(4,)` float32 | sigmoid 后的真实概率 |
-| `road_edges` | `(2, 33, 3)` float32 | `[x, y_lat, z_height]` |
-| `road_edges_prob` | `(2,)` float32 | 全 1.0（modeld 无 per-edge 概率） |
-| `lead` | `(3, 6, 4)` float32 | means `[x, y, v, a]` |
-| `lead_prob` | `(3,)` float32 | sigmoid 后概率 |
-| `pose` | `(6,)` float32 | `[trans(3), rot(3)]` means |
-| `road_transform` | `(6,)` float32 | `[tx, ty, tz, 0, 0, 0]` means |
-| `wide_from_device_euler` | `(3,)` float32 | wide camera euler angles means |
-| `label_source` | bytes | `b'pretrained_h1'` |
-| `road_rgb`, `wide_rgb` | 原始 | 保留自 H_k 源 NPZ |
-| `camera_height`, `v_ego`, `world_pose` | 原始 | 保留自 H_k 源 NPZ |
-
----
-
-### 3.4 `preprocess_cache.py`（修改）
-
-**文件路径：** `tools/dashcam/train/preprocess_cache.py`
-
-**修改内容：**
-
-1. **支持方案A（固定已知姿态）warp：**
-   - 读取 `clip_info.json`（由 `annotate_multi_height.py` 复制到 annotated 目录，§3.3）
-   - 若存在，优先用 `camera.pitch_deg / camera.yaw_deg` 计算 warp
-   - 若不存在（旧数据），回退到现有的 `npz['rpyCalib']`
-
-2. **标注字段兼容（无需新增提取函数）：**
-   - `annotate_multi_height.py` 输出的 annotated NPZ 已存储 canonical 格式字段（lane_lines (4,33,3)、road_edges (2,33,3) 等），与现有 `extract_targets()` 完全兼容
-   - **无需 `extract_targets_from_flat()`**，直接调用 `extract_targets(data)` 即可
-
-3. **保留 `camera_height` 到缓存 NPZ：**
-   - 缓存 NPZ 中添加 `camera_height: float32` 字段
-   - 供 dataset.py 读取，为后续显式高度注入（HeightConditionedHead）预留接口
-
-**修改后的 `_process_one()` 逻辑：**
-```python
-# 读取 warp 参数（方案A优先）
-# npz_path 形如 session_annotated/H1/000001.npz
-# → parent.parent = session_annotated/
-# annotate_multi_height.py 会把 clip_info.json 复制到 session_annotated/，路径因此可达
-clip_info_path = Path(npz_path).parent.parent / 'clip_info.json'
-if clip_info_path.exists():
-    info = json.load(clip_info_path)
-    pitch_rad = math.radians(info['camera']['pitch_deg'])
-    yaw_rad   = math.radians(info['camera']['yaw_deg'])
-    rpyCalib = np.array([0.0, pitch_rad, yaw_rad])
-else:
-    rpyCalib = data['rpyCalib'].astype(np.float64)  # 回退（旧数据）
-
-# 提取标注：annotated NPZ 已是 canonical 格式，直接调用现有函数
-targets = extract_targets(data)
-targets['camera_height'] = data.get('camera_height', np.float32(1.22))
+**质量过滤规则：**
 ```
-
----
-
-### 3.5 `dataset.py`（修改）
-
-**文件路径：** `tools/dashcam/train/dataset.py`
-
-**修改内容：**
-
-1. **`extract_targets()` 和 `CachedDualCameraDrivingDataset` 返回 `camera_height`：**
-   - 从缓存 NPZ 加载 `camera_height` 字段（缺省 1.22m）
-   - 包含在返回的 targets dict 中
-
-**数据集变化影响评估：**
-- `camera_height` 目前不进入 loss 计算，仅作为额外信息字段存储
-- 不影响现有训练流程；为第二阶段显式高度注入（HeightConditionedHead）预留接口
-
-
-
----
-
-## 4. 可视化工具规划
-
-> **设计原则**：可视化工具覆盖流水线的三个关键检查点——原始采集数据、离线标注结果、多高度对比——帮助人工快速定位数据质量问题，无需运行训练。
-
-### 4.0 可视化基础设施与复用策略
-
-**现有可复用资产（`tools/dashcam/`）：**
-
-| 文件 | 提供的能力 | 新工具中的复用方式 |
-|------|-----------|-----------------|
-| `visualizer.py` | `project_points_to_image()`、`_build_transform()`、车道线多边形渲染、BEV 面板绘制 | 直接 import，用于标注叠加投影 |
-| `view_dual_data.py` | `_draw_lane_lines()`、`_draw_road_edges()`、`_draw_leads()`、`_draw_info_panel()`、`_draw_bev_panel()`、`_check_warnings()`、键盘导航框架 | 核心绘图函数直接 import；键盘导航模式复制 |
-
-**新增目录：** `tools/dashcam/viz/`（含 `__init__.py`），避免与现有脚本混淆。
-
-**标注数据兼容性约定：**
-
-`annotate_multi_height.py` 输出的 NPZ 直接存储 canonical 格式字段（由 `decode_model_output()` + `transform_annotation()` 生成），**无 `flat_label` 中间格式**：
+PASS = lane_lines_prob[1] > min_ll_prob AND lane_lines_prob[2] > min_ll_prob
 ```
-lane_lines:             [4, 33, 3] float32  — [x, y_lat, z_height]，x = X_IDXS
-lane_lines_prob:        [4] float32         — sigmoid 后的真实概率
-road_edges:             [2, 33, 3] float32
-road_edges_prob:        [2] float32         — 全 1.0
-lead:                   [3, 6, 4] float32   — MDN means [x,y,v,a]
-lead_prob:              [3] float32
-pose:                   [6] float32         — [trans(3), rot(3)] means
-road_transform:         [6] float32         — [tx, ty, tz, 0, 0, 0] means
-wide_from_device_euler: [3] float32
-label_source:           bytes               — b'pretrained_h1'
-```
-
-此格式与 `extract_targets()`（`dataset.py`）完全兼容，`preprocess_cache.py` 无需特殊处理。
-`view_dual_data.py` 的全部绘图函数也可直接复用于新工具（field 形状一致）。
+即 L-inner 和 R-inner 两条车道线置信度均超过阈值。
 
 ---
 
-### 4.1 `viz/browse_raw_session.py`（新建）
+### 3.5 `annotate_batch.py` — 批量标注
 
-**检查点：Step A（Carla 采集）完成后**
+**文件路径：** `tools/dashcam/annotate_batch.py`
 
-**目的：** 浏览多高度原始采集数据，验证所有相机正常工作、各高度图像符合预期，发现卡帧/过曝/分辨率异常等问题。
+**职责：** 扫描根目录下所有 session 子目录，逐一调用 `annotate_session()` 进行标注。模型仅加载一次，GPU 预处理器跨 session 复用。
 
-**命令行：**
+**命令行接口：**
+
 ```bash
-python tools/dashcam/viz/browse_raw_session.py \
-    data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0/
-    [--heights H1 H4 H6]   # 默认显示全部已有高度
-    [--start 0]
-    [--wide-road] #查看广角相机rgb
+python tools/dashcam/annotate_batch.py data/multi_height_0311/ \
+    --onnx selfdrive/modeld/models/driving_vision.onnx \
+    --heights H1 H6                    # 可选：仅标注指定高度
+    --min-ll-prob 0.1                  # 质量过滤阈值
+    --dry-run                          # 仅预览，不实际标注
+    --force                            # 强制重新标注
+    --no-gpu-preprocess
 ```
 
-**显示布局（默认：网格模式）：**
-```
-┌──────────────┬──────────────┬──────────────┐
-│  H1 road_rgb │  H2 road_rgb │  H3 road_rgb │
-│   (1.22m)    │   (1.3m)     │   (1.5m)     │
-├──────────────┼──────────────┼──────────────┤
-│  H4 road_rgb │  H5 road_rgb │  H6 road_rgb │
-│   (2.0m)     │   (2.5m)     │   (3.0m)     │
-└──────────────┴──────────────┴──────────────┘
-             底部状态栏
-  Frame: 001234/020000  v_ego: 22.3 m/s (80.4 km/h)
-  pitch: 5.0°  yaw: 0.0°  map: Town04  weather: ClearNoon
-```
+**断点续跑：** 已完成标注的 session（annotations/ 中帧数 ≥ 源帧数）自动跳过。`--force` 可强制重新标注。
 
-每个面板左上角覆盖标签（`H1 1.22m`），右上角显示帧号。底部状态栏来自 `clip_info.json` + 当前帧的 `v_ego`。
-
-**键盘操作：**
-
-| 键 | 功能 |
-|----|------|
-| `←` / `→` | 前/后一帧 |
-| `PgUp` / `PgDn` | ±20 帧（等于 1 秒仿真） |
-| `Home` / `End` | 首/末帧 |
-| `f` | 跳转到指定帧号（输入对话框） |
-| `w` | 切换到 wide_rgb（与 road_rgb 交替显示） |
-| `i` | 切换信息面板（帧元数据） |
-| `s` | 截图 PNG |
-| `q` / `ESC` | 退出 |
-
-
+**环境变量：** `DEV`（默认 `CUDA`），`PYOPENCL_CTX`（默认空）
 
 ---
 
-### 4.2 `viz/inspect_annotated.py`（新建）
+## 4. 辅助模块
 
-**检查点：Step B（离线标注）完成后**
+### 4.1 `modeld_preprocess_cl.py` — GPU 预处理
 
-**目的：** 在 **warp 后的模型输入图像**（512×256）上叠加标注，验证 H1 推理质量和 H_k 变换后标注的正确性。
+**文件路径：** `tools/dashcam/modeld_preprocess_cl.py`（类名 `ModeldInputPreprocessorCL`）
 
-> **为何用 warp 后图像而非原始图像？** 标注是在 calibrated frame 下输出的，投影到 warp 后图像才符合模型训练时的视角，便于判断标注与图像内容是否对齐。
+精确复制 openpilot modeld 的三阶段 GPU 预处理流水线：
 
-**命令行：**
+```
+Stage 1 (rgb_to_nv12.cl):  BGR (1928×1208×3) → NV12 (Y + UV)
+Stage 2 (transform.cl):    NV12 + warp_matrix → warped Y(512×256) + U(256×128) + V(256×128)
+Stage 3 (loadyuv.cl):      Y/U/V → 6-channel [y0, y1, y2, y3, U, V] (6×128×256) uint8
+```
+
+```python
+with ModeldInputPreprocessorCL() as pp:
+    yuv = pp.process(bgr, warp_matrix)  # (6, 128, 256) uint8
+```
+
+### 4.2 `lead_ground_truth.py` — 前车真值提取
+
+**文件路径：** `tools/dashcam/lead_ground_truth.py`（类名 `LeadGroundTruth`）
+
+从 Carla world actors 中提取前方车辆的 3D 位置、速度、加速度，转为 openpilot lead 格式。
+
+**输出格式：** `lead_data (3,6,4)` + `lead_prob (3,)` — 与模型输出完全一致
+
+**过滤条件：**
+- 前向距离：2.0 ~ 200.0m
+- 横向距离：< 2.0m（同车道宽度）
+- 高度：-1.0 ~ 5.0m（排除天桥）
+- 加速度 clip：-10 ~ 5 m/s²
+
+**三个 lead 选择对应时间偏移 0s / 2s / 4s（非三辆车）。**
+
+### 4.3 `pose_ground_truth.py` — 位姿真值提取
+
+**文件路径：** `tools/dashcam/pose_ground_truth.py`（类名 `PoseGroundTruth`）
+
+从连续 Carla 帧计算：
+- `pose (6,)`：平移速度(m/s) + 角速度(rad/s)，calibrated frame
+- `road_transform (6,)`：`[0, 0, camera_height, 0, 0, 0]`
+- `wide_from_device_euler (3,)`：广角相机相对窄焦的固定欧拉角
+
+### 4.4 `modeld_label_extractor.py` — 在线标签提取
+
+**文件路径：** `tools/dashcam/modeld_label_extractor.py`（类名 `ModeldLabelExtractor`）
+
+从 cereal `modelV2` + `cameraOdometry` 消息提取标签，用于在线采集（`run.py` 流水线）。输出格式与离线标注完全一致。
+
+---
+
+## 5. 可视化工具
+
+所有可视化工具位于 `tools/dashcam/viz/` 目录。
+
+### 5.1 `viz/inspect_annotated.py` — 单高度标注检查
+
+**检查点：** Step B 完成后
+
+**目的：** 在 warp 后的模型输入图像（1024×512 显示）上叠加标注，验证推理质量和变换正确性。
+
 ```bash
 python tools/dashcam/viz/inspect_annotated.py \
-    data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0_annotated/ \
-    [--height H1]          # 默认 H1；可切换
-    [--start 0]
-    [--filter-low]         # 仅显示低置信度帧（用于核查过滤决策）
-    [--min-ll-prob 0.5]    # 质量过滤阈值（与 annotator 保持一致）
+    data/.../annotations/ \
+    --height H1              # 初始高度
+    --start 0                # 起始帧
+    --filter-low             # 仅显示低置信度帧
+    --min-ll-prob 0.5        # 过滤阈值
 ```
 
-**显示布局（单高度，全宽模式）：**
+**显示布局：**
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  左侧：warp 后 road 图像 (512×256, 2× 放大 = 1024×512)                  │
-│    · 车道线多边形叠加（颜色=置信度）                                       │
-│    · 路沿线                                                              │
-│    · 前车三角形 + 距离/速度标注                                                  │
-│    · 右上角：当前高度标签（H1 1.22m / H4 2.0m）                           │
-│    · 左上角：信息面板（帧号/置信度/是否通过过滤）                           │
-│                                                                         │
-│  右侧：BEV 俯视图 (300×450)                                             │
-│    · 车道线鸟瞰                                                          │
-│    · 前车位置点                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-底部：lane_lines_prob 条形图  [0.92] [0.88] [0.71] [0.05]  PASS/FAIL 标志
+┌─────────────────────────────────────┬──────────┐
+│  Warp 后 road 图像 (1024×512)      │  BEV     │
+│  · 车道线多边形（绿色，alpha=prob） │  俯视图  │
+│  · 路沿线（红色）                   │  300×*   │
+│  · 前车三角形 + 距离标注            │          │
+│  · 信息面板（左上，可选）           │          │
+├─────────────────────────────────────┼──────────┤
+│  概率条 [L-out] [L-inn] [R-inn] [R-out]       │
+└────────────────────────────────────────────────┘
 ```
-
-**置信度颜色编码：**
-- `prob ≥ 0.8`：绿色
-- `0.5 ≤ prob < 0.8`：黄色
-- `prob < 0.5`：红色（过滤候选）
-- 被过滤帧（未通过 min_ll_prob）：在左上角显示红色 `[FILTERED]` 横幅
-
-**键盘操作（继承 `view_dual_data.py` 惯例）：**
-
-| 键 | 功能 |
-|----|------|
-| `←` / `→` | 前/后一帧 |
-| `PgUp` / `PgDn` | ±10 帧 |
-| `Home` / `End` | 首/末帧 |
-| `h` | 循环切换高度（H1 → H2 → ... → H6 → H1） |
-| `l` | 切换车道线叠加 |
-| `e` | 切换路沿叠加 |
-| `v` | 切换前车叠加 |
-| `i` | 切换信息面板 |
-| `b` | 切换 BEV 面板 |
-| `r` | 在 warp 后图像 / 原始图像之间切换（对比 warp 效果） |
-| `f` | 切换仅显示过滤帧/全部帧 |
-| `s` | 截图 |
-| `q` / `ESC` | 退出 |
-
----
-
-### 4.3 `viz/compare_heights.py`（新建）
-
-**检查点：Step B（离线标注）完成后，核心工具**
-
-**目的：** 同一帧下并排展示 H1～H6 六个高度的 **warp 后图像 + 标注**，直观对比不同视角下的感知效果和 `transform_annotation` 的变换正确性。这是验证多高度标注一致性的关键可视化工具。
-
-**命令行：**
-```bash
-python tools/dashcam/viz/compare_heights.py \
-    data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0_annotated/ \
-    [--heights H1 H4 H6]   # 可指定子集（默认全部已有高度）
-    [--start 0]
-    [--no-annotations]     # 只显示原始 warp 图像（不叠加标注）
-```
-
-**显示布局（6高度，2×3 网格）：**
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│ H1 (1.22m) warp+标注 │ H2 (1.3m) warp+标注  │ H3 (1.5m) warp+标注  │
-│  lane_prob: 0.92/0.88 │  lane_prob: 0.91/0.87 │  lane_prob: 0.90/0.85│
-├──────────────────────────────────────────────────────────────────────┤
-│ H4 (2.0m) warp+标注  │ H5 (2.5m) warp+标注  │ H6 (3.0m) warp+标注  │
-│  lane_prob: 0.90/0.87 │  lane_prob: 0.90/0.87 │  lane_prob: 0.90/0.87│
-└──────────────────────────────────────────────────────────────────────┘
-Frame: 001234/020000  v_ego: 22.3 m/s  pitch: 5.0°  yaw: 0.0°
-```
-
-每个面板：
-- 背景：warp 后 road 图像（512×256 → 缩放适应面板）
-- 标注叠加：车道线多边形（颜色=置信度） + 路沿 + 前车
-- 面板标题：高度标签 + `lane_lines_prob` 数值
-- 过滤状态：PASS（绿框）/ FAIL（红框）
-
-**可视化目的说明（在代码注释和文档中体现）：**
-1. **验证 warp 一致性**：所有高度的 pitch 相同（5°），warp 后图像的地平线应位置一致
-2. **验证 z_height 变换**：H_k 的车道线 z 分量 = H1 值 + ΔH，可通过悬停/打印数值验证
-3. **发现标注异常**：如某高度车道线漂移、前车距离突变等
-4. **直觉化理解近场盲区**：H5/H6 的近场（X<10m）区域空白，与 §2.6 分析吻合
 
 **键盘操作：**
 
-| 键 | 功能 |
-|----|------|
-| `←` / `→` | 前/后一帧 |
-| `PgUp` / `PgDn` | ±10 帧 |
-| `Home` / `End` | 首/末帧 |
-| `a` | 切换标注叠加（开/关） |
-| `z` | 切换 z_height 数值显示（在每条车道线上标注 z 值范围） |
-| `l` / `e` / `v` | 分别切换车道线/路沿/前车图层 |
-| `Tab` | 在 2×3 网格 / 单高度全幅 之间切换（聚焦单个高度） |
-| `1`-`6` | 单高度全幅模式下选择 H1-H6 |
-| `s` | 截图（保存整个网格） |
-| `q` / `ESC` | 退出 |
+| 键 | 功能 | 键 | 功能 |
+|----|------|----|------|
+| `←/→` | 前/后帧 | `Tab` | 窄焦/广角切换 |
+| `PgUp/PgDn` | ±10 帧 | `h` | 循环切换高度 |
+| `Home/End` | 首/末帧 | `l/e/v` | 切换 车道线/路沿/前车 |
+| `b` | BEV 面板 | `i` | 信息面板 |
+| `r` | 原始/warp 图像 | `f` | 仅显示低质量帧 |
+| `s` | 截图 | `q/ESC` | 退出 |
 
 ---
 
-### 4.4 `viz/label_stats.py`（新建）
+### 5.2 `viz/compare_heights.py` — 多高度对比
 
-**检查点：Step B（离线标注）完成后，定量质量审计**
+**检查点：** Step B 完成后
 
-**目的：** 生成各高度数据质量的统计报告，量化标注置信度分布、过滤率、z_height 变换一致性等指标，为训练前的数据配置提供决策依据。
+**目的：** 同一帧并排展示 H1~H6 的 warp 后图像 + 标注，直观对比多高度感知和 `transform_annotation` 正确性。
 
-**命令行：**
 ```bash
-python tools/dashcam/viz/label_stats.py \
-    data/multi_height/quick_Town04_ClearNoon_p5.0_y0.0_annotated/ \
-    [--output stats_report/]   # 输出图表目录（默认：输入目录下 stats/）
-    [--min-ll-prob 0.5]        # 质量过滤阈值
-    [--sample 1000]            # 随机采样帧数（加速，0=全部）
+python tools/dashcam/viz/compare_heights.py \
+    data/.../annotations/ \
+    --heights H1 H4 H6       # 可指定子集
+    --start 0
+    --no-annotations          # 仅原始 warp 图像
+    --min-ll-prob 0.5
+```
+
+**两种显示模式：**
+
+- **网格模式（默认）：** 2×3 面板（H1~H6），每面板 512×256
+- **全幅模式：** 单高度 1024×512，带 BEV 侧栏
+
+**额外键盘操作：** `g` 切换网格/全幅 | `1-6` 选择高度 | `a` 标注开关 | `z` 显示 z_height 数值
+
+**核心验证点：**
+1. 所有高度地平线位置一致（共享 pitch）
+2. z_height 偏移 = H_k - H1（按 `z` 查看数值）
+3. H5/H6 近场 X<10m 区域空白（近场盲区）
+4. 所有高度车道线 y_lat 一致，仅 z 不同
+
+---
+
+### 5.3 `viz/label_stats.py` — 定量统计
+
+**检查点：** Step B 完成后，定量质量审计
+
+**目的：** 生成统计报告和分布图，支持单 session 和批量两种模式（自动检测）。
+
+```bash
+# 单 session 模式
+python tools/dashcam/viz/label_stats.py data/.../annotations/
+
+# 批量模式（自动扫描子目录）
+python tools/dashcam/viz/label_stats.py data/multi_height_0311/ \
+    --output data/multi_height_0311/stats/ \
+    --min-ll-prob 0.5 \
+    --sample 0              # 0=全部帧
 ```
 
 **生成内容（`stats/` 目录）：**
 
-**1. `lane_prob_distribution.png`**：各高度 `lane_lines_prob` 分布
-- 子图网格（H1~H6 各一个子图）
-- 每个子图：左右内侧车道线（L0/R0）的概率直方图
-- 纵线标注：0.5 阈值位置
+| 文件 | 说明 |
+|------|------|
+| `stats_summary.txt` | 纯文本摘要报告 |
+| `lane_prob_distribution.png` | 各高度车道线置信度分布直方图 |
+| `filter_rates.png` | 各高度过滤通过率柱状图 |
+| `z_height_transform.png` | z_height 变换一致性验证（各高度曲线应平行，间距=ΔH） |
+| `lead_detection_rate.png` | 各高度前车检测率 |
+| `conf_dist_lane_lines_prob.png` | 车道线各分量置信度分布 |
+| `conf_dist_road_edges_prob.png` | 路沿置信度分布 |
+| `conf_dist_lead_prob.png` | 前车置信度分布 |
+| `conf_dist_total.png` | 全数据集置信度汇总 |
+| `session_pass_rates.png` | （批量）各 session 通过率排序 |
+| `pitch_yaw_heatmap.png` | （批量）pitch×yaw 通过率热力图 |
 
-**2. `filter_rates.png`**：各高度过滤率柱状图
-- X 轴：高度档位 H1~H6
-- Y 轴：通过 min_ll_prob 阈值的帧占比
-- 参考线：目标值（如 80%），低于此值标红
+**文本报告内容（批量模式）：**
 
-**3. `z_height_transform.png`**：z_height 变换验证
-- X 轴：X_IDXS 距离（0~192m）
-- Y 轴：均值 z_height（标定帧）
-- 每条曲线对应一个高度档位
-- 验证：各档位曲线应近似平行，间距 ≈ ΔH（±0.1m 容差）
-- 不平行 → transform_annotation 实现有误
-
-**4. `lead_detection_rate.png`**：前车检测率折线图
-- X 轴：高度档位
-- Y 轴：至少检测到 1 个前车（lead_prob > 0.3）的帧占比
-- 可用于判断 NPC 密度是否足够
-
-**5. `stats_summary.txt`**：纯文本摘要
 ```
-=== 多高度标注质量统计摘要 ===
-Session: quick_Town04_ClearNoon_p5.0_y0.0_annotated
-分析帧数: 20000 (采样: 1000)
-------------------------------------------
-         总帧数  PASS帧  过滤率  L0_prob(中位)  R0_prob(中位)  Lead率
-H1 1.22m  20000   18642   93.2%       0.91           0.89       72.1%
-H2 1.30m  20000   18501   92.5%       0.91           0.89       72.1%  ← z变换
-H3 1.50m  20000   18120   90.6%       0.90           0.88       72.1%  ← z变换
-H4 2.00m  20000   17803   89.0%       0.90           0.87       72.1%  ← z变换
-H5 2.50m  20000   17390   86.9%       0.90           0.87       72.1%  ← z变换
-H6 3.00m  20000   16820   84.1%       0.90           0.87       72.1%  ← z变换
-------------------------------------------
-z_height 变换一致性: ✅ PASS (均值误差 < 0.02m vs. ΔH)
-建议 min_ll_prob 阈值: 0.50  (H6 过滤后剩余 16820 帧)
+=== Batch Multi-Height Annotation Quality Summary ===
+Data root: multi_height_0311
+Sessions: 128
+
+--- Aggregate per height (all sessions) ---
+Height       Total    Pass  PassRate    L0 Med    R0 Med   Lead%
+H1 1.22m   15840   11689   73.8%      0.90      0.88   11.8%
+...
+
+--- z_height transform consistency: [OK] PASS ---
+  H2: expected dH=0.08m  measured=0.080m  error=0.0000m [OK]
+  ...
+
+--- Pass rate by pitch x yaw ---
+  pitch    yaw  Sessions   Frames   Pass%   Lead%
+  +3.0   +0.0         4      480   99.2%    1.0%
+  ...
+
+--- Confidence Metric Distribution (per height + total) ---
+  [lane_lines_prob]
+  Group    Component    Min     Max    Mean  Median   Count
+  H1       L-inner    0.001   0.997   0.681   0.895   15840
+  ...
 ```
 
-> **关键用途**：若 H6 过滤后帧数 < 8000（§4.5 目标），需增加采集量；若 z_height 变换一致性 FAIL，需检查 `transform_annotation()` 实现。
+**统计指标定义：**
+- **pass_rate**：L-inner 和 R-inner 置信度均 > min_ll_prob 的帧占比
+- **lead_rate**：至少 1 个 lead_prob > 0.3 的帧占比
+- **z_height 一致性**：各高度间 z 偏移量与预期 ΔH 的误差（<0.1m 为 PASS）
 
 ---
 
-## 5. 快速验证阶段运行步骤
+## 6. 端到端运行示例
 
-以下是快速验证（H1+H6，Town04，ClearNoon，pitch=5°，yaw=0°）的完整运行步骤，含各阶段人工检查命令：
+### 6.1 快速验证（单 session）
 
 ```bash
-SESSION="Town04_ClearNoon_p5.0_y0.0"
-SESSION_DIR="data/multi_height/${SESSION}"
-ANNOTATED_DIR="${SESSION_DIR}_annotated"
-
-# ── Step A：采集 ──────────────────────────────────────────────────────
-# 需 Carla 服务器运行，约 17 分钟仿真（20000帧 @20FPS）
+# ── Step A：采集 ─────────────────────────────────────────────
+# 需要 Carla 服务器运行
 python tools/dashcam/collect_multi_height.py \
-    --phase quick \
-    --output-base data/multi_height \
-    --max-frames 20000 \
-    --no-display
+    --phase custom \
+    --heights H1 H6 \
+    --map Town04 --weather ClearNoon \
+    --pitch 5.0 --yaw 0.0 \
+    --max-frames 120 --save-every 4 \
+    --random-spawn --no-display
 
-# 【人工检查 A】浏览原始数据，确认 H1/H6 图像正常
-python tools/dashcam/viz/browse_raw_session.py ${SESSION_DIR}
-# 检查要点：
-#   · 两个高度图像均有内容（无全黑/全白帧）
-#   · H6 图像明显比 H1 视角更高（地平线更低，近场地面更少）
-#   · v_ego 有合理速度变化（非固定常数）
+# ── Step B：标注 ─────────────────────────────────────────────
+DEV=CUDA python tools/dashcam/annotate_multi_height.py \
+    data/multi_height/Town04_ClearNoon_p5.0_y0.0/ \
+    --min-ll-prob 0.3
 
-# ── Step B：离线标注 ──────────────────────────────────────────────────
-# 需 GPU，约 5~10 分钟处理 20000 帧
-python tools/dashcam/annotate_multi_height.py \
-    ${SESSION_DIR} \
-    --onnx checkpoints/inadas_original.onnx \
-    --output ${ANNOTATED_DIR} \
-    --device cuda
+# ── 人工检查 ─────────────────────────────────────────────────
+# 查看 H1 标注质量
+python tools/dashcam/viz/inspect_annotated.py \
+    data/multi_height/Town04_ClearNoon_p5.0_y0.0/annotations/
 
-# 【人工检查 B1】查看标注质量，确认车道线叠加合理
-python tools/dashcam/viz/inspect_annotated.py ${ANNOTATED_DIR} --height H1
-# 按 h 切换到 H6 复查；按 f 只看被过滤帧，理解过滤原因
+# 多高度对比
+python tools/dashcam/viz/compare_heights.py \
+    data/multi_height/Town04_ClearNoon_p5.0_y0.0/annotations/
 
-# 【人工检查 B2】多高度对比，验证 transform_annotation 正确性
-python tools/dashcam/viz/compare_heights.py ${ANNOTATED_DIR}
-# 检查要点：
-#   · 6个面板地平线位置一致（pitch 相同，warp 一致）
-#   · H6 近场 X<10m 区域确实空白（近场盲区）
-#   · 所有高度车道线横向位置（y_lat）一致，仅 z 分量随高度递增
-#   · 按 z 键打开 z_height 数值显示，核对 H4~H6 值 ≈ H1值 + ΔH
+# 统计报告
+python tools/dashcam/viz/label_stats.py \
+    data/multi_height/Town04_ClearNoon_p5.0_y0.0/annotations/
+```
 
-# 【人工检查 B3】生成统计报告，确认数据量和质量满足训练要求
-python tools/dashcam/viz/label_stats.py ${ANNOTATED_DIR}
-# 检查要点：
-#   · H1/H6 过滤后剩余帧数 ≥ 800（快速验证目标）
-#   · z_height 变换一致性 PASS
-#   · lane_lines_prob 中位值 > 0.7
+### 6.2 批量训练数据采集
 
-# ── Step C：预处理缓存 ────────────────────────────────────────────────
-# 32核，约 1~2 分钟
-for H in H1 H6; do
-    python tools/dashcam/train/preprocess_cache.py \
-        ${ANNOTATED_DIR}/${H}
-done
+```bash
+# ── Step A：批量采集（264 sessions，支持断点续跑）─────────────
+python tools/dashcam/run_full_collection.py \
+    --output-base data/multi_height_0311 \
+    --max-frames 120 --save-every 4 \
+    --num-npc 40 --no-display
 
-# ── Step D：训练 ──────────────────────────────────────────────────────
+# Carla 崩溃后直接重新运行，自动跳过已完成的 session
+python tools/dashcam/run_full_collection.py \
+    --output-base data/multi_height_0311 \
+    --max-frames 120 --save-every 4
+
+# ── Step B：批量标注 ─────────────────────────────────────────
+# 预览
+python tools/dashcam/annotate_batch.py data/multi_height_0311/ --dry-run
+
+# 执行标注
+DEV=CUDA python tools/dashcam/annotate_batch.py data/multi_height_0311/ \
+    --min-ll-prob 0.1
+
+# ── 质量审计 ─────────────────────────────────────────────────
+python tools/dashcam/viz/label_stats.py data/multi_height_0311/ \
+    --min-ll-prob 0.3
+
+# ── Step C：预处理缓存 ───────────────────────────────────────
+# 对每个 session 的各高度目录执行
+python tools/dashcam/train/preprocess_cache.py \
+    data/multi_height_0311/Town04_ClearNoon_p5.0_y0.0/annotations/H1
+
+# ── Step D：训练 ─────────────────────────────────────────────
 python tools/dashcam/train/train.py \
-    --cache-dirs \
-        ${ANNOTATED_DIR}/H1_cache \
-        ${ANNOTATED_DIR}/H6_cache \
-    --output-dir checkpoints/implicit_quick_v1 \
-    --epochs 50 --batch-size 16 --early-stop 15
+    --cache-dirs data/.../H1_cache data/.../H6_cache \
+    --output-dir checkpoints/multi_height_v1 \
+    --epochs 100 --batch-size 16 --early-stop 20
 ```
 
 ---
 
-## 6. 实施顺序与依赖关系
-
-```
-carla_multi_height_world.py  ──→  collect_multi_height.py
-                                         │
-                              ┌──────────┤
-                              ▼          ▼
-             browse_raw_session.py   annotate_multi_height.py  ←── PretrainedVisionModel（已有）
-             （Step A 检查）              │
-                                ┌────────┤
-                                ▼        ▼
-              inspect_annotated.py   compare_heights.py    label_stats.py
-              （Step B 检查）          （Step B 对比）      （Step B 统计）
-                                         │
-                                         ▼
-                              preprocess_cache.py（修改）
-                                         │
-                                         ▼
-                               dataset.py（修改）
-                                         │
-                                         ▼
-                                train.py（暂无修改）
-```
-
-**建议开发顺序：**
-
-| 优先级 | 工具 | 估计工作量 | 前置条件 |
-|--------|------|-----------|---------|
-| P1 | `carla_multi_height_world.py` | 2h | 无 |
-| P1 | `collect_multi_height.py` | 2h | carla_multi_height_world.py |
-| P1 | `viz/browse_raw_session.py` | 1.5h | collect_multi_height.py（有数据） |
-| P2 | `annotate_multi_height.py` | 3h | PretrainedVisionModel（已有） |
-| P2 | `viz/inspect_annotated.py` | 2h | annotate_multi_height.py（有数据） |
-| P2 | `viz/compare_heights.py` | 2.5h | annotate_multi_height.py（有数据） |
-| P3 | `viz/label_stats.py` | 1.5h | annotate_multi_height.py（有数据） |
-| P3 | `preprocess_cache.py` 修改 | 1h | annotate_multi_height.py |
-| P3 | `dataset.py` 修改 | 0.5h | preprocess_cache.py 修改 |
-
-总估计：~16小时开发 + 测试时间（其中可视化工具 7.5h）。
-
-**开发与验证交替节奏（推荐）：**
-```
-Day 1: collect（P1 采集工具）+ browse_raw_session（P1 可视化）→ 跑一次快速采集并人工确认
-Day 2: annotate（P2 标注工具）+ inspect_annotated + compare_heights（P2 可视化）→ 验证标注质量
-Day 3: label_stats（P3）+ preprocess_cache + dataset（P3 训练准备）→ 首次训练试跑
-```
-
----
-
-## 7. 关键设计决策记录
+## 7. 关键设计决策
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| **Warp 参数来源** | 方案A：固定已知 pitch/yaw | §5.4 分析：Carla 真值精确，避免 rpyCalib 前 500 帧错误，34 组合无收敛代价 |
-| **标注生成时机** | 离线（collect 后处理） | 简化采集流程（不需要 VisionIPC/modeld 进程），批量 GPU 处理更高效 |
-| **标注格式** | canonical 字段直接存储（无 flat_label） | `PretrainedVisionModel` 返回 dict 而非 977-dim flat；decode_model_output() 解码为 canonical 格式（lane_lines (4,33,3) 等），与 extract_targets() 和 view_dual_data.py 绘图函数均兼容，preprocess_cache.py 无需新增提取函数 |
-| **多高度同步方式** | 同一 Carla session 多相机 | §5.1：零额外仿真成本，时序完美对齐，H1 标注对应每帧精确场景 |
-| **快速验证阶段** | H1+H6 仅 2 高度 | 验证 pipeline 端到端，最小资源投入，4 个相机 Carla 性能可接受 |
-| **camera_height 存入缓存** | 是 | 为第二阶段显式高度注入（HeightConditionedHead）预留，无额外开销 |
-| **log_sigma 处理** | 直接复制（不调整） | §5.5 决策：暂不引入额外超参，留作后续研究 |
-| **质量过滤** | 采集后处理时过滤 | §5.4 Step 3 决策：采集时不过滤，标注后统计分析是否需要 |
-| **车型** | 仅特斯拉 | §4.6 决策：暂时不考虑多种车型，减少变量 |
-| **可视化工具基础** | 复用 visualizer.py + view_dual_data.py | 两文件已实现 lane/edge/lead 投影、BEV、置信度着色、键盘导航；新工具只增加多高度网格布局层 |
-| **可视化工具位置** | `tools/dashcam/viz/` 子目录 | 与采集/训练工具分离；`__init__.py` 导出共用绘制函数供各工具复用 |
-| **warp 后图像显示** | inspect/compare 工具实时计算 warp | 原始 road_rgb 存在 NPZ 中，warp 在工具里从 clip_info.json 参数重建；避免重复存储 warp 后图像（每帧省 ~600KB） |
+| **存储格式** | PNG + JSON（非 NPZ） | 图像和标注解耦；PNG 便于浏览和调试；JSON 人类可读 |
+| **推理引擎** | tinygrad TinyJit pkl | 与 openpilot 推理路径一致（非 PyTorch/onnx2torch）；自动编译缓存 |
+| **GPU 预处理** | OpenCL (modeld_preprocess_cl.py) | 精确复制 openpilot modeld 三阶段流水线（rgb_to_nv12 → transform → loadyuv） |
+| **Warp 参数来源** | 方案A：从 clip_info.json 读取固定 pitch/yaw | Carla 精确已知相机姿态，无需 rpyCalib 标定收敛 |
+| **标注生成时机** | 离线批量处理（非在线采集时） | 简化采集流程；GPU 批量推理更高效；模型可升级无需重新采集 |
+| **标注格式** | canonical JSON（非 flat tensor） | 与 extract_targets() 兼容；可视化工具直接使用；人类可读 |
+| **多高度同步** | 同一 session 多相机 + frame_id 全匹配 | 零额外仿真成本；时序完美对齐；H1 标注精确对应每帧场景 |
+| **save_every=4** | 每 4 tick 保存一帧（5 FPS） | 采集速度提升 4×；与 TEMPORAL_SKIP=4 对齐，标注时 buffer 深度=2 |
+| **断点续跑** | 基于文件计数（非 progress JSON） | 鲁棒：progress JSON 仅供参考，实际基于 H1 目录帧数判断 |
+| **质量过滤** | L-inner & R-inner 置信度双阈值 | 只关心行车主视野的内侧车道线，外侧和路沿不参与过滤判定 |
+| **z 高度变换** | 线性偏移 z += delta_h | 近场近似，X > ~10m 有效；远场误差可忽略（∝ ΔH/X → 0） |
+| **随机出生点** | random_spawn=True | 增加场景多样性，避免同一 spawn_point 的数据偏差 |
+| **NPC 密度** | 默认 40 辆 | 平衡仿真性能和场景真实性；lead 检测率约 12% 符合预期 |
