@@ -57,10 +57,21 @@ FULL_HEIGHTS = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
 DEFAULT_MAX_FRAMES = 20000
 
 SCENES = [
-  ('Town04', 'ClearNoon'),
-  ('Town04', 'ClearSunset'),
-  ('Town04', 'CloudyNoon'),
-  ('Town04', 'WetNoon'),
+
+  ('Town03', 'ClearNoon'),
+  ('Town03', 'WetSunset'),
+  ('Town05', 'ClearSunset'),
+  ('Town05', 'CloudyNoon'),
+
+  ('Town06', 'ClearNoon'),
+  ('Town06', 'ClearSunset'),
+  ('Town06', 'CloudySunset'),
+  ('Town06', 'WetNoon'),
+
+#  ('Town04', 'ClearNoon'),
+#  ('Town04', 'ClearSunset'),
+#  ('Town04', 'CloudyNoon'),
+#  ('Town04', 'WetNoon'),
 ]
 
 # Formal training pose matrix from §4.3.3 of height_extension_design.md.
