@@ -12,8 +12,8 @@
 | 预训练模型 (.pt) | ✅ 已就绪 | `checkpoints/inadas_original.pt` |
 | 预训练模型 (.onnx) | ✅ 已就绪 | `checkpoints/inadas_original.onnx` |
 | tinygrad 推理模型 | ✅ 已就绪 | `checkpoints/inadas_original_tinygrad_cuda.pkl` |
-| 多高度原始数据 | ✅ 已采集（多 sessions × 6 heights） | TODO |
-| 离线标注 | ✅ 已就绪  | — |
+| 多高度原始数据 | ✅ 已采集（163 sessions × 6 heights） | `data/multi_height-0312/` |
+| 离线标注 | ✅ 已就绪 | `data/multi_height-0312/Town*/annotations/` |
 | 数据清洗脚本 | ❌ 未开发 | — |
 | 训练脚本 | ❌ 需重新开发 | — |
 | 评价脚本 | ❌ 未开发 | — |
@@ -105,9 +105,16 @@ DEV=CUDA python tools/dashcam/annotate_batch.py data/multi_height-0312/ \
 
 **输出**：
 
-1. 创建`<dataset_dir>/Town*/cleaned_annotations`目录，用于存放清洗过后的标签
-2. 在`<dataset_dir>`目录下新增clean_log.txt文档，每行记录一个经过清洗被选中的H1数据帧索引。（对应的H2~H6也被选中）
-3. 根据清洗规则筛选数据帧，保持annotations的文件目录结构，存储清洗过后的标注数据。
+1. 在 `<dataset_dir>` 目录下新增 `clean_log.txt`，每行记录一个被选中的帧索引，格式为 `<session_name>/<frame_number>`：
+   ```
+   Town04_route01/000000
+   Town04_route01/000020
+   Town04_route01/000040
+   ...
+   ```
+   该索引基于 H1 分析结果生成，H2~H6 共享相同的帧选中结果。
+
+2. 创建 `<dataset_dir>/Town*/cleaned_annotations/{H1..H6}/` 目录，保持与原始 `annotations/` 相同的子目录结构，存储清洗后的标注 JSON（lead_prob 二值化、lead 位置 mask 等修改已写入）。
 
 **命令行接口**：
 ```bash
@@ -130,44 +137,89 @@ python tools/dashcam/train/clean_data.py \
 ### 数据集划分
 #### T3.1 训练数据集划分
 
+**目标**：将 T2 清洗后的数据帧按 8:1:1 全局随机划分为 train/val/test 三个子集。
+
 **文件**：`tools/dashcam/train/split_dataset.py`（新建）
 
-**划分流程**（严格按以下顺序）：
+**划分流程**：
 
 ```
-Step 1: 从T2筛选的数据集合中，按 8/1/1 比例划分 → train/, val/, test/
-Step 2： 在每个session中分别创建train.txt，val.txt, test.txt用于存放数据索引。
+Step 1: 读取 <dataset_dir>/clean_log.txt，获取所有被选中的帧索引列表
+Step 2: 全局随机 shuffle（固定 seed 保证可复现）
+Step 3: 按 8:1:1 比例划分 → train / val / test
+Step 4: 在 <dataset_dir> 目录下生成 train.txt, val.txt, test.txt，
+        每行格式同 clean_log.txt: <session_name>/<frame_number>
 ```
+
+> 注：已有 1 FPS 时序抽帧（T2 规则 1）防止时序泄漏，因此帧级别 shuffle 是安全的。
+
+**命令行接口**：
+```bash
+python tools/dashcam/train/split_dataset.py \
+    data/multi_height-0312/ \
+    --ratio 0.8 0.1 0.1 \
+    --seed 42
+```
+
+**输出**：
+```
+data/multi_height-0312/
+  train.txt     # 训练集帧索引
+  val.txt       # 验证集帧索引
+  test.txt      # 测试集帧索引
+  split_info.json  # 统计信息：各子集帧数、session 覆盖率等
+```
+
+**验证**：
+- train + val + test 帧数之和 = clean_log.txt 总行数
+- 三个文件无交集
+- 各子集均覆盖 > 80% 的 sessions（无严重分布偏斜）
+
+**依赖**：T2
 
 #### T3.2 H1 退化验证集
 
-**目标**：完成H1 退化验证集抽选。
+**目标**：从 T2 抽帧规则**未选中**的 H1 帧中抽选退化验证集，用于训练过程中监测 H1 性能是否退化。
 
-**文件**：`tools/dashcam/train/H1_split_dataset.py`（新建）
+**文件**：`tools/dashcam/train/h1_holdout_split.py`（新建）
 
 **划分流程**（严格按以下顺序）：
 
 ```
-Step 1: 使用与T2相同的置信度筛选规则筛选H1数据；
-Step 2: 从没有被T2的抽帧规则选中的H1数据中随机抽出 10% → H1 退化验证集（h1_holdout/）
-Step 3: 建立退化验证集索引文件
+Step 1: 遍历所有 session 的 H1 标注，列出全部帧号
+Step 2: 排除 clean_log.txt 中已选中的帧（这些帧已用于 T3.1 的 train/val/test）
+Step 3: 对剩余帧应用 T2 相同的置信度过滤（L-inn prob > 0.3 且 R-inn prob > 0.3）
+Step 4: 从通过过滤的帧中随机抽出 10% → H1 退化验证集
+Step 5: 生成索引文件
 ```
 
-**输出目录**：
+**输出**：
 ```
-TODO
+data/multi_height-0312/
+  h1_holdout.txt   # 每行: <session_name>/<frame_number>（仅 H1 帧）
 ```
 
 **命令行接口**：
 ```bash
-TODO
+python tools/dashcam/train/h1_holdout_split.py \
+    data/multi_height-0312/ \
+    --clean-log data/multi_height-0312/clean_log.txt \
+    --holdout-ratio 0.1 \
+    --min-ll-prob 0.3 \
+    --seed 42
 ```
 
 **验证**：
-
-TODO
+- h1_holdout.txt 中的帧与 clean_log.txt 中的帧**无交集**（确保与训练/验证/测试集不重叠）
+- holdout 帧数 ≈ 未选中且通过置信度过滤的 H1 帧总数 × 10%
+- 所有 holdout 帧的 L-inn/R-inn prob > 0.3（置信度过滤生效）
+- holdout 帧覆盖的 session 数 > 总 session 数的 80%（避免分布偏斜）
 
 **依赖**：T2
+
+#### T3.3 Tiny数据集
+
+从T3.1和T3.2的成果中摘取出一份很小的数据集子集，用于调试训练脚本。在这些数据集上不关注模型精度。
 
 ---
 
@@ -216,14 +268,19 @@ npz文件名格式为"\<scene name\>-H\<k\>-\<xxxxxx\>.npz"
 **命令行接口**：
 ```bash
 python tools/dashcam/train/build_cache.py \
-    data/multi_height-0312_split/ \
+    data/multi_height-0312/ \
     --output data/caches/ \
     --gpu  # 使用 OpenCL GPU 预处理
 ```
 
+脚本自动读取 `<dataset_dir>` 下的 `train.txt`, `val.txt`, `test.txt`, `h1_holdout.txt` 索引文件，
+结合 `cleaned_annotations/` 中的标注 JSON 和原始图像，生成各子目录的 npz 缓存。
+h1_holdout 中的帧仅处理 H1 高度。
+
 **验证**：
 - 随机抽样 5 帧，对比缓存图像与原始 PNG warp 后的图像是否一致
-- 各子目录帧数与 split_info.json 一致
+- 各子目录帧数与 split_info.json 中的统计一致
+- h1_holdout/ 中的 npz 仅包含 H1 数据（camera_height ≈ 1.22m）
 
 **预估耗时**：~30 分钟（GPU 预处理）
 
@@ -392,7 +449,7 @@ def gaussian_nll(pred_mean, pred_log_sigma, target):
 ```bash
 python tools/dashcam/train/train_height.py \
     --pretrained checkpoints/inadas_original.pt \
-    --cache-dir data/multi_height-0312_cache/ \
+    --cache-dir data/caches/ \
     --output-dir checkpoints/implicit_v1/ \
     --epochs 100 \
     --batch-size 16 \
@@ -461,7 +518,8 @@ python tools/dashcam/train/train_height.py \
 ```bash
 python tools/dashcam/train/evaluate_height.py \
     --checkpoint checkpoints/implicit_v1/best.pt \
-    --cache-dir data/multi_height-0312_cache/test/ \
+    --cache-dir data/caches/test/ \
+    --h1-cache-dir data/caches/h1_holdout/ \
     --output checkpoints/implicit_v1/eval_report.txt
 ```
 
@@ -486,9 +544,10 @@ python tools/dashcam/train/evaluate_height.py \
 
 **验证**：
 - 预训练模型在 H1 测试集上的指标作为 sanity check
+- H1 退化指标可正常计算
 - 输出格式与 §5.2.5 一致
 
-**依赖**：T5, T6
+**依赖**：T5, T6（开发依赖）；运行时依赖 T4 生成的缓存数据
 
 ---
 
@@ -499,18 +558,17 @@ python tools/dashcam/train/evaluate_height.py \
 **目标**：用少量数据（H1 + H6）验证全流水线可行性。
 
 **操作**：
-1. 从 `data/multi_height-0312/` 中选取 2 个 session（名义中心 pitch=5°, yaw=0°）
-2. 仅标注 H1 和 H6
-3. 执行 T2→T3→T4 流水线，生成小数据集
-4. 运行 `train_height.py`，Phase 1 only，10 epochs
-5. 运行 `evaluate_height.py`，检查 H1/H6 指标
+1. 从 `data/multi_height-0312/` 中选取 2–3 个 session（名义中心 pitch=5°, yaw=0°）
+2. 对选中 sessions 执行 T2（清洗）→ T3（划分）→ T4（缓存）流水线，仅处理 H1 和 H6，生成小数据集到 `data/caches_mini/`
+3. 运行 `train_height.py --cache-dir data/caches_mini/`，Phase 1 only，10 epochs
+4. 运行 `evaluate_height.py --cache-dir data/caches_mini/test/ --h1-cache-dir data/caches_mini/h1_holdout/`，检查 H1/H6 指标
 
 **成功标准**：
-- 训练 loss 收敛（无爆炸）
+- 训练 loss 收敛（无爆炸、无 NaN）
 - H1 退化 < 20%
 - H6 y_lat MAE < 1.0m
 
-**依赖**：T1（部分）, T2–T9 全部
+**依赖**：T2–T9 全部
 
 ---
 
@@ -519,9 +577,9 @@ python tools/dashcam/train/evaluate_height.py \
 **目标**：使用全量数据执行完整的渐进式微调。
 
 **操作**：
-1. 对全部 163 sessions 执行 T1→T2→T3→T4
-2. 运行 EXP-B 配置：Phase 1→3，100 epochs
-3. 运行 `evaluate_height.py` 生成完整评价报告
+1. 对全部 163 sessions 执行 T2→T3→T4 完整流水线，生成 `data/caches/` 全量缓存
+2. 运行 `train_height.py --cache-dir data/caches/`，EXP-B 配置：Phase 1→3，100 epochs
+3. 运行 `evaluate_height.py --cache-dir data/caches/test/ --h1-cache-dir data/caches/h1_holdout/` 生成完整评价报告
 
 **依赖**：T10 成功
 
@@ -571,9 +629,10 @@ DEV=CUDA python tools/dashcam/train/compile_tinygrad.py \
 ## 任务依赖图
 
 ```
-T1 (批量标注)
+T1 (批量标注) ✅ 已完成
  └─→ T2 (数据清洗)
-      └─→ T3 (数据划分)
+      ├─→ T3.1 (训练集划分)
+      └─→ T3.2 (H1 退化验证集)
            └─→ T4 (预处理缓存)
                 └─→ T6 (Dataset)
                      └─→ T8 (训练脚本) ←── T5 (模型加载) + T7 (损失函数)
@@ -584,40 +643,40 @@ T1 (批量标注)
 ```
 
 **可并行的任务**：
-- T5, T7, T9 不依赖数据，可与 T1–T4 **并行开发**
-- T5 + T7 可与 T6 **并行开发**
+- T5, T7 不依赖数据，可与 T2–T4 **并行开发**
+- T9 不依赖数据，可与 T3–T4 **并行开发**（但运行时需要缓存数据）
+- T3.1 和 T3.2 可**并行执行**（都仅依赖 T2 输出）
 
 ---
 
 ## 开发顺序建议
 
+> T1（批量标注）已完成，从 T2 开始。
+
 ```
 第 1 轮（并行）：
-  ├── T1  批量标注（GPU 运行，耗时长，先启动）
+  ├── T2  数据清洗脚本
   ├── T5  模型加载与层级分析（不依赖数据）
   └── T7  损失函数（不依赖数据）
 
-第 2 轮（T1 完成后）：
-  ├── T2  数据清洗脚本
+第 2 轮（T2 完成后）：
+  ├── T3  数据划分（T3.1 + T3.2）
   └── T9  评价脚本（可用 T5 的模型 + 后续数据验证）
 
 第 3 轮：
-  ├── T3  数据划分
-  └── T6  Dataset（等 T4 或用 T2 输出做初步测试）
+  ├── T4  预处理缓存
+  └── T6  Dataset（等 T4 完成后验证）
 
 第 4 轮：
-  └── T4  预处理缓存
-
-第 5 轮：
   └── T8  训练主脚本（集成 T5, T6, T7）
 
-第 6 轮：
+第 5 轮：
   └── T10 快速验证实验
 
-第 7 轮：
+第 6 轮：
   └── T11 正式训练
 
-第 8 轮：
+第 7 轮：
   ├── T12 评价决策
   └── T13 导出部署
 ```
