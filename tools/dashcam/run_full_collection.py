@@ -63,10 +63,10 @@ SCENES = [
   ('Town05', 'ClearSunset'),
   ('Town05', 'CloudyNoon'),
 
-  ('Town06', 'ClearNoon'),
-  ('Town06', 'ClearSunset'),
-  ('Town06', 'CloudySunset'),
-  ('Town06', 'WetNoon'),
+  ('Town05', 'ClearNoon'),
+  ('Town05', 'CloudySunset'),
+  ('Town05', 'WetNoon'),
+  ('Town05', 'WetSunset'),
 
 #  ('Town04', 'ClearNoon'),
 #  ('Town04', 'ClearSunset'),

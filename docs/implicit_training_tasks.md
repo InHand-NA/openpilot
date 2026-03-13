@@ -256,7 +256,7 @@ python tools/dashcam/train/h1_holdout_split.py \
 
 **依赖**：T2
 
-#### T3.3 Tiny数据集
+#### T3.3 Mini数据集
 
 从T3.1和T3.2的成果中摘取出一份很小的数据集子集，用于调试训练脚本。在这些数据集上不关注模型精度。
 

@@ -951,7 +951,7 @@ def main():
                       help='Annotated session dir (single) or data root with multiple sessions (batch)')
   parser.add_argument('--output', default=None,
                       help='Output directory for charts/report (default: <input_dir>/stats/)')
-  parser.add_argument('--min-ll-prob', type=float, default=0.1, help='Quality filter threshold')
+  parser.add_argument('--min-ll-prob', type=float, default=0.3, help='Quality filter threshold')
   parser.add_argument('--sample', type=int, default=0,
                       help='Max frames to sample per height per session (0=all)')
   args = parser.parse_args()
