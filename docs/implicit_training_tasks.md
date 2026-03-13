@@ -88,7 +88,7 @@ DEV=CUDA python tools/dashcam/annotate_batch.py data/multi_height-0312/ \
    - 采集 `save_every=4` → 保存帧号为 0, 4, 8, 12, 16, 20, ...
    - 抽帧后保留帧号为 0, 20, 40, 60, ...（每隔 5 个保存帧取 1 个）
 
-2. **置信度过滤**：L-inn prob > 0.3 且 R-inn prob > 0.3
+2. **最低置信度过滤**：仅排除完全无车道线的帧——L-inn prob ≤ 0.05 **且** R-inn prob ≤ 0.05 时丢弃（即至少一条内侧线置信度 > 0.05 即保留）
 
 3. **Lead 二值化**：
    - `lead_prob[i] ≥ 0.5` → `1.0`，否则 → `0.0`
@@ -121,14 +121,40 @@ DEV=CUDA python tools/dashcam/annotate_batch.py data/multi_height-0312/ \
 python tools/dashcam/train/clean_data.py \
     data/multi_height-0312/ \
     --subsample 5 \
-    --min-ll-prob 0.3 \
+    --min-ll-prob 0.05 \
     --lead-threshold 0.5 \
     --dry-run  # 仅统计，不写入
 ```
 
-**验证**：
-- 随机抽样 10 帧检查 PRE 帧是否正确配对
-- 检查 lead_prob 全为 0.0 或 1.0
+**验证工具**：`tools/dashcam/train/verify_clean.py`（新建）
+
+```bash
+python tools/dashcam/train/verify_clean.py data/multi_height-0312/
+```
+
+自动检查项（全部 PASS 才通过）：
+
+| # | 检查项 | 方法 |
+|---|--------|------|
+| 1 | 抽帧正确性 | clean_log.txt 中每个帧号 % 20 == 0（save_every=4，subsample=5 → 步长 20） |
+| 2 | 置信度过滤 | 对 clean_log.txt 中每帧，读取 H1 原始标注，验证 L-inn prob > 0.05 **或** R-inn prob > 0.05（至少一条内侧线可见） |
+| 3 | Lead 二值化 | 遍历所有 cleaned_annotations JSON，lead_prob 的值只有 0.0 或 1.0 |
+| 4 | Lead 位置 mask | lead_prob=0.0 时，对应 lead 位置数据为 NaN |
+| 5 | PRE 帧存在性 | 对每个被选中帧 N，验证原始图像中帧 N-4 存在（road_*.png 和 wide_*.png） |
+| 6 | H1~H6 同步 | 每个 session 的 cleaned_annotations/ 下 H1~H6 拥有完全相同的文件集合 |
+| 7 | 完整性 | clean_log.txt 行数 = 任一 session cleaned_annotations/H1/ 下的文件数之和 |
+
+输出示例：
+```
+[PASS] 抽帧正确性: 2847/2847 帧号均为 20 的倍数
+[PASS] 置信度过滤: 2847/2847 帧至少一条内侧线 prob>0.05
+[PASS] Lead 二值化: 17082 个 JSON 中 lead_prob 全为 0.0/1.0
+[PASS] Lead 位置 mask: 4521 个 lead_prob=0.0 样本均已 NaN mask
+[PASS] PRE 帧存在性: 2847/2847 帧均有对应 PRE 帧
+[PASS] H1~H6 同步: 163 sessions 全部一致
+[PASS] 完整性: clean_log 2847 行 = cleaned_annotations H1 文件数 2847
+===== 7/7 PASS =====
+```
 
 **依赖**：T1
 
@@ -170,10 +196,17 @@ data/multi_height-0312/
   split_info.json  # 统计信息：各子集帧数、session 覆盖率等
 ```
 
-**验证**：
-- train + val + test 帧数之和 = clean_log.txt 总行数
-- 三个文件无交集
-- 各子集均覆盖 > 80% 的 sessions（无严重分布偏斜）
+**验证**：脚本运行结束时自动执行以下检查，全部 PASS 才正常退出：
+
+| # | 检查项 | 方法 |
+|---|--------|------|
+| 1 | 总帧数守恒 | len(train) + len(val) + len(test) == len(clean_log.txt) |
+| 2 | 无交集 | train ∩ val = ∅, train ∩ test = ∅, val ∩ test = ∅ |
+| 3 | 比例偏差 | 实际比例与目标比例的绝对偏差 < 1%（因整数取整） |
+| 4 | Session 覆盖率 | 每个子集覆盖的 session 数 / 总 session 数 > 80% |
+| 5 | 索引合法性 | 每行均可解析为 `<session_name>/<frame_number>`，且对应的 cleaned_annotations 文件存在 |
+
+检查结果写入 split_info.json 的 `"verification"` 字段。
 
 **依赖**：T2
 
@@ -188,7 +221,7 @@ data/multi_height-0312/
 ```
 Step 1: 遍历所有 session 的 H1 标注，列出全部帧号
 Step 2: 排除 clean_log.txt 中已选中的帧（这些帧已用于 T3.1 的 train/val/test）
-Step 3: 对剩余帧应用 T2 相同的置信度过滤（L-inn prob > 0.3 且 R-inn prob > 0.3）
+Step 3: 对剩余帧应用 T2 相同的最低置信度过滤（L-inn prob > 0.05 或 R-inn prob > 0.05）
 Step 4: 从通过过滤的帧中随机抽出 10% → H1 退化验证集
 Step 5: 生成索引文件
 ```
@@ -205,15 +238,21 @@ python tools/dashcam/train/h1_holdout_split.py \
     data/multi_height-0312/ \
     --clean-log data/multi_height-0312/clean_log.txt \
     --holdout-ratio 0.1 \
-    --min-ll-prob 0.3 \
+    --min-ll-prob 0.05 \
     --seed 42
 ```
 
-**验证**：
-- h1_holdout.txt 中的帧与 clean_log.txt 中的帧**无交集**（确保与训练/验证/测试集不重叠）
-- holdout 帧数 ≈ 未选中且通过置信度过滤的 H1 帧总数 × 10%
-- 所有 holdout 帧的 L-inn/R-inn prob > 0.3（置信度过滤生效）
-- holdout 帧覆盖的 session 数 > 总 session 数的 80%（避免分布偏斜）
+**验证**：脚本运行结束时自动执行以下检查，全部 PASS 才正常退出：
+
+| # | 检查项 | 方法 |
+|---|--------|------|
+| 1 | 与训练集无交集 | h1_holdout ∩ clean_log = ∅ |
+| 2 | 比例正确 | holdout 帧数 / 候选帧总数 与 --holdout-ratio 的偏差 < 2% |
+| 3 | 置信度过滤 | 每帧读取 H1 原始标注，验证 L-inn prob > 0.05 或 R-inn prob > 0.05 |
+| 4 | Session 覆盖率 | holdout 覆盖的 session 数 / 总 session 数 > 80% |
+| 5 | 索引合法性 | 每行对应的 H1 标注文件存在 |
+
+检查结果打印到 stdout 并记录到 `h1_holdout_info.json`。
 
 **依赖**：T2
 
@@ -277,10 +316,45 @@ python tools/dashcam/train/build_cache.py \
 结合 `cleaned_annotations/` 中的标注 JSON 和原始图像，生成各子目录的 npz 缓存。
 h1_holdout 中的帧仅处理 H1 高度。
 
-**验证**：
-- 随机抽样 5 帧，对比缓存图像与原始 PNG warp 后的图像是否一致
-- 各子目录帧数与 split_info.json 中的统计一致
-- h1_holdout/ 中的 npz 仅包含 H1 数据（camera_height ≈ 1.22m）
+**验证工具**：`tools/dashcam/train/verify_cache.py`（新建）
+
+```bash
+python tools/dashcam/train/verify_cache.py \
+    data/caches/ \
+    --dataset-dir data/multi_height-0312/ \
+    --visual-samples 5  # 生成可视化对比图
+```
+
+自动检查项（全部 PASS 才通过）：
+
+| # | 检查项 | 方法 |
+|---|--------|------|
+| 1 | 帧数一致性 | 各子目录 npz 文件数与 train.txt/val.txt/test.txt/h1_holdout.txt 中的帧数 × 高度数一致 |
+| 2 | npz 字段完整性 | 随机抽取 20 个 npz，检查所有必需字段存在、shape 和 dtype 正确 |
+| 3 | 数值范围 | road_input/wide_input ∈ [0,255]；camera_height ∈ [0.8, 3.5]；lane_lines_prob ∈ [0,1]；lead_prob ∈ {0.0, 1.0} |
+| 4 | H1 holdout 纯度 | h1_holdout/ 下所有 npz 的文件名包含 `-H1-`，camera_height ≈ 1.22m（±0.1） |
+| 5 | 图像一致性 | 随机抽样 N 帧，独立执行 PNG→warp→loadyuv 流水线，与 npz 中 road_input/wide_input 做逐像素对比，MAE=0 |
+| 6 | 标注一致性 | 随机抽样 N 帧，读取 cleaned_annotations JSON，与 npz 中标注字段逐值对比，误差 < 1e-6 |
+
+`--visual-samples N` 时额外生成可视化 PNG：
+```
+data/caches/verify_samples/
+  sample_001_road.png   # 左=原始 PNG warp 后，右=npz 中 road_input 还原
+  sample_001_wide.png
+  ...
+```
+
+输出示例：
+```
+[PASS] 帧数一致性: train=13686, val=1710, test=1710, h1_holdout=1205
+[PASS] npz 字段完整性: 20/20 个样本 shape/dtype 全部正确
+[PASS] 数值范围: 20/20 个样本全部在合法范围内
+[PASS] H1 holdout 纯度: 1205/1205 文件均为 H1, height=1.22±0.02
+[PASS] 图像一致性: 5/5 帧 MAE=0.0（逐像素完全一致）
+[PASS] 标注一致性: 5/5 帧最大误差=0.0
+===== 6/6 PASS =====
+可视化已保存到 data/caches/verify_samples/
+```
 
 **预估耗时**：~30 分钟（GPU 预处理）
 
@@ -324,7 +398,41 @@ h1_holdout 中的帧仅处理 H1 高度。
 - 随机输入的输出 shape = `(1, 977)`
 - phase 1/2/3/4 的可训练参数量依次递增
 
-**依赖**：无（仅依赖 checkpoint 文件）
+---
+
+**预训练模型 H1 精度验证**：`tools/dashcam/train/eval_pretrained_h1.py`（新建）
+
+用 `inadas_original.pt` 在 H1 标注数据上做推理，建立预训练基线指标。该基线有两个用途：
+1. **sanity check**：验证 pt 权重加载正确（推理结果应与 ONNX 标注高度一致，因为标注本身由同一模型产生）
+2. **退化基线**：训练后对比 H1 精度退化程度时的参照值
+
+```bash
+python tools/dashcam/train/eval_pretrained_h1.py \
+    --checkpoint checkpoints/inadas_original.pt \
+    --cache-dir data/caches/h1_holdout/ \
+    --output checkpoints/eval_pretrained_h1.json
+```
+
+**评估内容**：
+
+| 指标 | 计算方法 | 预期结果 |
+|------|---------|---------|
+| lane_lines y_lat MAE | 预测均值 vs H1 标注，仅 prob>0.5 的车道线 | **极低**（< 0.05m），因为标注来自同一模型 |
+| lane_lines z_height MAE | 同上 | **极低** |
+| lane_lines_prob MAE | 预测 prob vs 标注 prob | **极低**（< 0.01） |
+| lead x_fwd MAE | 预测 vs 标注，仅 lead_prob=1.0 的帧 | **极低** |
+| lead_prob accuracy | 预测二值化 vs 标注二值化 | **极高**（> 99%） |
+| pose MAE | 各分量 MAE | **极低** |
+| road_transform MAE | 各分量 MAE | **极低** |
+| total_loss（用 T7 损失函数） | 与训练时同一损失函数计算 | 记录数值，作为 epoch 0 的 H1 baseline |
+
+**判定标准**：
+- 所有位置 MAE < 0.1m → PASS（证明 pt 加载正确）
+- 若 MAE 明显偏大 → 模型加载或预处理流水线有 bug，需排查
+
+**输出**：`eval_pretrained_h1.json`，包含各指标数值，供 T8 训练脚本读取作为 `val_loss_h1_baseline`。
+
+**依赖**：无（仅依赖 checkpoint 文件）；运行时依赖 T4 生成的 h1_holdout 缓存和 T7 损失函数
 
 ---
 
@@ -391,6 +499,40 @@ h1_loader    = DataLoader(h1_dataset,    batch_size=16, shuffle=False, num_worke
 
 **文件**：`tools/dashcam/train/losses.py`（新建）
 
+**设计依据**：
+
+本损失函数的设计由两个因素决定：模型输出格式和标注数据特性。
+
+> **注意**：openpilot 原始训练代码未公开，我们无法确认 comma.ai 使用的损失函数。以下设计是基于模型输出格式的合理推断，不是对原始训练的复现。
+
+1. **为什么用 GaussianNLL 而非 MSE？**
+   - 从推理代码 `parse_model_outputs.py` 的 `parse_mdn()` 可知，模型连续值输出采用 `[mean, log_sigma]` 格式，解码时对 log_sigma 做 `exp()` 得到标准差
+   - GaussianNLL = `0.5 * [log_sigma + (target - mean)² / exp(2·log_sigma)]` 是该概率输出格式对应的标准似然函数
+   - 若用 MSE 则忽略了 sigma 分支，模型一半输出维度无训练信号，sigma 分支会退化为任意值
+
+2. **为什么 log_sigma 需要 clamp [-3, 3]？**
+   - 这是 MDN 训练的标准做法，防止两个方向的数值病态：
+     - **下界 -3**（sigma≈0.05m）：若 log_sigma → -∞，sigma → 0，NLL 中的 `(target-mean)²/exp(2·log_sigma)` 项指数增长，导致梯度爆炸。0.05m 已小于车道线标注本身的噪声水平，足够表达高置信
+     - **上界 3**（sigma≈20m）：若 log_sigma → +∞，模型可通过预测极大 sigma "作弊"来降低 loss 而不改善 mean 精度。20m 对驾驶场景中任何输出头都是足够宽松的不确定性上限
+   - 区间 [-3, 3] 覆盖的 sigma 范围 [0.05m, 20m] 对所有输出头（车道线、路沿、前车、pose）都是合理的工作区间
+
+3. **为什么 lane_lines/road_edges 位置损失要用教师 prob 加权？**
+   - 训练数据包含低置信度帧（清洗阈值仅 0.05），这些帧的位置标签不可靠
+   - 用教师 prob 作为权重：prob=0.9 → 位置损失权重 0.9，prob=0.1 → 权重 0.1，自动降低噪声标签的梯度影响
+   - 概率头 BCE 损失不加权，确保模型学习完整的置信度分布（包括"何时该输出低置信度"）
+   - 该设计消除了对硬置信度阈值的依赖，是知识蒸馏的标准做法
+
+4. **为什么 lead 用 binary mask 而非 prob 加权？**
+   - lead_prob 在 0.3–0.7 区间噪声极大，教师模型的位置预测在此区间不可靠
+   - 与车道线不同，前车检测在部署中是二值决策（存在/不存在），二值化目标更贴近实际使用
+   - 当 lead_prob=0.0 时，位置数据标记为 NaN 并 mask 掉，完全不贡献梯度
+   - lead 位置损失已有 0.5 的全局降权（缓解 MDN 数值不稳定风险）
+
+5. **各分量权重的优先级逻辑**（见 training_evaluation_methodology.md §4.3.3）：
+   - 权重 1.0：lane_lines / lane_lines_prob / road_edges / lead_prob — LDW/FCW 核心输出，必须精确
+   - 权重 0.5：lead 位置 — FCW 核心但 MDN 数值不稳定，降权保护训练稳定性
+   - 权重 0.2：pose / road_transform / wide_from_device_euler — 辅助任务，提供有用梯度但不应主导训练方向
+
 **核心类**：
 
 ```python
@@ -414,13 +556,13 @@ class MultiHeightLoss(nn.Module):
 
 | 输出头 | 损失类型 | 特殊处理 |
 |--------|---------|---------|
-| lane_lines | GaussianNLL | log_sigma clamp [-3, 3] |
-| road_edges | GaussianNLL | log_sigma clamp [-3, 3] |
+| lane_lines | GaussianNLL | log_sigma clamp [-3, 3]；**逐条置信度加权**（见下方说明） |
+| road_edges | GaussianNLL | log_sigma clamp [-3, 3]；**逐条置信度加权**（见下方说明） |
 | lead | GaussianNLL | `lead_valid` mask：仅对 `lead_prob=1.0` 的时间偏移计算位置损失 |
 | pose | GaussianNLL | log_sigma clamp [-3, 3] |
 | road_transform | GaussianNLL | log_sigma clamp [-3, 3] |
 | wide_from_device_euler | GaussianNLL | log_sigma clamp [-3, 3] |
-| lane_lines_prob | BCE | 8 维 logit vs 目标概率 |
+| lane_lines_prob | BCE | 8 维 logit vs 软目标概率（**不加权，所有帧均参与**） |
 | lead_prob | BCE | 3 维 logit vs 二值目标 |
 
 **GaussianNLL 实现**：
@@ -430,9 +572,32 @@ def gaussian_nll(pred_mean, pred_log_sigma, target):
     return 0.5 * (log_sigma + (target - pred_mean)**2 / torch.exp(2 * log_sigma))
 ```
 
+**置信度加权位置损失**（lane_lines / road_edges）：
+
+由于训练数据包含低置信度帧，位置标签的可靠性与教师 prob 正相关。
+使用教师 prob 作为逐条加权系数，自动降低不可靠位置标签的梯度贡献：
+
+```python
+# lane_lines: 4 条车道线，每条独立加权
+for k in range(4):
+    weight = targets['lane_lines_prob'][k]          # 教师置信度，range [0, 1]
+    loss_k = gaussian_nll(pred_ll[k], pred_ll_sigma[k], target_ll[k])  # (33, 2)
+    lane_pos_loss += weight * loss_k.mean()
+
+# road_edges: 2 条路沿，同理
+for k in range(2):
+    weight = targets['road_edges_prob'][k]          # 固定 1.0（标注无逐条概率）
+    loss_k = gaussian_nll(pred_re[k], pred_re_sigma[k], target_re[k])
+    edge_pos_loss += weight * loss_k.mean()
+```
+
+效果：prob=0.9 → 位置损失权重 0.9；prob=0.1 → 权重 0.1（自动降权不可靠标注）。
+概率头 BCE 损失**不加权**，始终学习完整的置信度分布。
+
 **验证**：
 - 随机输入下 total_loss 为有限正数（无 NaN/Inf）
 - lead_valid=False 时 lead 位置损失 = 0
+- lane_lines_prob=0.0 时，对应 lane 位置损失贡献 = 0
 - 各分量损失量级合理（不超过 100）
 
 **依赖**：无
