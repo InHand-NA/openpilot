@@ -337,7 +337,7 @@ def draw_leads(img: np.ndarray, data: dict, T_disp: np.ndarray, camera_height: f
     if fill_alpha > 0.01:
       _draw_polygon_alpha(img, chevron, (49, 34, 201), fill_alpha)
 
-    label = f"#{sel} {x_dist:.0f}m v:{v_rel:+.1f}"
+    label = f"#{sel} p:{prob:.2f} {x_dist:.0f}m v:{v_rel:+.1f}"
     cv2.putText(img, label,
                 (int(x + sz * 1.35 + g_xo + 5), int(y + sz / 2)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (37, 202, 218), 1, cv2.LINE_AA)
@@ -427,6 +427,22 @@ def draw_prob_bar(img: np.ndarray, probs: np.ndarray, y0: int, min_prob: float) 
     cv2.rectangle(img, (x0, y0), (x0 + bar_w, y0 + 28), (30, 30, 30), -1)
     cv2.rectangle(img, (x0, y0), (x0 + int(bar_w * float(p)), y0 + 28), color, -1)
     cv2.putText(img, f"{labels[i]} {float(p):.2f}", (x0 + 4, y0 + 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+def draw_lead_prob_bar(img: np.ndarray, probs: np.ndarray, y0: int) -> None:
+  """Draw a probability bar for lead vehicles (up to 3 leads)."""
+  labels = ['Lead-0', 'Lead-1', 'Lead-2']
+  n = min(len(probs), 3)
+  bar_w = img.shape[1] // 3
+  for i in range(n):
+    p = float(probs[i])
+    x0 = i * bar_w
+    # Lead prob threshold is 0.3 for drawing chevrons
+    color = (218, 202, 37) if p >= 0.5 else ((0, 200, 200) if p >= 0.3 else (80, 80, 80))
+    cv2.rectangle(img, (x0, y0), (x0 + bar_w, y0 + 28), (30, 30, 30), -1)
+    cv2.rectangle(img, (x0, y0), (x0 + int(bar_w * p), y0 + 28), color, -1)
+    cv2.putText(img, f"{labels[i]} {p:.2f}", (x0 + 4, y0 + 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1, cv2.LINE_AA)
 
 
@@ -535,10 +551,13 @@ def render_frame(
       cv2.putText(img, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1, cv2.LINE_AA)
       y += dy
 
-  # --- Probability bar at bottom ---
+  # --- Probability bars at bottom ---
   prob_bar = np.zeros((30, DISPLAY_W, 3), dtype=np.uint8)
   draw_prob_bar(prob_bar, ll_prob, 1, min_ll_prob)
-  main = np.vstack([img, prob_bar])
+  lead_prob = data.get('lead_prob', np.zeros(3))
+  lead_bar = np.zeros((30, DISPLAY_W, 3), dtype=np.uint8)
+  draw_lead_prob_bar(lead_bar, lead_prob, 1)
+  main = np.vstack([img, prob_bar, lead_bar])
 
   # --- BEV panel (right column, matching visualizer style) ---
   if show_bev:
@@ -632,7 +651,7 @@ def main():
 
   win = 'inspect_annotated'
   cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-  cv2.resizeWindow(win, DISPLAY_W + BEV_W, DISPLAY_H + 30)
+  cv2.resizeWindow(win, DISPLAY_W + BEV_W, DISPLAY_H + 60)
 
   while True:
     data     = _load_json_annotation(frame_files[idx])

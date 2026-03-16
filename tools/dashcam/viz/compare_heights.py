@@ -54,6 +54,7 @@ from openpilot.tools.dashcam.viz.inspect_annotated import (
   draw_leads,
   draw_bev,
   draw_prob_bar,
+  draw_lead_prob_bar,
   _load_json_annotation,
   KEY_LEFT, KEY_RIGHT, KEY_PGUP, KEY_PGDN, KEY_HOME, KEY_END, KEY_TAB,
   MODEL_W, MODEL_H,
@@ -212,10 +213,15 @@ def render_panel(
                 (0, 200, 0) if passes else (0, 0, 200), 3)
 
   # Prob text at bottom-left
+  lead_prob = data.get('lead_prob', np.zeros(3))
   prob_text = f"L={ll_prob[1]:.2f} R={ll_prob[2]:.2f} {'PASS' if passes else 'FAIL'}"
-  cv2.rectangle(img, (0, DISPLAY_H - 22), (260, DISPLAY_H), (0, 0, 0), -1)
-  cv2.putText(img, prob_text, (4, DISPLAY_H - 6),
+  lead_text = f"Ld={lead_prob[0]:.2f} {lead_prob[1]:.2f} {lead_prob[2]:.2f}"
+  cv2.rectangle(img, (0, DISPLAY_H - 42), (260, DISPLAY_H), (0, 0, 0), -1)
+  cv2.putText(img, prob_text, (4, DISPLAY_H - 26),
               cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+  ld_color = (218, 202, 37) if lead_prob[0] >= 0.3 else (120, 120, 120)
+  cv2.putText(img, lead_text, (4, DISPLAY_H - 6),
+              cv2.FONT_HERSHEY_SIMPLEX, 0.45, ld_color, 1, cv2.LINE_AA)
 
   # Downscale if requested (grid mode)
   if out_w != DISPLAY_W or out_h != DISPLAY_H:
@@ -278,7 +284,7 @@ def render_grid(
   cam_name = 'NARROW' if cam_idx == 0 else 'WIDE'
   status = (f"Frame {frame_num}   "
             f"{clip_info.get('map', '?')} {clip_info.get('weather', '?')}   "
-            f"pitch={pitch:.1f}° yaw={yaw:.1f}°   [{cam_name}]   "
+            f"pitch={pitch:.1f}deg yaw={yaw:.1f}deg   [{cam_name}]   "
             f"Tab=cam  g=single  a/z/l/e/v/r  f=filter  s=shot  q=quit")
   bar = np.zeros((28, cols * PANEL_W, 3), dtype=np.uint8)
   cv2.putText(bar, status, (6, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
@@ -323,14 +329,17 @@ def render_single(
   )
 
   ll_prob  = data.get('lane_lines_prob', np.zeros(4))
+  lead_prob = data.get('lead_prob', np.zeros(3))
   prob_bar = np.zeros((30, DISPLAY_W, 3), dtype=np.uint8)
   draw_prob_bar(prob_bar, ll_prob, 1, min_ll_prob)
+  lead_bar = np.zeros((30, DISPLAY_W, 3), dtype=np.uint8)
+  draw_lead_prob_bar(lead_bar, lead_prob, 1)
   hint = (f"Frame {frame_num}   1-6=height  g=grid  Tab=cam  "
           f"a/z/l/e/v/b/r  f=filter  s=screenshot  q=quit")
-  cv2.putText(prob_bar, hint, (6, 24),
+  cv2.putText(lead_bar, hint, (6, 24),
               cv2.FONT_HERSHEY_SIMPLEX, 0.40, (160, 160, 160), 1, cv2.LINE_AA)
 
-  main = np.vstack([panel, prob_bar])
+  main = np.vstack([panel, prob_bar, lead_bar])
 
   if show_bev:
     bev = np.zeros((main.shape[0], BEV_W, 3), dtype=np.uint8)
@@ -516,14 +525,14 @@ def main():
         cv2.resizeWindow(win, cols * PANEL_W, rows * PANEL_H + 28)
       else:
         w = DISPLAY_W + (BEV_W if show_bev else 0)
-        cv2.resizeWindow(win, w, DISPLAY_H + 30)
+        cv2.resizeWindow(win, w, DISPLAY_H + 60)
     elif ord('1') <= key <= ord('6'):
       n = key - ord('1')
       if n < len(tags):
         single_tag_idx = n
         grid_mode = False
         w = DISPLAY_W + (BEV_W if show_bev else 0)
-        cv2.resizeWindow(win, w, DISPLAY_H + 30)
+        cv2.resizeWindow(win, w, DISPLAY_H + 60)
         print(f"Height: {tags[single_tag_idx]}")
     elif key == ord('a'):
       show_ann = not show_ann
@@ -539,7 +548,7 @@ def main():
       show_bev = not show_bev
       if not grid_mode:
         w = DISPLAY_W + (BEV_W if show_bev else 0)
-        cv2.resizeWindow(win, w, DISPLAY_H + 30)
+        cv2.resizeWindow(win, w, DISPLAY_H + 60)
     elif key == ord('r'):
       show_raw = not show_raw
     elif key == ord('f'):

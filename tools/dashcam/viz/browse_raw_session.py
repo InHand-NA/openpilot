@@ -151,7 +151,7 @@ def render_grid(
     first_files = frame_files_per_height[first_tag]
     disp_frame_id = first_files[idx].stem.replace('road_', '') if idx < len(first_files) else f"{idx:06d}"
     info = (f"Frame {disp_frame_id}   map={map_name}  weather={weather}  "
-            f"pitch={pitch:.1f}°  yaw={yaw:.1f}°   [{cam_label.upper()} cam]   "
+            f"pitch={pitch:.1f}deg  yaw={yaw:.1f}deg   [{cam_label.upper()} cam]   "
             f"w=toggle wide  s=screenshot  q=quit")
     cv2.putText(bar, info, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
     grid = np.vstack([grid, bar])
