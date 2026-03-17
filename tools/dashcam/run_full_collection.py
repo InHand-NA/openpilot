@@ -14,11 +14,11 @@ Wraps collect_multi_height.py's full-phase session list, adding:
 
 Typical usage:
   # Start (or resume) full collection
-  python tools/dashcam/run_full_collection.py
+  python tools/dashcam/run_full_collection.py --no-display
 
   # Custom output dir and NPC count
   python tools/dashcam/run_full_collection.py \\
-      --output-base data/multi_height \\
+      --output-base data/multi_height-0316 \\
       --num-npc 40 --no-display
 
   # Limit frames per session (for quick smoke-test)
@@ -35,11 +35,14 @@ Resume after crash:
 
 import argparse
 import json
+import shutil
 import signal
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+MIN_DISK_FREE_GB = 20
 
 
 # ── Session list mirrors collect_multi_height.py PHASE_CONFIGS['full'] ────────
@@ -54,24 +57,24 @@ HEIGHT_DEFS = {
 }
 
 FULL_HEIGHTS = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
-DEFAULT_MAX_FRAMES = 120
+DEFAULT_MAX_FRAMES = 200
 
 SCENES = [
 
-  ('Town03', 'ClearNoon'),
-  ('Town03', 'WetSunset'),
-  ('Town05', 'ClearSunset'),
-  ('Town05', 'CloudyNoon'),
+#  ('Town03', 'ClearNoon'),
+#  ('Town03', 'WetSunset'),
+#  ('Town05', 'ClearSunset'),
+#  ('Town05', 'CloudyNoon'),
 
-  ('Town05', 'ClearNoon'),
-  ('Town05', 'CloudySunset'),
-  ('Town05', 'WetNoon'),
-  ('Town05', 'WetSunset'),
+#  ('Town05', 'ClearNoon'),
+#  ('Town05', 'CloudySunset'),
+#  ('Town05', 'WetNoon'),
+#  ('Town05', 'WetSunset'),
 
-#  ('Town04', 'ClearNoon'),
-#  ('Town04', 'ClearSunset'),
-#  ('Town04', 'CloudyNoon'),
-#  ('Town04', 'WetNoon'),
+  ('Town04', 'ClearNoon'),
+  ('Town04', 'ClearSunset'),
+  ('Town04', 'CloudyNoon'),
+  ('Town04', 'WetNoon'),
 ]
 
 # Formal training pose matrix from §4.3.3 of height_extension_design.md.
@@ -236,6 +239,20 @@ def run_full_collection(
 
     if interrupted:
       print(f"\n[STOPPED] Interrupted before session {idx+1}: {tag}")
+      break
+
+    # ── Disk space check ──────────────────────────────────────────────────
+    disk = shutil.disk_usage(output_base)
+    free_gb = disk.free / (1024 ** 3)
+    if free_gb < MIN_DISK_FREE_GB:
+      print(f"\n[DISK FULL] 磁盘剩余空间不足: {free_gb:.1f} GB < {MIN_DISK_FREE_GB} GB")
+      print(f"           路径: {output_base}")
+      print(f"           停止数据采集。请清理磁盘后重新运行。")
+      progress.setdefault(tag, {}).update({
+        'status': 'disk_full',
+        'disk_free_gb': round(free_gb, 1),
+      })
+      _save_progress(progress_path, progress)
       break
 
     # ── Retry loop ─────────────────────────────────────────────────────────
