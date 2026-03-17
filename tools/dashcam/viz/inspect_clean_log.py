@@ -10,6 +10,7 @@ Keys:
   Home / End     - first / last frame
   Tab            - switch narrow / wide camera
   h              - cycle heights  H1 → H2 → … → H6 → H1
+  d              - toggle disable/enable current frame
   l              - toggle lane lines
   e              - toggle road edges
   v              - toggle lead vehicles
@@ -85,6 +86,25 @@ def load_clean_log(path: Path) -> list[tuple[str, int]]:
   return entries
 
 
+def entry_key(session: str, frame_id: int) -> str:
+  return f'{session}/{frame_id:06d}'
+
+
+def load_disabled_frames(path: Path) -> set[str]:
+  """读取 disabled_frames.txt → set of 'session/frame_id'"""
+  if not path.exists():
+    return set()
+  with open(path) as f:
+    return {line.strip() for line in f if line.strip()}
+
+
+def save_disabled_frames(path: Path, disabled: set[str]) -> None:
+  """保存 disabled_frames.txt（排序后写入）"""
+  with open(path, 'w') as f:
+    for entry in sorted(disabled):
+      f.write(entry + '\n')
+
+
 # ---------------------------------------------------------------------------
 # Session 缓存（避免每帧重复计算 warp 矩阵）
 # ---------------------------------------------------------------------------
@@ -149,6 +169,8 @@ def render_frame(
   show_bev: bool,
   show_info: bool,
   show_raw: bool,
+  is_disabled: bool = False,
+  n_disabled: int = 0,
 ) -> np.ndarray:
 
   # Select camera
@@ -191,6 +213,16 @@ def render_frame(
   cv2.rectangle(img, (lx - 4, 0), (img.shape[1], 30), (0, 0, 0), -1)
   cv2.putText(img, label, (lx, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2, cv2.LINE_AA)
 
+  # DISABLED banner (red bar across top)
+  if is_disabled:
+    banner_h = 36
+    roi = img[0:banner_h, :]
+    overlay = roi.copy()
+    cv2.rectangle(overlay, (0, 0), (img.shape[1], banner_h), (0, 0, 180), -1)
+    img[0:banner_h, :] = cv2.addWeighted(overlay, 0.7, roi, 0.3, 0)
+    cv2.putText(img, "DISABLED  (press 'd' to re-enable)", (8, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
+
   # Info panel
   if show_info:
     ll_prob   = data.get('lane_lines_prob', np.zeros(4))
@@ -208,18 +240,19 @@ def render_frame(
        (255, 255, 255)),
       (f"Lead:  {lead_prob[0]:.2f}  {lead_prob[1]:.2f}  {lead_prob[2]:.2f}",
        (255, 255, 255)),
-      (f"{'[raw]' if show_raw else '[warped]'}",
+      (f"{'[raw]' if show_raw else '[warped]'}  disabled: {n_disabled}",
        (180, 180, 180)),
     ]
+    info_y0 = 40 if is_disabled else 0
     dy, pw = 26, 520
     ph = dy * len(lines) + 12
-    ph = min(ph, img.shape[0])
+    ph = min(ph, img.shape[0] - info_y0)
     pw = min(pw, img.shape[1])
-    roi     = img[0:ph, 0:pw]
+    roi     = img[info_y0:info_y0 + ph, 0:pw]
     overlay = roi.copy()
     cv2.rectangle(overlay, (0, 0), (pw, ph), (0, 0, 0), -1)
-    img[0:ph, 0:pw] = cv2.addWeighted(overlay, 0.60, roi, 0.40, 0)
-    y = 22
+    img[info_y0:info_y0 + ph, 0:pw] = cv2.addWeighted(overlay, 0.60, roi, 0.40, 0)
+    y = info_y0 + 22
     for text, color in lines:
       cv2.putText(img, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1, cv2.LINE_AA)
       y += dy
@@ -271,6 +304,10 @@ def main():
   total = len(entries)
   cache = SessionCache(dataset_dir)
 
+  # disabled_frames.txt 与 clean_log.txt 同目录
+  disabled_path = args.clean_log.parent / 'disabled_frames.txt'
+  disabled = load_disabled_frames(disabled_path)
+
   height_tag = args.height
   height_idx = HEIGHTS.index(height_tag) if height_tag in HEIGHTS else 0
 
@@ -284,9 +321,10 @@ def main():
   show_raw    = False
 
   print(f"clean_log: {args.clean_log} ({total} frames)")
+  print(f"disabled:  {disabled_path} ({len(disabled)} frames)")
   print(f"dataset:   {dataset_dir}")
   print(f"height:    {height_tag}")
-  print("Keys: \u2190\u2192 frames  PgUp/PgDn \u00b110  Tab=cam  h=height  "
+  print("Keys: \u2190\u2192 frames  PgUp/PgDn \u00b110  Tab=cam  h=height  d=disable  "
         "l/e/v=overlays  b=BEV  i=info  r=raw  s=screenshot  q=quit")
 
   win = 'inspect_clean_log'
@@ -314,6 +352,9 @@ def main():
     if wide_bgr is not None:
       data['wide_rgb'] = cv2.cvtColor(wide_bgr, cv2.COLOR_BGR2RGB)
 
+    cur_key = entry_key(session, frame_id)
+    cur_disabled = cur_key in disabled
+
     img = render_frame(
       data=data,
       session=session,
@@ -334,6 +375,8 @@ def main():
       show_bev=show_bev,
       show_info=show_info,
       show_raw=show_raw,
+      is_disabled=cur_disabled,
+      n_disabled=len(disabled),
     )
 
     cam_name = 'NARROW' if cam_idx == 0 else 'WIDE'
@@ -360,6 +403,14 @@ def main():
     elif key == KEY_TAB:
       cam_idx = 1 - cam_idx
       print(f"Camera: {'WIDE' if cam_idx else 'NARROW'}")
+    elif key == ord('d'):
+      if cur_key in disabled:
+        disabled.discard(cur_key)
+        print(f"ENABLED:  {cur_key}  (disabled: {len(disabled)})")
+      else:
+        disabled.add(cur_key)
+        print(f"DISABLED: {cur_key}  (disabled: {len(disabled)})")
+      save_disabled_frames(disabled_path, disabled)
     elif key == ord('h'):
       height_idx = (height_idx + 1) % len(HEIGHTS)
       height_tag = HEIGHTS[height_idx]
