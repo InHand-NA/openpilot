@@ -101,6 +101,17 @@ dashcam 是一套将 openpilot 感知管线（modeld + calibrationd）接入 Car
 | `train/export_pretrained_pt.py` | openpilot ONNX → PyTorch .pt（state_dict 或 TorchScript） |
 | `train/export_pretrained_onnx.py` | PyTorch TorchScript .pt → ONNX（含 onnxsim 简化） |
 
+### 数据清洗与划分 `train/`
+
+| 文件 | 说明 |
+|------|------|
+| `train/clean_data.py` | T2 数据清洗：时序抽帧 + 置信度过滤 + PRE 帧检查，输出 `clean_log.txt` |
+| `train/verify_clean.py` | T2 验证工具：3 项自动检查（抽帧/置信度/PRE帧） |
+| `train/split_dataset.py` | T3.1 训练集划分：按 8:1:1 划分 train/val/test，排除 disabled 帧 |
+| `train/h1_holdout_split.py` | T3.2 H1 退化验证集：从未选中帧中抽取 H1 holdout |
+| `train/make_mini_dataset.py` | T3.3 Mini 数据集：提取小子集用于调试训练脚本 |
+| `viz/inspect_clean_log.py` | 逐帧浏览 clean_log 中的帧及标注，支持 `d` 键禁用帧 |
+
 ---
 
 ## 前置条件
@@ -460,6 +471,155 @@ VisionIPC 帧 (road + wide)
   → TinyJit 推理（GPU）
   → 解析输出切片 → MDN/BCE 解码（μ, σ, prob）
   → cereal modelV2 消息发布
+```
+
+---
+
+## 数据清洗与划分（T2–T3）
+
+多高度训练数据从采集到可训练的完整流水线。数据集目录（`dataset_dir`）可以是只读 NFS 挂载，所有输出写入独立的 `output_dir`。
+
+### T2 — 数据清洗
+
+对标注数据按规则筛选，输出 `clean_log.txt`（被选中的帧索引）。
+
+**清洗规则**：
+1. **时序抽帧**：每 5 个保存帧取 1 帧（save_every=4 × subsample=5 → step=20），等效 1 FPS
+2. **最低置信度过滤**：L-inner prob ≤ 0.05 **且** R-inner prob ≤ 0.05 时丢弃
+3. **PRE 帧检查**：帧 N 需要前一帧 N-4 存在（用于双帧输入拼接）
+4. **H1~H6 同步**：仅对 H1 做分析，所有高度共享清洗结果
+
+```bash
+# 清洗（dataset_dir 只读，输出到 output_dir）
+python tools/dashcam/train/clean_data.py \
+    /nfs/openpilot-datasets/multi_height-0312/ \
+    --output-dir data/multi_height-0312/ \
+    --subsample 5 --min-ll-prob 0.05
+
+# 仅统计，不写入文件
+python tools/dashcam/train/clean_data.py \
+    /nfs/openpilot-datasets/multi_height-0312/ \
+    --dry-run
+
+# 验证清洗结果（3 项检查）
+python tools/dashcam/train/verify_clean.py \
+    --dataset-dir /nfs/openpilot-datasets/multi_height-0312/ \
+    --output-dir data/multi_height-0312/
+```
+
+**输出**：`<output_dir>/clean_log.txt`，每行 `session_name/frame_number`。
+
+### T3.1 — 训练集划分
+
+将 clean_log 中的帧按 8:1:1 全局随机划分。自动排除 `disabled_frames.txt` 中被禁用的帧。
+
+```bash
+python tools/dashcam/train/split_dataset.py \
+    --dataset-dir /nfs/openpilot-datasets/multi_height-0312/ \
+    --output-dir data/multi_height-0312/ \
+    --ratio 0.8 0.1 0.1 --seed 42
+```
+
+**输出**：
+- `train.txt` / `val.txt` / `test.txt` — 各子集帧索引
+- `split_info.json` — 统计信息与 5 项验证结果
+
+**内置验证**（全部 PASS 才正常退出）：
+1. 总帧数守恒
+2. 三子集无交集
+3. 比例偏差 < 1%
+4. Session 覆盖率 > 80%
+5. 索引合法性（H1 标注文件存在）
+
+### T3.2 — H1 退化验证集
+
+从 clean_log **未选中**的 H1 帧中抽取 10%，用于训练时监测标准高度性能退化。
+
+```bash
+python tools/dashcam/train/h1_holdout_split.py \
+    --dataset-dir /nfs/openpilot-datasets/multi_height-0312/ \
+    --output-dir data/multi_height-0312/ \
+    --holdout-ratio 0.1 --seed 42
+```
+
+**输出**：
+- `h1_holdout.txt` — holdout 帧索引
+- `h1_holdout_info.json` — 统计信息与 5 项验证结果
+
+### T3.3 — Mini 数据集
+
+从完整划分中提取小子集，用于快速调试训练脚本。
+
+```bash
+python tools/dashcam/train/make_mini_dataset.py \
+    --output-dir data/multi_height-0312/ \
+    --mini-dir data/multi_height-0312-mini/ \
+    --max-frames 100
+```
+
+**输出**：`mini_dir/` 下的 `train.txt`（100帧）、`val.txt`（12帧）、`test.txt`（12帧）、`h1_holdout.txt`（12帧）。
+
+### 可视化浏览与帧禁用
+
+逐帧浏览 clean_log 中的帧，查看 warp 后图像 + 标注叠加。
+
+```bash
+python tools/dashcam/viz/inspect_clean_log.py \
+    --dataset-dir /nfs/openpilot-datasets/multi_height-0312/ \
+    --clean-log data/multi_height-0312/clean_log.txt \
+    --height H1 --start 0
+```
+
+**快捷键**：
+
+| 按键 | 功能 |
+|------|------|
+| ← → | 上一帧 / 下一帧 |
+| PgUp / PgDn | ±10 帧 |
+| Home / End | 首帧 / 末帧 |
+| Tab | 切换窄焦 / 广角 |
+| h | 切换高度 H1→H2→…→H6 |
+| **d** | **禁用/启用当前帧**（实时保存 `disabled_frames.txt`） |
+| l / e / v | 开关车道线 / 路沿 / 前车叠加 |
+| b | 开关 BEV 鸟瞰面板 |
+| i | 开关信息面板 |
+| r | 切换原图 / warp 后图像 |
+| s | 截图 |
+| q / ESC | 退出 |
+
+被禁用的帧会显示红色 **DISABLED** 横幅。重新运行 `split_dataset.py` 时自动排除这些帧。
+
+### 端到端流水线示例
+
+```bash
+# 0. 采集（已完成）→ 标注（已完成）
+
+# 1. 数据清洗
+python tools/dashcam/train/clean_data.py \
+    /nfs/openpilot-datasets/multi_height-0312/ \
+    --output-dir data/multi_height-0312/
+
+# 2. 可视化审查，按 'd' 标记问题帧
+python tools/dashcam/viz/inspect_clean_log.py \
+    --dataset-dir /nfs/openpilot-datasets/multi_height-0312/ \
+    --clean-log data/multi_height-0312/clean_log.txt
+
+# 3. 训练集划分（自动排除 disabled 帧）
+python tools/dashcam/train/split_dataset.py \
+    --dataset-dir /nfs/openpilot-datasets/multi_height-0312/ \
+    --output-dir data/multi_height-0312/
+
+# 4. H1 退化验证集
+python tools/dashcam/train/h1_holdout_split.py \
+    --dataset-dir /nfs/openpilot-datasets/multi_height-0312/ \
+    --output-dir data/multi_height-0312/
+
+# 5. Mini 数据集（调试用）
+python tools/dashcam/train/make_mini_dataset.py \
+    --output-dir data/multi_height-0312/ \
+    --mini-dir data/multi_height-0312-mini/
+
+# 6. 后续：预处理缓存（T4）→ 训练（T8）→ 评价（T9）
 ```
 
 ---
