@@ -113,8 +113,6 @@ DEV=CUDA python tools/dashcam/annotate_batch.py data/multi_height-0312/ \
    ```
    该索引基于 H1 分析结果生成，H2~H6 共享相同的帧选中结果。
 
-2. 创建 `<dataset_dir>/Town*/cleaned_annotations/{H1..H6}/` 目录，保持与原始 `annotations/` 相同的子目录结构，仅复制被选中帧的标注 JSON（内容与原始标注一致，不做任何数值修改）。
-
 **命令行接口**：
 ```bash
 python tools/dashcam/train/clean_data.py \
@@ -136,20 +134,15 @@ python tools/dashcam/train/verify_clean.py data/multi_height-0312/
 |---|--------|------|
 | 1 | 抽帧正确性 | clean_log.txt 中每个帧号 % 20 == 0（save_every=4，subsample=5 → 步长 20） |
 | 2 | 置信度过滤 | 对 clean_log.txt 中每帧，读取 H1 原始标注，验证 L-inn prob > 0.05 **或** R-inn prob > 0.05（至少一条内侧线可见） |
-| 3 | lead_prob 保留原值 | 遍历所有 cleaned_annotations JSON，lead_prob 值与原始 annotations 中完全一致（未被修改） |
-| 4 | PRE 帧存在性 | 对每个被选中帧 N，验证原始图像中帧 N-4 存在（road_*.png 和 wide_*.png） |
-| 5 | H1~H6 同步 | 每个 session 的 cleaned_annotations/ 下 H1~H6 拥有完全相同的文件集合 |
-| 6 | 完整性 | clean_log.txt 行数 = 任一 session cleaned_annotations/H1/ 下的文件数之和 |
+| 3 | PRE 帧存在性 | 对每个被选中帧 N，验证原始图像中帧 N-4 存在（road_*.png 和 wide_*.png） |
+
 
 输出示例：
 ```
 [PASS] 抽帧正确性: 2847/2847 帧号均为 20 的倍数
 [PASS] 置信度过滤: 2847/2847 帧至少一条内侧线 prob>0.05
-[PASS] lead_prob 保留原值: 17082 个 JSON 中 lead_prob 与原始标注一致
 [PASS] PRE 帧存在性: 2847/2847 帧均有对应 PRE 帧
-[PASS] H1~H6 同步: 163 sessions 全部一致
-[PASS] 完整性: clean_log 2847 行 = cleaned_annotations H1 文件数 2847
-===== 6/6 PASS =====
+===== 3/3 PASS =====
 ```
 
 **依赖**：T1
