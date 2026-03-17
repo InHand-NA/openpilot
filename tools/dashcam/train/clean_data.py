@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """T2 — 数据清洗脚本
 
-按 training_evaluation_methodology.md §2.1 规则清洗标注数据：
-1. 时序抽帧：每 subsample 个保存帧取 1 帧（等效 1 FPS）
-2. 最低置信度过滤：L-inner prob ≤ threshold AND R-inner prob ≤ threshold 时丢弃
-3. PRE 帧存在性：确保前一帧（帧号差 save_every）存在
-4. H1~H6 同步：仅对 H1 做分析，所有高度共享清洗结果
+按 implicit_training_tasks.md T2 规则清洗标注数据：
+1. 数据完整性检查：H1–H6 × road/wide 共 12 个图像文件必须全部存在
+2. 时序抽帧：每 subsample 个保存帧取 1 帧（等效 1 FPS）
+3. 最低置信度过滤：L-inner prob ≤ threshold AND R-inner prob ≤ threshold 时丢弃
+4. PRE 帧存在性：确保前一帧（帧号差 save_every）存在
+5. H1~H6 同步：规则 2–4 仅对 H1 做分析，所有高度共享清洗结果；规则 1 检查全部 H1–H6
 
 输出（写到 --output-dir，默认为 dataset_dir）：
   - <output_dir>/clean_log.txt：被选中帧索引（每行 session_name/frame_number）
@@ -25,6 +26,9 @@ from pathlib import Path
 # lane_lines_prob 顺序: [L-outer(0), L-inner(1), R-inner(2), R-outer(3)]
 L_INNER_IDX = 1
 R_INNER_IDX = 2
+
+HEIGHTS = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
+CAMERAS = ['road', 'wide']
 
 
 def discover_sessions(dataset_dir: Path) -> list[str]:
@@ -62,6 +66,20 @@ def load_annotation(ann_dir: Path, frame_id: int) -> dict:
     return json.load(f)
 
 
+def check_all_heights_images_exist(session_dir: Path, frame_id: int) -> list[str]:
+  """检查 H1–H6 × road/wide 共 12 个图像文件是否全部存在。
+
+  返回缺失文件的相对路径列表（空列表表示全部存在）。
+  """
+  missing = []
+  for h in HEIGHTS:
+    for cam in CAMERAS:
+      path = session_dir / h / f'{cam}_{frame_id:06d}.png'
+      if not path.exists():
+        missing.append(f'{h}/{cam}_{frame_id:06d}.png')
+  return missing
+
+
 def check_pre_frame_exists(session_dir: Path, frame_id: int, save_every: int) -> bool:
   """检查 PRE 帧的图像是否存在（在 H1 目录中检查）"""
   pre_id = frame_id - save_every
@@ -95,10 +113,12 @@ def clean_session(
   # 统计
   stats = {
     'total_frames': len(all_frame_ids),
+    'filtered_incomplete': 0,
     'after_subsample': 0,
     'filtered_no_ll': 0,
     'filtered_no_pre': 0,
     'selected': 0,
+    'missing_files': [],  # 详细缺失记录 (session, frame_id, missing_paths)
   }
 
   # 抽帧步长 = save_every * subsample
@@ -106,17 +126,24 @@ def clean_session(
   selected_entries = []
 
   for frame_id in all_frame_ids:
-    # 规则 1: 时序抽帧 — 帧号必须是 step 的倍数
+    # 规则 1: 数据完整性检查 — H1–H6 × road/wide 共 12 个文件必须全部存在
+    missing = check_all_heights_images_exist(session_dir, frame_id)
+    if missing:
+      stats['filtered_incomplete'] += 1
+      stats['missing_files'].append((session, frame_id, missing))
+      continue
+
+    # 规则 2: 时序抽帧 — 帧号必须是 step 的倍数
     if frame_id % step != 0:
       continue
     stats['after_subsample'] += 1
 
-    # 规则 3: PRE 帧存在性
+    # 规则 4: PRE 帧存在性
     if not check_pre_frame_exists(session_dir, frame_id, save_every):
       stats['filtered_no_pre'] += 1
       continue
 
-    # 规则 2: 最低置信度过滤（仅分析 H1）
+    # 规则 3: 最低置信度过滤（仅分析 H1）
     ann = load_annotation(ann_h1_dir, frame_id)
     ll_prob = ann['lane_lines_prob']
     l_inner = ll_prob[L_INNER_IDX]
@@ -176,8 +203,10 @@ def main():
   print()
 
   all_entries = []
+  all_missing_files: list[tuple[str, int, list[str]]] = []
   total_stats = {
     'total_frames': 0,
+    'filtered_incomplete': 0,
     'after_subsample': 0,
     'filtered_no_ll': 0,
     'filtered_no_pre': 0,
@@ -197,8 +226,10 @@ def main():
       continue
 
     all_entries.extend(entries)
+    all_missing_files.extend(stats['missing_files'])
     total_stats['sessions_processed'] += 1
-    for key in ['total_frames', 'after_subsample', 'filtered_no_ll', 'filtered_no_pre', 'selected']:
+    for key in ['total_frames', 'filtered_incomplete', 'after_subsample',
+                'filtered_no_ll', 'filtered_no_pre', 'selected']:
       total_stats[key] += stats[key]
 
     if (i + 1) % 50 == 0 or i == len(sessions) - 1:
@@ -213,6 +244,7 @@ def main():
   print(f'  Sessions: {total_stats["sessions_processed"]} processed, '
         f'{total_stats["sessions_with_errors"]} errors')
   print(f'  总帧数: {total_stats["total_frames"]}')
+  print(f'  过滤(图像不完整): {total_stats["filtered_incomplete"]}')
   print(f'  抽帧后: {total_stats["after_subsample"]}')
   print(f'  过滤(无PRE帧): {total_stats["filtered_no_pre"]}')
   print(f'  过滤(无车道线): {total_stats["filtered_no_ll"]}')
@@ -220,6 +252,13 @@ def main():
   if total_stats['after_subsample'] > 0:
     keep_rate = total_stats['selected'] / total_stats['after_subsample'] * 100
     print(f'  保留率(抽帧后): {keep_rate:.1f}%')
+
+  # 输出缺失文件详情（限制最多 20 条）
+  if all_missing_files:
+    print(f'\n图像不完整帧详情（共 {len(all_missing_files)} 帧，显示前 20 条）:')
+    for session, frame_id, missing in all_missing_files[:20]:
+      print(f'  {session}/{frame_id:06d}: 缺失 {len(missing)} 个文件 — {", ".join(missing[:4])}'
+            + ('...' if len(missing) > 4 else ''))
 
   # 写入 clean_log.txt
   if not args.dry_run:

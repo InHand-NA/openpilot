@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """T2 验证工具 — 自动检查数据清洗结果
 
-3 项检查全部 PASS 才通过：
-  1. 抽帧正确性: 每个帧号 % step == 0
-  2. 置信度过滤: 每帧至少一条内侧线 prob > threshold
-  3. PRE 帧存在性: 帧 N-save_every 的图像存在
+4 项检查全部 PASS 才通过：
+  1. H1–H6 图像完整性: 每帧 × 6 高度 × 2 相机 = 12 个图像文件全部存在
+  2. 抽帧正确性: 每个帧号 % step == 0
+  3. 置信度过滤: 每帧至少一条内侧线 prob > threshold
+  4. PRE 帧存在性: 帧 N-save_every 的图像存在
 
 用法：
   python tools/dashcam/train/verify_clean.py \
@@ -21,6 +22,9 @@ from pathlib import Path
 
 L_INNER_IDX = 1
 R_INNER_IDX = 2
+
+HEIGHTS = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
+CAMERAS = ['road', 'wide']
 
 
 def load_clean_log(output_dir: Path) -> list[str]:
@@ -73,7 +77,7 @@ def check_confidence(entries: list[str], dataset_dir: Path, min_ll_prob: float) 
 
 
 def check_pre_frame(entries: list[str], dataset_dir: Path, save_every: int) -> tuple[bool, str]:
-  """检查 3: PRE 帧存在性（从原始图像目录检查）"""
+  """检查 4: PRE 帧存在性（从原始图像目录检查）"""
   bad = []
   for entry in entries:
     session, fid = parse_entry(entry)
@@ -88,6 +92,30 @@ def check_pre_frame(entries: list[str], dataset_dir: Path, save_every: int) -> t
   if bad:
     return False, f'{len(bad)} 帧缺少 PRE 帧，例: {bad[:3]}'
   return True, f'{len(entries)}/{len(entries)} 帧均有对应 PRE 帧'
+
+
+def check_image_integrity(entries: list[str], dataset_dir: Path) -> tuple[bool, str]:
+  """检查 1: H1–H6 × road/wide 图像完整性"""
+  bad = []
+  total_files = len(entries) * len(HEIGHTS) * len(CAMERAS)
+  for entry in entries:
+    session, fid = parse_entry(entry)
+    session_dir = dataset_dir / session
+    for h in HEIGHTS:
+      for cam in CAMERAS:
+        path = session_dir / h / f'{cam}_{fid:06d}.png'
+        if not path.exists():
+          bad.append(f'{entry}: {h}/{cam}_{fid:06d}.png')
+          if len(bad) >= 10:
+            break
+      if len(bad) >= 10:
+        break
+    if len(bad) >= 10:
+      break
+  if bad:
+    return False, f'{len(bad)} 个文件缺失，例: {bad[:3]}'
+  return True, (f'{len(entries)}/{len(entries)} 帧 × {len(HEIGHTS)} 高度 × {len(CAMERAS)} 相机 '
+                f'= {total_files} 文件全部存在')
 
 
 def main():
@@ -124,6 +152,7 @@ def main():
   print()
 
   checks = [
+    ('H1-H6 图像完整性', lambda: check_image_integrity(entries, dataset_dir)),
     ('抽帧正确性', lambda: check_subsample(entries, step)),
     ('置信度过滤', lambda: check_confidence(entries, dataset_dir, args.min_ll_prob)),
     ('PRE 帧存在性', lambda: check_pre_frame(entries, dataset_dir, save_every)),

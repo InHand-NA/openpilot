@@ -171,6 +171,7 @@ def render_frame(
   show_raw: bool,
   is_disabled: bool = False,
   n_disabled: int = 0,
+  estimate_lead_z: bool = True,
 ) -> np.ndarray:
 
   # Select camera
@@ -204,7 +205,7 @@ def render_frame(
     if show_edges:
       draw_road_edges(img, data, T_disp)
     if show_leads:
-      draw_leads(img, data, T_disp, camera_height)
+      draw_leads(img, data, T_disp, camera_height, estimate_z=estimate_lead_z)
 
   # Camera + height label (top-right)
   label = f"{cam_label}  {height_tag} {height_m:.2f}m"
@@ -289,6 +290,8 @@ def main():
                       help='初始显示高度 (default: H1)')
   parser.add_argument('--start', type=int, default=0,
                       help='起始帧索引 (default: 0)')
+  parser.add_argument('--no-lead-z', action='store_true',
+                      help='禁用 lead z 插值估算，使用相机安装高度')
   args = parser.parse_args()
 
   dataset_dir = args.dataset_dir.resolve()
@@ -377,6 +380,7 @@ def main():
       show_raw=show_raw,
       is_disabled=cur_disabled,
       n_disabled=len(disabled),
+      estimate_lead_z=not args.no_lead_z,
     )
 
     cam_name = 'NARROW' if cam_idx == 0 else 'WIDE'

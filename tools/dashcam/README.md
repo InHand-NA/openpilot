@@ -66,8 +66,6 @@ dashcam 是一套将 openpilot 感知管线（modeld + calibrationd）接入 Car
 |------|------|
 | `dual_data_recorder.py` | 双目 NPZ 录制：road_rgb + wide_rgb + modeld 标签 |
 | `modeld_label_extractor.py` | 从 modelV2/cameraOdometry 消息提取训练标签 |
-| `lane_ground_truth.py` | Carla 地图 API 提取车道线/路沿几何真值 |
-| `lead_ground_truth.py` | Carla 世界前车检测与时序轨迹真值 |
 | `pose_ground_truth.py` | 从 Carla 帧差分计算自车 6DoF 运动真值 |
 
 ### 评估与可视化工具

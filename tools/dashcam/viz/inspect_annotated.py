@@ -275,12 +275,44 @@ def draw_road_edges(img: np.ndarray, data: dict, T_disp: np.ndarray) -> None:
     _draw_polygon_alpha(img, polygon, (0, 0, 255), alpha)  # red, same as visualizer
 
 
-def draw_leads(img: np.ndarray, data: dict, T_disp: np.ndarray, camera_height: float) -> None:
+def _estimate_lead_z(x_lead: float, y_lead: float,
+                     lane_lines: np.ndarray, lane_probs: np.ndarray,
+                     camera_height: float,
+                     sigma: float = 2.0, min_prob: float = 0.05) -> float:
+  """Estimate lead z-coordinate by interpolating from lane line 3D points.
+
+  For each lane line with sufficient confidence, interpolate z at x_lead,
+  then combine via Gaussian-weighted average (weight = prob × exp(-d²/2σ²)).
+  Falls back to camera_height when no valid lane lines are available.
+  """
+  z_vals: list[float] = []
+  weights: list[float] = []
+  for i in range(lane_lines.shape[0]):
+    if lane_probs[i] < min_prob:
+      continue
+    xs = lane_lines[i, :, 0]
+    y_i = float(np.interp(x_lead, xs, lane_lines[i, :, 1]))
+    z_i = float(np.interp(x_lead, xs, lane_lines[i, :, 2]))
+    d_lat = abs(y_i - y_lead)
+    w = float(lane_probs[i]) * math.exp(-d_lat ** 2 / (2.0 * sigma ** 2))
+    z_vals.append(z_i)
+    weights.append(w)
+  W = sum(weights)
+  if W > 1e-6:
+    return sum(w * z for w, z in zip(weights, z_vals)) / W
+  return camera_height
+
+
+def draw_leads(img: np.ndarray, data: dict, T_disp: np.ndarray, camera_height: float,
+               estimate_z: bool = True) -> None:
   """Draw lead vehicles as glow+chevron triangles, matching run.py style."""
   leads     = data.get('lead')       # (3, 6, 4)
   lead_prob = data.get('lead_prob')  # (3,)
   if leads is None or lead_prob is None:
     return
+
+  ll      = data.get('lane_lines')       # (4, 33, 3) or None
+  ll_prob = data.get('lane_lines_prob')  # (4,) or None
 
   # Only draw the most-probable lead (index 0) like visualizer._draw_lead
   for sel in range(3):
@@ -294,8 +326,14 @@ def draw_leads(img: np.ndarray, data: dict, T_disp: np.ndarray, camera_height: f
     if x_dist < 1.0 or x_dist > 200.0:
       continue
 
+    # Estimate z from lane lines (slope-aware) or fall back to camera_height
+    if estimate_z and ll is not None and ll_prob is not None:
+      z_est = _estimate_lead_z(x_dist, y_off, ll, ll_prob, camera_height)
+    else:
+      z_est = camera_height
+
     uv = project_pts(np.array([x_dist]), np.array([y_off]),
-                     np.array([camera_height]), T_disp)
+                     np.array([z_est]), T_disp)
     if np.isnan(uv[0]).any():
       continue
 
@@ -337,10 +375,10 @@ def draw_leads(img: np.ndarray, data: dict, T_disp: np.ndarray, camera_height: f
     if fill_alpha > 0.01:
       _draw_polygon_alpha(img, chevron, (49, 34, 201), fill_alpha)
 
-    label = f"#{sel} p:{prob:.2f} {x_dist:.0f}m v:{v_rel:+.1f}"
+    label = f"#{sel} p:{prob:.2f} {x_dist:.0f}m v:{v_rel:+.1f} z:{z_est:.2f}"
     cv2.putText(img, label,
                 (int(x + sz * 1.35 + g_xo + 5), int(y + sz / 2)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (37, 202, 218), 1, cv2.LINE_AA)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1, cv2.LINE_AA)
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +507,7 @@ def render_frame(
   show_info: bool,
   show_raw: bool,
   min_ll_prob: float,
+  estimate_lead_z: bool = True,
 ) -> np.ndarray:
 
   # --- Select camera ---
@@ -500,7 +539,7 @@ def render_frame(
     if show_edges:
       draw_road_edges(img, data, T_disp)
     if show_leads:
-      draw_leads(img, data, T_disp, camera_height)
+      draw_leads(img, data, T_disp, camera_height, estimate_z=estimate_lead_z)
 
   # --- Quality pass/fail flag ---
   ll_prob = data.get('lane_lines_prob', np.zeros(4))
@@ -582,6 +621,8 @@ def main():
                       help='Show only low-confidence frames')
   parser.add_argument('--min-ll-prob', type=float, default=0.5,
                       help='Quality filter threshold (default: 0.5)')
+  parser.add_argument('--no-lead-z', action='store_true',
+                      help='Disable lead z estimation from lane lines, use camera height instead')
   args = parser.parse_args()
 
   annotated_dir = Path(args.annotated_dir)
@@ -679,6 +720,7 @@ def main():
       show_lanes=show_lanes, show_edges=show_edges, show_leads=show_leads,
       show_bev=show_bev, show_info=show_info, show_raw=show_raw,
       min_ll_prob=min_ll_prob,
+      estimate_lead_z=not args.no_lead_z,
     )
 
     cam_name = 'NARROW' if cam_idx == 0 else 'WIDE'
