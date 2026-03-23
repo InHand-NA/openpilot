@@ -192,7 +192,10 @@ tools/dashcam/tusimple/
 ├── clean_and_sample.py    # Phase 3: 数据清洗与抽样（质量过滤 + 时间抽样 + 划分）
 ├── project_tusimple.py    # Phase 4: 3D→2D 投影 + TuSimple 格式输出
 ├── projection.py          # 3D→2D 投影核心算法库
-├── visualize.py           # 调试可视化
+├── viz_collect.py         # Phase 1 可视化: 多相机网格视图
+├── viz_annotate.py        # Phase 2 可视化: 3D 标注投影叠加
+├── viz_clean.py           # Phase 3 可视化: 清洗统计 + 拒绝帧示例
+├── viz_tusimple.py        # Phase 4 可视化: TuSimple 2D 标注 + ROI 裁剪对比
 ```
 
 ## 三、数据目录结构
@@ -502,15 +505,17 @@ class TuSimpleCarlaWorld:
 **工作流**:
 
 1. 解析 CLI 参数
-2. 创建 `TuSimpleCarlaWorld` (连接 Carla, 生成自车+NPC, 挂载 H0+H1~H6 相机)
-3. 保存 `clip_info.json`
-4. 主循环:
+2. **磁盘空间检查**: 剩余空间 < `MIN_DISK_FREE_GB` (默认 20 GB) → 拒绝启动并报错
+3. 创建 `TuSimpleCarlaWorld` (连接 Carla, 生成自车+NPC, 挂载 H0+H1~H6 相机)
+4. 保存 `clip_info.json`
+5. 主循环:
    - `world.tick()` → `world.get_frames()` 等待帧同步
    - `save_every` 跳帧 (默认 4, 即有效 5 FPS)
    - 保存 H0 参考帧: `H0/road_XXXXXX.png`, `H0/wide_XXXXXX.png`
    - 保存 H1~H6 Mono 帧: `H*/XXXXXX.png`
    - 写各目录的 metadata.jsonl (v_ego, world_pose, camera_height)
-5. 清理: 等待异步写完成, 关闭 Carla
+   - **周期性磁盘检查** (每 500 帧): 剩余空间 < 20 GB → 提前停止并打印警告
+6. 清理: 等待异步写完成, 关闭 Carla
 
 **CLI 接口**:
 
@@ -519,7 +524,7 @@ python tools/dashcam/tusimple/collect.py \
   --heights H1 H2 H3 H4 H5 H6 \
   --map Town04 --weather ClearNoon \
   --pitch 5.0 --yaw 0.0 \
-  --max-frames 5000 --save-every 4 \
+  --max-frames 2000 --save-every 4 \
   --output-base data/tusimple \
   --num-npc 40 --spawn-point 16 --random-spawn \
   --speed-range 40 100 --speed-interval 8 20 \
@@ -529,11 +534,13 @@ python tools/dashcam/tusimple/collect.py \
 
 **输出**: `data/tusimple/<session_tag>/` 目录，包含 H0/ + H1~H6/ + clip_info.json
 
-**磁盘估算** (5000 帧, H1~H6):
-- H0 PNG: ~5 MB/帧 × 2 = 10 MB/帧 → 50 GB
-- Mono PNG: ~2 MB/帧 × 6 = 12 MB/帧 → 60 GB
-- Mono JPEG (Q=95): ~0.5 MB/帧 × 6 = 3 MB/帧 → 15 GB
+**磁盘估算** (单 session, 2000 帧, save_every=4 → 实际 500 帧, H1~H6):
+- H0 PNG: ~5 MB/帧 × 2 = 10 MB/帧 → ~5 GB
+- Mono PNG: ~2 MB/帧 × 6 = 12 MB/帧 → ~6 GB
+- Mono JPEG (Q=95): ~0.5 MB/帧 × 6 = 3 MB/帧 → ~1.5 GB
+- 单 session 合计: ~6.5 GB (JPEG) 或 ~11 GB (PNG)
 - 推荐使用 `--mono-jpeg-quality 95` 节省磁盘
+- **磁盘保护**: 剩余空间 < 20 GB 时自动停止
 
 #### `run_full_collection.py` — 批量数据采集
 
@@ -596,14 +603,14 @@ python tools/dashcam/tusimple/run_full_collection.py --list
 # 启动（或恢复）批量采集
 python tools/dashcam/tusimple/run_full_collection.py \
   --output-base data/tusimple \
-  --max-frames 5000 --save-every 4 \
+  --max-frames 2000 --save-every 4 \
   --num-npc 40 --no-display \
   --mono-jpeg-quality 95
 
 # 崩溃后恢复 — 重新运行同一命令即可
 python tools/dashcam/tusimple/run_full_collection.py \
   --output-base data/tusimple \
-  --max-frames 5000 --save-every 4 \
+  --max-frames 2000 --save-every 4 \
   --num-npc 40 --no-display
 
 # 跳过前 50 个 session（手动指定起点）
@@ -613,11 +620,12 @@ python tools/dashcam/tusimple/run_full_collection.py \
 
 **session 命名**: `{map}_{weather}_p{pitch}_y{yaw}`，例如 `Town04_ClearNoon_p5.0_y0.0`
 
-**磁盘估算** (136 session × 5000 帧/session):
-- 使用 `--mono-jpeg-quality 95`: H0 PNG ~50 GB + Mono JPEG ~15 GB ≈ 65 GB/session
-- 但由于 save_every=4 (有效 5 FPS)，实际保存 ~1250 帧/session
-- 全量: 1250 帧 × 136 session × (~10 + 3) MB/帧 ≈ **2.2 TB**
-- 精简 (3 高度 H1/H3/H6): ~1.3 TB
+**磁盘估算** (136 session × 2000 帧/session):
+- save_every=4 → 实际保存 ~500 帧/session
+- 使用 `--mono-jpeg-quality 95`: 500 帧 × (10 + 3) MB/帧 ≈ 6.5 GB/session
+- 全量 (6 高度): 136 × 6.5 GB ≈ **884 GB** (在 1.3 TB 可用空间内)
+- 精简 (3 高度 H1/H3/H6): 136 × 4 GB ≈ **544 GB**
+- **磁盘保护**: 每个 session 开始前检查，剩余 < 20 GB 自动停止
 
 ### 4.4 `annotate_3d.py` — Phase 2: 3D 标注
 
@@ -745,9 +753,12 @@ def resample_lane_at_h_samples(
 
   算法:
     1. 滤除 NaN 和无效点
-    2. 按 v 值排序
-    3. 去除重复 v 值 (保留第一个)
-    4. 对每个 h_sample:
+    2. 按 3D 距离排序 (近→远)，对应 v 从大到小 (图像底→顶)
+    3. 单调性裁断: 从近到远遍历，v 应单调递减。
+       若 v[i+1] >= v[i]（折返），在 i 处截断远端，
+       保证车道线从近到远不回折
+    4. 去除重复 v 值 (保留第一个)
+    5. 对每个 h_sample:
        - 若 v 超出投影多段线的 v 范围 → -2
        - np.interp() 线性插值 u → 取整
        - 若 x 超出 x_range → -2
@@ -779,8 +790,9 @@ def lanes_3d_to_tusimple(
     1. 检查概率 > min_prob
     2. 过滤 x < min_x_distance 的近场点
     3. project_3d_to_mono(pts, K_tusimple) 直接投影到 TuSimple 分辨率
-    4. resample_lane_at_h_samples() 插值
-    5. 过滤可见点数 < min_visible_pts 的短车道线
+    4. 单调性裁断: 沿 3D 距离 (近→远) 检查 v 单调递减，折返处截断
+    5. resample_lane_at_h_samples() 插值
+    6. 过滤可见点数 < min_visible_pts 的短车道线
 
   Returns:
     list of lanes, 每条 lane 是 len(h_samples) 的整数列表
@@ -796,7 +808,7 @@ lane_3d = lane_lines_3d[i]  # (33, 3) = [x, y, z]
 
 # Step 1: 过滤近场
 mask = lane_3d[:, 0] >= min_x_distance  # x > 2m
-pts = lane_3d[mask]  # (M, 3), M <= 33
+pts = lane_3d[mask]  # (M, 3), M <= 33, 已按 x 从近到远排列
 
 # Step 2: 用 K_crop 直接投影到 TuSimple 分辨率 (1280×720)
 # K_crop 已包含 ROI 裁剪 + 缩放的等效内参，无需额外 scale
@@ -807,11 +819,34 @@ valid = ~np.isnan(uv_tusimple[:, 0])
 u = uv_tusimple[valid, 0]
 v = uv_tusimple[valid, 1]
 
-# Step 4: 按 v 排序 (图像 y 轴)
+# Step 4: 单调性裁断 (弯道处理)
+# 3D 点按 x 从近到远排列，投影后 v 应从大 (图像底) 到小 (图像顶) 单调递减
+# 若在某处 v 开始回升（弯道折返），截断该点之后的远端部分
+#
+# 示例:
+#   正常直线:  v = [680, 600, 520, 440, 360, 280]  ← 单调递减 ✓
+#   弯道折返:  v = [680, 600, 520, 480, 510, 530]  ← 在 index=3 处开始回升
+#                                    ↑ 截断点: 保留 [680, 600, 520, 480]
+#
+if len(v) > 1:
+  cutoff = len(v)
+  for j in range(1, len(v)):
+    if v[j] >= v[j - 1]:  # v 不再递减 → 折返点
+      cutoff = j
+      break
+  u = u[:cutoff]
+  v = v[:cutoff]
+
+# Step 5: 按 v 排序 (升序，供 np.interp 使用)
 idx = np.argsort(v)
 v_sorted, u_sorted = v[idx], u[idx]
 
-# Step 5: 在每个 h_sample 处插值
+# Step 6: 去除重复 v 值
+unique_mask = np.diff(v_sorted, prepend=-1) > 0
+v_sorted = v_sorted[unique_mask]
+u_sorted = u_sorted[unique_mask]
+
+# Step 7: 在每个 h_sample 处插值
 lane_x = []
 for h in h_samples:
   if len(v_sorted) < 2 or h < v_sorted[0] or h > v_sorted[-1]:
@@ -826,9 +861,29 @@ for h in h_samples:
 ```
 
 **边界情况处理**:
-- 曲线道路：投影后 v(u) 可能非单调。`np.interp` 在单调递增的 v 上工作，非单调情况下取最近一次出现的值，这对大部分场景足够
-- 近场盲区：高度越大，近场盲区越大（路面在相机正下方）。通过 `min_x_distance` 过滤
-- 远场消失：超出 192m 或投影点过于密集，由 h_samples 范围自然截断
+
+- **弯道折返** (核心处理):
+
+```
+直线道路投影:                     弯道投影 (折返):
+  远 ·                              远 · ← 被截断
+     ·                                ·  ↙ 折返
+     ·                              · ← 截断点
+     ·                             ·
+     ·                            ·
+  近 · (图像底部)              近 · (图像底部)
+
+  v 单调递减 ✓                   v 在折返处停止
+  → 完整车道线                    → 车道线到折返点为止
+```
+
+  投影后的 2D 车道线沿 3D 距离（近→远）v 应单调递减。大曲率弯道可能导致远端点投影回到图像下方（v 回升），此时在折返点截断，保证：
+  1. `np.interp` 的输入 v 严格单调，插值数学正确
+  2. 车道线不会在图像上出现"回头"形状
+  3. 截断后的车道线仍然连续、可用，只是比直线时短
+
+- **近场盲区**: 高度越大，近场盲区越大（路面在相机正下方）。通过 `min_x_distance` 过滤
+- **远场消失**: 超出 192m 或投影点过于密集，由 h_samples 范围自然截断
 
 ### 4.6 `clean_and_sample.py` — Phase 3: 数据清洗与抽样
 
@@ -903,18 +958,18 @@ python tools/dashcam/tusimple/clean_and_sample.py \
 
 ```json
 {
-  "total_frames": 5000,
-  "quality_pass": 4200,
+  "total_frames": 2000,
+  "quality_pass": 1680,
   "quality_pass_rate": 0.84,
-  "sampled": 840,
+  "sampled": 336,
   "per_height": {
-    "H1": {"pass": 700, "sampled": 140, "train": 112, "val": 14, "test": 14},
-    "H3": {"pass": 700, "sampled": 140, "train": 112, "val": 14, "test": 14},
-    "H6": {"pass": 700, "sampled": 140, "train": 112, "val": 14, "test": 14}
+    "H1": {"pass": 560, "sampled": 112, "train": 90, "val": 11, "test": 11},
+    "H3": {"pass": 560, "sampled": 112, "train": 90, "val": 11, "test": 11},
+    "H6": {"pass": 560, "sampled": 112, "train": 90, "val": 11, "test": 11}
   },
-  "train": 336,
-  "val": 42,
-  "test": 42
+  "train": 270,
+  "val": 33,
+  "test": 33
 }
 ```
 
@@ -999,9 +1054,153 @@ python tools/dashcam/tusimple/project_tusimple.py \
 - `--lane-prob-threshold`: lane_line 使用/补位的置信度阈值 (默认 0.3)
 - 已处理的帧自动跳过（幂等性），支持断点恢复
 
-### 4.8 `visualize.py` — 调试可视化
+### 4.8 可视化工具
 
-在 1280×720 TuSimple 图像上绘制标注的 2D 车道线，用于验证投影正确性。
+每个 Phase 有独立的可视化脚本，用于人工检查该阶段的输出质量。
+
+**通用选项**: `--max-frames N` 限制显示帧数, `--output-dir` 保存图片, `--video` 导出视频
+
+#### 4.8.1 `viz_collect.py` — Phase 1: 多相机采集检查
+
+```bash
+python tools/dashcam/tusimple/viz_collect.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --max-frames 20
+```
+
+**检查内容**:
+- 8 相机网格视图: H0 road + H0 wide + H1~H6 mono 拼接在一张图中
+- 每个子图叠加: 帧号、相机标签、安装高度
+- 底部信息栏: v_ego (km/h)、world_pose
+
+```
+┌─────────────┬─────────────┐
+│ H0 road     │ H0 wide     │
+│ 1928×1208   │ 1928×1208   │
+│ FOV=40°     │ FOV=120°    │
+├──────┬──────┼──────┬──────┤
+│ H1   │ H2   │ H3   │ H4   │
+│1.22m │1.30m │1.50m │2.00m │
+├──────┼──────┼──────┼──────┤
+│ H5   │ H6   │ (info bar)  │
+│2.50m │3.00m │ v=72km/h    │
+└──────┴──────┴─────────────┘
+```
+
+**关键验证点**:
+- 帧同步: 各相机画面内容一致（同一时刻）
+- 高度差异: H1 vs H6 的视角变化符合物理预期
+- NPC 车辆和道路场景是否正常
+
+#### 4.8.2 `viz_annotate.py` — Phase 2: 3D 标注检查
+
+```bash
+python tools/dashcam/tusimple/viz_annotate.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --heights H1 H3 H6 \
+  --max-frames 20
+```
+
+**检查内容**:
+- 将 3D 车道线标注投影到对应高度的 Mono 图像上
+- 每帧生成对比图: 左半 = H0 wide (参考标注来源) / 右半 = Hk mono (高度变换后)
+- 标注叠加: lane_lines (实线) + road_edges (虚线) + 概率值文字
+- 低置信度标注 (prob < 0.3) 用灰色半透明绘制
+
+```python
+def visualize_3d_annotation(
+  session_dir: Path,
+  height_tag: str,         # 'H1', 'H3', 'H6'
+  frame_id: str,
+) -> np.ndarray:
+  """将 3D 标注投影到 Mono 图像并可视化。
+
+  1. 读取 3d_labels/<height_tag>/<frame_id>.json
+  2. 读取 Mono 图像 <height_tag>/<frame_id>.*
+  3. 用 project_3d_to_mono(K_MONO, rpyCalib) 投影到 1920×1080
+  4. 绘制 lane_lines + road_edges + prob 文字
+  """
+```
+
+**颜色约定**:
+- L-out (lane 0): 蓝色 / L-inn (lane 1): 绿色
+- R-inn (lane 2): 红色 / R-out (lane 3): 黄色
+- 左路沿 (RE 0): 青色虚线 / 右路沿 (RE 1): 品红虚线
+
+**关键验证点**:
+- 车道线是否贴合实际车道标线
+- H1 (1.22m) vs H6 (3.00m) 在同一帧的标注差异是否合理
+- 弯道处标注是否平滑无跳变
+- 低概率标注（灰色）是否确实质量差
+
+#### 4.8.3 `viz_clean.py` — Phase 3: 清洗与抽样统计
+
+```bash
+python tools/dashcam/tusimple/viz_clean.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --show-rejected 10
+```
+
+**检查内容**:
+
+1. **统计摘要** (终端输出 + 可选图表):
+
+```
+质量过滤: 2000 帧 → 1680 通过 (84.0%)
+  拒绝原因:
+    ll_prob < 0.3:  520 帧 (10.4%)
+    v_ego < 1.0:   180 帧 (3.6%)
+    both:          100 帧 (2.0%)
+时间抽样: 4200 → 840 帧 (每 5 帧取 1)
+划分: train=672 / val=84 / test=84
+
+各高度分布:
+  H1 (1.22m): train=224 / val=28 / test=28
+  H3 (1.50m): train=224 / val=28 / test=28
+  H6 (3.00m): train=224 / val=28 / test=28
+```
+
+2. **拒绝帧示例** (`--show-rejected N`):
+   - 展示 N 个被拒绝帧的 Mono 图像 + 拒绝原因
+   - 帮助判断过滤阈值是否合理（过严/过松）
+
+3. **抽样分布图** (可选 `--plot`):
+   - 帧 ID 时间轴上标注: 保留帧 (绿点) vs 拒绝帧 (红点)
+   - 确认抽样是否均匀分散，无连续大段空白
+
+#### 4.8.4 `viz_tusimple.py` — Phase 4: TuSimple 2D 标注检查
+
+```bash
+python tools/dashcam/tusimple/viz_tusimple.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --height H1 --max-frames 20
+```
+
+**检查内容**:
+
+1. **TuSimple 标注叠加** (主要功能):
+   - 在 1280×720 裁剪图上绘制 4 条车道线
+   - 每个 h_sample 处画点，有效点间画连线
+   - 补位来源标注: lane_line 来源画实心点，road_edge 补位画空心点
+
+2. **ROI 裁剪对比** (`--show-crop`):
+   - 左: 原始 1920×1080 图像，叠加裁剪框 (绿色矩形)
+   - 右: 裁剪后 1280×720 图像 + TuSimple 标注
+   - 验证裁剪区域是否合理覆盖道路
+
+```
+┌──────────────────────┬──────────────────┐
+│ 原始 1920×1080       │ 裁剪后 1280×720  │
+│ ┌──────────┐         │ ─── L-out (蓝)   │
+│ │ ROI 裁剪  │ ←绿框  │ ─── L-inn (绿)   │
+│ │ 776×436  │         │ ─── R-inn (红)   │
+│ └──────────┘         │ ─── R-out (黄)   │
+└──────────────────────┴──────────────────┘
+```
+
+3. **多高度对比** (`--compare-heights`):
+   - 同一帧在 H1/H3/H6 的 TuSimple 标注并排显示
+   - 验证: 近场差异小、远场差异大（高处相机远场下压）
 
 ```python
 def visualize_tusimple_frame(
@@ -1011,29 +1210,17 @@ def visualize_tusimple_frame(
   output_path: Path | None = None,
   show: bool = True,
 ) -> np.ndarray:
-  """在图像上绘制 TuSimple 车道线。
+  """在 1280×720 图像上绘制 TuSimple 车道线标注。"""
 
-  - 每条车道线用不同颜色的折线绘制
-  - 跳过 -2 的点 (不可见)
-  - 可选绘制 h_samples 水平网格线
-  """
-
-def visualize_session(
-  tusimple_dir: Path,
-  height_tag: str,
-  max_frames: int = 50,
-  output_video: str | None = None,
-):
-  """批量浏览/导出 TuSimple 标注视频。"""
+def visualize_crop_comparison(
+  mono_image_path: Path,
+  tusimple_image_path: Path,
+  crop_rect: tuple[int, int, int, int],
+  lanes: list[list[int]],
+  h_samples: list[int],
+) -> np.ndarray:
+  """原始图像 + 裁剪框 vs 裁剪后图像 + TuSimple 标注。"""
 ```
-
-**颜色约定**:
-- 外左车道线 (lane 0): 蓝色
-- 内左车道线 (lane 1): 绿色
-- 内右车道线 (lane 2): 红色
-- 外右车道线 (lane 3): 黄色
-- 左路沿 (road_edge 0): 青色
-- 右路沿 (road_edge 1): 品红
 
 ## 五、TuSimple 输出格式规范
 
@@ -1098,7 +1285,10 @@ def visualize_session(
 5. annotate_3d.py         ← config，复用 annotate_multi_height (Phase 2)
 6. clean_and_sample.py    ← config (Phase 3)
 7. project_tusimple.py    ← projection + config (Phase 4)
-8. visualize.py           ← config + projection (验证)
+8. viz_collect.py         ← config (Phase 1 可视化)
+9. viz_annotate.py        ← config + projection (Phase 2 可视化)
+10. viz_clean.py          ← config (Phase 3 可视化)
+11. viz_tusimple.py       ← config + projection (Phase 4 可视化)
 ```
 
 ## 八、验证方案
@@ -1126,12 +1316,14 @@ def validate_tusimple_labels(labels_path: Path) -> dict:
   """
 ```
 
-### 8.3 可视化检查
+### 8.3 各 Phase 可视化检查
 
-用 `visualize.py` 在图像上绘制 TuSimple 车道线，人工确认:
-- 车道线是否贴合实际车道
-- 不同高度的投影是否合理
-- 弯道处是否有明显投影错误
+每个 Phase 完成后用对应的可视化脚本进行人工检查:
+
+- **`viz_collect.py`**: 8 相机网格视图 — 帧同步、视角、场景是否正常
+- **`viz_annotate.py`**: 3D 标注投影叠加 — 车道线贴合度、高度变换、弯道质量
+- **`viz_clean.py`**: 清洗统计 — 通过率、拒绝帧示例、抽样分布
+- **`viz_tusimple.py`**: TuSimple 2D 标注 — 车道线位置、ROI 裁剪覆盖、多高度对比
 
 ### 8.4 高度一致性验证
 
@@ -1152,11 +1344,28 @@ def test_straight_lane_projection():
   """
 ```
 
-### 8.6 ROI 裁剪边界值测试
+### 8.6 弯道单调性裁断测试
+
+```python
+def test_monotonic_straight_lane():
+  """直线车道线: v 单调递减，无截断，完整保留所有点。"""
+
+def test_monotonic_curve_cutoff():
+  """弯道车道线: v 在第 5 个点折返 (v[5] >= v[4])，
+  截断后仅保留前 5 个点，后续 h_samples 返回 -2。"""
+
+def test_monotonic_immediate_fold():
+  """极端弯道: v[1] >= v[0]，仅保留 1 个点 → 不足 2 点 → 全 -2。"""
+
+def test_monotonic_slight_curve():
+  """缓弯: v 始终单调递减但间距不均匀，无截断，插值正确。"""
+```
+
+### 8.7 ROI 裁剪边界值测试
 
 ```python
 def test_crop_params_nominal():
-  """默认参数 (pitch=5°, crop_hfov=70°) 的裁剪区域和内参验证。"""
+  """默认参数 (NOMINAL_PITCH=4°, crop_hfov=70°) 的裁剪区域和内参验证。"""
 
 def test_crop_params_pitch_zero():
   """pitch=0° (水平) 时裁剪区域不越界，地平线在图像中部。"""
@@ -1168,7 +1377,7 @@ def test_crop_params_fov_range():
   """crop_hfov=50°/80°/120° 时裁剪宽度合理，内参一致。"""
 ```
 
-### 8.7 车道线选择与 road_edge 补位测试
+### 8.8 车道线选择与 road_edge 补位测试
 
 ```python
 def test_lane_selection_all_high_prob():
@@ -1185,7 +1394,7 @@ def test_lane_selection_inner_no_fallback():
   """lane[1] prob 低 → L-inn 全 -2 (无 road_edge 补位源)。"""
 ```
 
-### 8.8 幂等性验证
+### 8.9 幂等性验证
 
 ```python
 def test_phase2_idempotent():
@@ -1203,23 +1412,29 @@ def test_phase4_idempotent():
 
 ```bash
 DETACH=1 bash tools/dashcam/start_carla.sh
+SESSION=data/tusimple/Town04_ClearNoon_p4.0_y0.0
 
 # Phase 1: 少量帧采集
 python tools/dashcam/tusimple/collect.py \
   --heights H1 H3 H6 \
   --map Town04 --weather ClearNoon \
-  --pitch 5.0 --yaw 0.0 \
+  --pitch 4.0 --yaw 0.0 \
   --max-frames 500 --save-every 4 \
   --output-base data/tusimple \
   --mono-jpeg-quality 95
+python tools/dashcam/tusimple/viz_collect.py $SESSION --max-frames 5
 
-# Phase 2~4: 跑完整流水线
-python tools/dashcam/tusimple/annotate_3d.py data/tusimple/Town04_ClearNoon_p5.0_y0.0/ --heights H1 H3 H6
-python tools/dashcam/tusimple/clean_and_sample.py data/tusimple/Town04_ClearNoon_p5.0_y0.0/ --heights H1 H3 H6
-python tools/dashcam/tusimple/project_tusimple.py data/tusimple/Town04_ClearNoon_p5.0_y0.0/
+# Phase 2: 3D 标注
+python tools/dashcam/tusimple/annotate_3d.py $SESSION --heights H1 H3 H6
+python tools/dashcam/tusimple/viz_annotate.py $SESSION --heights H1 H3 H6 --max-frames 5
 
-# 可视化验证
-python tools/dashcam/tusimple/visualize.py data/tusimple/Town04_ClearNoon_p5.0_y0.0/tusimple/ --height H1 --max-frames 20
+# Phase 3: 清洗抽样
+python tools/dashcam/tusimple/clean_and_sample.py $SESSION --heights H1 H3 H6
+python tools/dashcam/tusimple/viz_clean.py $SESSION --show-rejected 5
+
+# Phase 4: TuSimple 投影
+python tools/dashcam/tusimple/project_tusimple.py $SESSION
+python tools/dashcam/tusimple/viz_tusimple.py $SESSION --height H1 --show-crop --max-frames 5
 ```
 
 确认无误后再进入正式采集。
@@ -1238,13 +1453,13 @@ DETACH=1 bash tools/dashcam/start_carla.sh
 python tools/dashcam/tusimple/collect.py \
   --heights H1 H2 H3 H4 H5 H6 \
   --map Town04 --weather ClearNoon \
-  --pitch 5.0 --yaw 0.0 \
-  --max-frames 5000 --save-every 4 \
+  --pitch 4.0 --yaw 0.0 \
+  --max-frames 2000 --save-every 4 \
   --output-base data/tusimple \
   --mono-jpeg-quality 95
 ```
 
-输出: `data/tusimple/Town04_ClearNoon_p5.0_y0.0/` (H0/ + H1~H6/)
+输出: `data/tusimple/Town04_ClearNoon_p4.0_y0.0/` (H0/ + H1~H6/)
 
 **方式 B: 批量采集** (正式训练数据，全场景×姿态矩阵)
 
@@ -1255,57 +1470,99 @@ python tools/dashcam/tusimple/run_full_collection.py --list
 # 启动批量采集 (136 session, 断点可恢复)
 python tools/dashcam/tusimple/run_full_collection.py \
   --output-base data/tusimple \
-  --max-frames 5000 --save-every 4 \
+  --max-frames 2000 --save-every 4 \
   --num-npc 40 --no-display \
   --mono-jpeg-quality 95
 ```
 
 输出: `data/tusimple/` 下 136 个 session 目录，每个含 H0/ + H1~H6/
 
+**Phase 1 可视化检查**:
+
+```bash
+python tools/dashcam/tusimple/viz_collect.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --max-frames 10
+```
+
+确认: 8 相机网格视图正常、帧同步、各高度视角差异合理。
+
 ### Step 3: Phase 2 — 3D 标注
 
 ```bash
 python tools/dashcam/tusimple/annotate_3d.py \
-  data/tusimple/Town04_ClearNoon_p5.0_y0.0/ \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
   --onnx selfdrive/modeld/models/driving_vision.onnx \
   --heights H1 H3 H6 \
   --min-ll-prob 0.3
 ```
 
-输出: `data/tusimple/Town04_ClearNoon_p5.0_y0.0/3d_labels/` (H1/ H3/ H6/)
+输出: `data/tusimple/Town04_ClearNoon_p4.0_y0.0/3d_labels/` (H1/ H3/ H6/)
+
+**Phase 2 可视化检查**:
+
+```bash
+python tools/dashcam/tusimple/viz_annotate.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --heights H1 H3 H6 --max-frames 10
+```
+
+确认: 3D 车道线投影贴合路面、高度变换后标注合理、弯道处无跳变。
 
 ### Step 4: Phase 3 — 数据清洗与抽样
 
 ```bash
 python tools/dashcam/tusimple/clean_and_sample.py \
-  data/tusimple/Town04_ClearNoon_p5.0_y0.0/ \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
   --heights H1 H3 H6 \
   --min-ll-prob 0.3 --min-speed 1.0 \
   --sample-every 5 \
   --split-ratio 0.8 0.1 0.1 --seed 42
 ```
 
-输出: `data/tusimple/Town04_ClearNoon_p5.0_y0.0/splits/` (train.txt, val.txt, test.txt)
+输出: `data/tusimple/Town04_ClearNoon_p4.0_y0.0/splits/` (train.txt, val.txt, test.txt)
+
+**Phase 3 可视化检查**:
+
+```bash
+python tools/dashcam/tusimple/viz_clean.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --show-rejected 10
+```
+
+确认: 通过率合理 (>80%)、拒绝帧确实质量差、抽样分布均匀。
 
 ### Step 5: Phase 4 — TuSimple 投影
 
 ```bash
 python tools/dashcam/tusimple/project_tusimple.py \
-  data/tusimple/Town04_ClearNoon_p5.0_y0.0/ \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
   --crop-hfov 70
 ```
 
-输出: `data/tusimple/Town04_ClearNoon_p5.0_y0.0/tusimple/` (train.json, val.json, test.json + images/)
+输出: `data/tusimple/Town04_ClearNoon_p4.0_y0.0/tusimple/` (train.json, val.json, test.json + images/)
 注: 使用固定裁剪 (NOMINAL_PITCH=4°)，图像从 1920×1080 (120°) ROI 裁剪到 ~70° 后缩放为 1280×720
 
-### Step 6: 验证
+**Phase 4 可视化检查**:
 
 ```bash
-# 可视化检查
-python tools/dashcam/tusimple/visualize.py \
-  data/tusimple/Town04_ClearNoon_p5.0_y0.0/tusimple/ \
+# TuSimple 标注叠加
+python tools/dashcam/tusimple/viz_tusimple.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
   --height H1 --max-frames 20
+
+# ROI 裁剪对比 (原始 vs 裁剪后)
+python tools/dashcam/tusimple/viz_tusimple.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --height H1 --show-crop --max-frames 5
+
+# 多高度并排对比
+python tools/dashcam/tusimple/viz_tusimple.py \
+  data/tusimple/Town04_ClearNoon_p4.0_y0.0/ \
+  --compare-heights --max-frames 5
 ```
+
+确认: 车道线贴合路面、ROI 裁剪覆盖完整道路区域、不同高度标注差异符合物理预期。
 
 ## 十、已知限制与后续工作
 
