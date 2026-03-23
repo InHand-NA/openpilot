@@ -751,14 +751,12 @@ def resample_lane_at_h_samples(
 ) -> list[int]:
   """在 TuSimple h_samples 的每个 v 值处插值 x 坐标。
 
+  前置条件: 输入 v 已单调（由 lanes_3d_to_tusimple 在调用前做裁断）。
+
   算法:
     1. 滤除 NaN 和无效点
-    2. 按 3D 距离排序 (近→远)，对应 v 从大到小 (图像底→顶)
-    3. 单调性裁断: 从近到远遍历，v 应单调递减。
-       若 v[i+1] >= v[i]（折返），在 i 处截断远端，
-       保证车道线从近到远不回折
-    4. 去除重复 v 值 (保留第一个)
-    5. 对每个 h_sample:
+    2. 去除重复 v 值 (保留第一个)
+    3. 对每个 h_sample:
        - 若 v 超出投影多段线的 v 范围 → -2
        - np.interp() 线性插值 u → 取整
        - 若 x 超出 x_range → -2
@@ -1151,13 +1149,13 @@ python tools/dashcam/tusimple/viz_clean.py \
     ll_prob < 0.3:  520 帧 (10.4%)
     v_ego < 1.0:   180 帧 (3.6%)
     both:          100 帧 (2.0%)
-时间抽样: 4200 → 840 帧 (每 5 帧取 1)
-划分: train=672 / val=84 / test=84
+时间抽样: 1680 → 336 帧 (每 5 帧取 1)
+划分: train=270 / val=33 / test=33
 
 各高度分布:
-  H1 (1.22m): train=224 / val=28 / test=28
-  H3 (1.50m): train=224 / val=28 / test=28
-  H6 (3.00m): train=224 / val=28 / test=28
+  H1 (1.22m): train=90 / val=11 / test=11
+  H3 (1.50m): train=90 / val=11 / test=11
+  H6 (3.00m): train=90 / val=11 / test=11
 ```
 
 2. **拒绝帧示例** (`--show-rejected N`):
@@ -1568,8 +1566,8 @@ python tools/dashcam/tusimple/viz_tusimple.py \
 
 1. **针孔 vs 鱼眼**: 当前使用 Carla 针孔模型近似 120° 鱼眼。如需更高保真度，可在后处理中添加合成鱼眼畸变
 2. **标注来源**: 3D 标注来自 openpilot 预训练模型 (H0) 推理，非真实地面真值。标注精度受限于模型性能
-3. **弯道处理**: 大曲率弯道可能导致投影后的 v(u) 非单调，当前用 `np.interp` 处理，极端情况可能丢失精度
+3. **弯道处理**: 大曲率弯道通过单调性裁断在折返点截断车道线，保证投影正确性。代价是弯道处车道线比直线时短
 4. **场景多样性**: 需要在多种地图、天气、pitch/yaw 组合下采集，才能获得鲁棒的训练数据
-5. **road_edges 在 TuSimple 中的表示**: 标准 TuSimple 不区分 lane_lines 和 road_edges，二者统一作为 lanes 输出
+5. **road_edges 作为补位源**: 当外侧 lane_line 置信度低时用 road_edge 补位。补位后的车道线在 TuSimple 格式中与普通 lane_line 无区分标记
 6. **ROI 裁剪 FOV 选择**: 默认 70° 裁剪是远场分辨率与视野宽度的折中。极窄道路或多车道场景可能需要更大 FOV (可通过 `--crop-hfov` 调整)
 7. **固定裁剪区域**: 使用 NOMINAL_PITCH=4° 计算固定裁剪位置，训练和部署共用。训练数据覆盖 0°~7° pitch 范围确保鲁棒性。若部署 pitch 超出此范围需重新评估
