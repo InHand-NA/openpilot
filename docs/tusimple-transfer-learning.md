@@ -167,7 +167,17 @@ Phase 1 保持 120° FOV 渲染（保留原始数据最大信息量），Phase 4
 
 **推荐裁剪 HFOV ≈ 70°**：远场分辨率提升 2.5 倍，同时保留约 70° 视野，足以覆盖 4 车道宽度。
 
-裁剪区域的垂直位置根据相机 pitch 角自动计算，确保地平线位于裁剪图上部约 30% 处，最大化道路区域覆盖。详见 `config.py:compute_crop_params()`。
+裁剪区域的垂直位置使用**固定的名义 pitch (4°)** 计算，训练和部署共用同一裁剪参数。由于训练数据覆盖 0°~7° 的 pitch 范围，地平线在裁剪图中自然分布在 ~24%~41% 之间，模型学会适应不同地平线位置，无需部署时精确标定 pitch。
+
+```
+NOMINAL_PITCH = 4°, 固定 crop_y = 370
+
+pitch =  0° → 地平线在裁剪图 39.0% 处, 道路占 61.0%
+pitch =  4° → 地平线在裁剪图 30.1% 处, 道路占 69.9% ← 名义
+pitch =  7° → 地平线在裁剪图 23.4% 处, 道路占 76.6%
+```
+
+详见 `config.py:compute_crop_params()`。
 
 ## 二、文件结构
 
@@ -273,9 +283,9 @@ data/tusimple/<session_tag>/tusimple/
     "width": 1280, "height": 720,
     "h_samples": [160, 170, "...", 710],
     "crop_hfov": 70,
-    "crop_rect": [572, 360, 776, 436],
-    "effective_focal": 914.3,
-    "horizon_ratio": 0.3
+    "nominal_pitch": 4.0,
+    "crop_rect": [572, 370, 776, 436],
+    "effective_focal": 914.3
   },
   "heights": {
     "H1": 1.22, "H2": 1.30, "H3": 1.50,
@@ -327,10 +337,11 @@ TUSIMPLE_H_SAMPLES = list(range(160, 720, 10))  # 56 个采样点
 
 # ── ROI 裁剪参数 (120° → 目标 FOV，提升远场分辨率) ──
 CROP_HFOV = 70        # degrees, 裁剪后有效水平视场角
+NOMINAL_PITCH = 4.0   # degrees, 名义安装 pitch (用于固定裁剪区域)
 HORIZON_RATIO = 0.3   # 地平线在裁剪图中的垂直位置 (0=顶部, 1=底部)
 
 def compute_crop_params(
-  pitch_deg: float = 5.0,
+  pitch_deg: float = NOMINAL_PITCH,
   crop_hfov: float = CROP_HFOV,
   horizon_ratio: float = HORIZON_RATIO,
 ) -> dict:
@@ -339,8 +350,9 @@ def compute_crop_params(
   从 1920×1080 (HFOV=120°) 中裁剪出 crop_hfov 的中心区域，
   保持 16:9 宽高比，然后缩放到 1280×720。
 
-  裁剪区域的垂直位置由 horizon_ratio 控制：
-    地平线位于裁剪图从顶部算起 horizon_ratio 处。
+  使用固定的 NOMINAL_PITCH 计算裁剪区域，训练和部署共用。
+  不同 session 的实际 pitch 导致地平线在裁剪图中自然浮动，
+  增强模型对 pitch 变化的鲁棒性。
 
   Returns:
     {
@@ -357,7 +369,7 @@ def compute_crop_params(
   # 水平居中
   crop_x = (MONO_W - crop_w) // 2
 
-  # 垂直: 根据 pitch 角确定地平线位置，再按 horizon_ratio 放置
+  # 垂直: 根据名义 pitch 确定地平线位置，再按 horizon_ratio 放置
   horizon_y = MONO_H / 2 - MONO_FOCAL * np.tan(np.radians(pitch_deg))
   crop_y = int(horizon_y - horizon_ratio * crop_h)
   crop_y = max(0, min(crop_y, MONO_H - crop_h))
@@ -381,9 +393,9 @@ def compute_crop_params(
     'effective_focal': f_crop,
   }
 
-# 默认裁剪参数 (pitch=5°, CROP_HFOV=70°):
-#   crop_rect = (572, 360, 776, 436)
-#   K_crop = [[914.3, 0, 640.0], [0, 914.3, 297.2], [0, 0, 1]]
+# 固定裁剪参数 (NOMINAL_PITCH=4°, CROP_HFOV=70°):
+#   crop_rect = (572, 370, 776, 436)
+#   K_crop = [[914.3, 0, 640.0], [0, 914.3, 280.4], [0, 0, 1]]
 #   effective_focal = 914.3
 
 # ── 高度定义 ──
@@ -548,20 +560,21 @@ SCENES = [
 ```
 pitch \ yaw  | -3°  | -1.5° |  0°  | +1.5° | +3°  | 采样点
 -------------|------|-------|------|-------|------|------
--1.5° (仰)   |  ○   |       |  ○   |       |  ○   |  3
  0°   (水平) |  ○   |       |  ○   |       |  ○   |  3
- 1.5°        |      |  ○    |  ○   |  ○    |      |  3
+ 1°          |      |  ○    |  ○   |  ○    |      |  3
+ 2°          |  ○   |  ○    |  ○   |  ○    |  ○   |  5
  3°          |  ○   |  ○    |  ○   |  ○    |  ○   |  5
- 4°          |  ○   |  ○    |  ○   |  ○    |  ○   |  5
- 5° (名义)   |  ○   |  ○    |  ●   |  ○    |  ○   |  5+1
+ 4° (名义)   |  ○   |  ○    |  ●   |  ○    |  ○   |  5+1
+ 5°          |  ○   |  ○    |  ○   |  ○    |  ○   |  5
  6°          |  ○   |  ○    |  ○   |  ○    |  ○   |  5
  7°          |      |  ○    |  ○   |  ○    |      |  3
-                                              合计: 33 姿态
+                                              合计: 34 姿态
 ```
 
 - ○ = 普通采样点 (1× max_frames)
-- ● = 名义中心 (5°, 0°), 采集 2× max_frames
-- 总计: 4 场景 × 33 姿态 = **132 个 session**
+- ● = 名义中心 (4°, 0°), 采集 2× max_frames
+- 范围 0°~7°: 覆盖轿车 (3°~7°) 和卡车 (0°~4°) 安装场景
+- 总计: 4 场景 × 34 姿态 = **136 个 session**
 
 **关键特性** (复用 `run_full_collection.py` 的成熟机制):
 
@@ -600,11 +613,11 @@ python tools/dashcam/tusimple/run_full_collection.py \
 
 **session 命名**: `{map}_{weather}_p{pitch}_y{yaw}`，例如 `Town04_ClearNoon_p5.0_y0.0`
 
-**磁盘估算** (132 session × 5000 帧/session):
+**磁盘估算** (136 session × 5000 帧/session):
 - 使用 `--mono-jpeg-quality 95`: H0 PNG ~50 GB + Mono JPEG ~15 GB ≈ 65 GB/session
 - 但由于 save_every=4 (有效 5 FPS)，实际保存 ~1250 帧/session
-- 全量: 1250 帧 × 132 session × (~10 + 3) MB/帧 ≈ **2.1 TB**
-- 精简 (3 高度 H1/H3/H6): ~1.2 TB
+- 全量: 1250 帧 × 136 session × (~10 + 3) MB/帧 ≈ **2.2 TB**
+- 精简 (3 高度 H1/H3/H6): ~1.3 TB
 
 ### 4.4 `annotate_3d.py` — Phase 2: 3D 标注
 
@@ -939,9 +952,9 @@ openpilot road_edge: [0]    |  —    |  —    | [1]
 **工作流**:
 
 ```
-1. 读取 clip_info.json → rpyCalib, pitch_deg, mono_format
-2. 计算 ROI 裁剪参数:
-   crop_params = compute_crop_params(pitch_deg, crop_hfov, horizon_ratio)
+1. 读取 clip_info.json → rpyCalib, mono_format
+2. 计算固定 ROI 裁剪参数 (使用 NOMINAL_PITCH=4°，与部署一致):
+   crop_params = compute_crop_params()  # 使用默认 NOMINAL_PITCH
    → crop_rect, K_crop
 3. 读取 splits/ 目录下的帧列表 (train.txt, val.txt, test.txt)
 4. 对每个帧列表 (train/val/test):
@@ -963,7 +976,7 @@ openpilot road_edge: [0]    |  —    |  —    | [1]
 
 ```python
 # Mono 图像 (1920×1080, HFOV=120°) → TuSimple 图像 (1280×720, HFOV≈70°)
-x, y, w, h = crop_params['crop_rect']   # (572, 360, 776, 436)
+x, y, w, h = crop_params['crop_rect']   # (572, 370, 776, 436)
 roi = mono_img[y:y+h, x:x+w]           # 裁剪 ROI
 tusimple_img = cv2.resize(roi, (TUSIMPLE_W, TUSIMPLE_H))  # 缩放到 1280×720
 ```
@@ -974,7 +987,6 @@ tusimple_img = cv2.resize(roi, (TUSIMPLE_W, TUSIMPLE_H))  # 缩放到 1280×720
 python tools/dashcam/tusimple/project_tusimple.py \
   data/tusimple/Town04_ClearNoon_p5.0_y0.0/ \
   --crop-hfov 70 \
-  --horizon-ratio 0.3 \
   --lane-prob-threshold 0.3 \
   --min-visible-pts 2 \
   --output data/tusimple/Town04_ClearNoon_p5.0_y0.0/tusimple/
@@ -1240,7 +1252,7 @@ python tools/dashcam/tusimple/collect.py \
 # 查看采集计划
 python tools/dashcam/tusimple/run_full_collection.py --list
 
-# 启动批量采集 (132 session, 断点可恢复)
+# 启动批量采集 (136 session, 断点可恢复)
 python tools/dashcam/tusimple/run_full_collection.py \
   --output-base data/tusimple \
   --max-frames 5000 --save-every 4 \
@@ -1248,7 +1260,7 @@ python tools/dashcam/tusimple/run_full_collection.py \
   --mono-jpeg-quality 95
 ```
 
-输出: `data/tusimple/` 下 132 个 session 目录，每个含 H0/ + H1~H6/
+输出: `data/tusimple/` 下 136 个 session 目录，每个含 H0/ + H1~H6/
 
 ### Step 3: Phase 2 — 3D 标注
 
@@ -1284,7 +1296,7 @@ python tools/dashcam/tusimple/project_tusimple.py \
 ```
 
 输出: `data/tusimple/Town04_ClearNoon_p5.0_y0.0/tusimple/` (train.json, val.json, test.json + images/)
-注: 图像从 1920×1080 (120°) ROI 裁剪到 ~70° 后缩放为 1280×720
+注: 使用固定裁剪 (NOMINAL_PITCH=4°)，图像从 1920×1080 (120°) ROI 裁剪到 ~70° 后缩放为 1280×720
 
 ### Step 6: 验证
 
@@ -1303,4 +1315,4 @@ python tools/dashcam/tusimple/visualize.py \
 4. **场景多样性**: 需要在多种地图、天气、pitch/yaw 组合下采集，才能获得鲁棒的训练数据
 5. **road_edges 在 TuSimple 中的表示**: 标准 TuSimple 不区分 lane_lines 和 road_edges，二者统一作为 lanes 输出
 6. **ROI 裁剪 FOV 选择**: 默认 70° 裁剪是远场分辨率与视野宽度的折中。极窄道路或多车道场景可能需要更大 FOV (可通过 `--crop-hfov` 调整)
-7. **裁剪区域垂直定位**: 当前基于 pitch 角和 horizon_ratio 自动计算。特殊安装角度 (pitch 接近 0° 或大于 10°) 可能需要手动调整 horizon_ratio
+7. **固定裁剪区域**: 使用 NOMINAL_PITCH=4° 计算固定裁剪位置，训练和部署共用。训练数据覆盖 0°~7° pitch 范围确保鲁棒性。若部署 pitch 超出此范围需重新评估
