@@ -899,16 +899,20 @@ for h in h_samples:
 
 #### Step 1: 质量过滤
 
+质量过滤依赖H0的数据，H1～H6过滤结果相同。
+
 ```
 对每帧 3D 标注 JSON:
+  - 过滤每个session的第0帧，该帧标注质量不高
   - 检查 ll_quality_pass 标志
   - 检查内侧车道线概率: lane_lines_prob[1] > prob_threshold AND lane_lines_prob[2] > prob_threshold
   - 检查自车速度: v_ego > min_speed (过滤停车帧)
-  - 通过 → 写入 clean_log.txt
+  - 通过 → 写入 clean_log.txt的内容“<frame id>, pass”
+  - 不通过 → 写入 clean_log.txt的内容“<frame id>, fail”
 ```
 
 **过滤条件** (可配置):
-- `--min-ll-prob 0.3`: 内侧车道线最低概率
+- `--min-ll-prob 0.7`: 内侧车道线最低概率
 - `--min-speed 1.0`: 最低自车速度 (m/s)，过滤停车/起步帧
 - `--require-both-inner`: 要求左右内侧车道线同时存在 (默认 true)
 
@@ -918,8 +922,7 @@ for h in h_samples:
 对 clean_log.txt 中的帧:
   - 每 N 帧取 1 帧 (默认 N=5, 即 1 FPS 等效)
   - 确保相邻帧有足够时间间隔，避免训练数据时序冗余
-  - 跨高度独立抽样 (H1~H6 各自抽样)
-  - 输出 → sampled_log.txt
+  - 输出 → sampled_log.txt, "<frame id>"
 ```
 
 **抽样参数**:
