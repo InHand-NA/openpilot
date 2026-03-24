@@ -524,7 +524,7 @@ python tools/dashcam/tusimple/collect.py \
   --heights H1 H2 H3 H4 H5 H6 \
   --map Town04 --weather ClearNoon \
   --pitch 5.0 --yaw 0.0 \
-  --max-frames 2000 --save-every 4 \
+  --max-frames 500 --save-every 4 \
   --output-base data/tusimple \
   --num-npc 40 --spawn-point 16 --random-spawn \
   --speed-range 40 100 --speed-interval 8 20 \
@@ -534,7 +534,9 @@ python tools/dashcam/tusimple/collect.py \
 
 **输出**: `data/tusimple/<session_tag>/` 目录，包含 H0/ + H1~H6/ + clip_info.json
 
-**磁盘估算** (单 session, 2000 帧, save_every=4 → 实际 500 帧, H1~H6):
+**`max_frames` 语义**: `--max-frames 500` 表示实际保存 500 帧到磁盘（与原有 `collect_multi_height.py` 一致）。配合 `--save-every 4`，每 4 个 tick 保存一帧，共需 ~2000 个 tick，帧 ID 为 000000, 000004, 000008, ...
+
+**磁盘估算** (单 session, 500 帧, H1~H6):
 - H0 PNG: ~5 MB/帧 × 2 = 10 MB/帧 → ~5 GB
 - Mono PNG: ~2 MB/帧 × 6 = 12 MB/帧 → ~6 GB
 - Mono JPEG (Q=95): ~0.5 MB/帧 × 6 = 3 MB/帧 → ~1.5 GB
@@ -603,14 +605,14 @@ python tools/dashcam/tusimple/run_full_collection.py --list
 # 启动（或恢复）批量采集
 python tools/dashcam/tusimple/run_full_collection.py \
   --output-base data/tusimple \
-  --max-frames 2000 --save-every 4 \
+  --max-frames 500 --save-every 4 \
   --num-npc 40 --no-display \
   --mono-jpeg-quality 95
 
 # 崩溃后恢复 — 重新运行同一命令即可
 python tools/dashcam/tusimple/run_full_collection.py \
   --output-base data/tusimple \
-  --max-frames 2000 --save-every 4 \
+  --max-frames 500 --save-every 4 \
   --num-npc 40 --no-display
 
 # 跳过前 50 个 session（手动指定起点）
@@ -620,8 +622,7 @@ python tools/dashcam/tusimple/run_full_collection.py \
 
 **session 命名**: `{map}_{weather}_p{pitch}_y{yaw}`，例如 `Town04_ClearNoon_p5.0_y0.0`
 
-**磁盘估算** (136 session × 2000 帧/session):
-- save_every=4 → 实际保存 ~500 帧/session
+**磁盘估算** (136 session × 500 保存帧/session):
 - 使用 `--mono-jpeg-quality 95`: 500 帧 × (10 + 3) MB/帧 ≈ 6.5 GB/session
 - 全量 (6 高度): 136 × 6.5 GB ≈ **884 GB** (在 1.3 TB 可用空间内)
 - 精简 (3 高度 H1/H3/H6): 136 × 4 GB ≈ **544 GB**
@@ -956,18 +957,18 @@ python tools/dashcam/tusimple/clean_and_sample.py \
 
 ```json
 {
-  "total_frames": 2000,
-  "quality_pass": 1680,
+  "total_frames": 1500,
+  "quality_pass": 1260,
   "quality_pass_rate": 0.84,
-  "sampled": 336,
+  "sampled": 252,
   "per_height": {
-    "H1": {"pass": 560, "sampled": 112, "train": 90, "val": 11, "test": 11},
-    "H3": {"pass": 560, "sampled": 112, "train": 90, "val": 11, "test": 11},
-    "H6": {"pass": 560, "sampled": 112, "train": 90, "val": 11, "test": 11}
+    "H1": {"pass": 420, "sampled": 84, "train": 67, "val": 9, "test": 8},
+    "H3": {"pass": 420, "sampled": 84, "train": 67, "val": 9, "test": 8},
+    "H6": {"pass": 420, "sampled": 84, "train": 68, "val": 8, "test": 8}
   },
-  "train": 270,
-  "val": 33,
-  "test": 33
+  "train": 202,
+  "val": 26,
+  "test": 24
 }
 ```
 
@@ -1144,18 +1145,19 @@ python tools/dashcam/tusimple/viz_clean.py \
 1. **统计摘要** (终端输出 + 可选图表):
 
 ```
-质量过滤: 2000 帧 → 1680 通过 (84.0%)
+质量过滤: 1500 帧 → 1260 通过 (84.0%)
+  (500 unique frame × 3 heights = 1500 帧×高度对)
   拒绝原因:
-    ll_prob < 0.3:  520 帧 (10.4%)
-    v_ego < 1.0:   180 帧 (3.6%)
-    both:          100 帧 (2.0%)
-时间抽样: 1680 → 336 帧 (每 5 帧取 1)
-划分: train=270 / val=33 / test=33
+    ll_prob < 0.3:  156 帧 (10.4%)
+    v_ego < 1.0:    54 帧 (3.6%)
+    both:            30 帧 (2.0%)
+时间抽样: 1260 → 252 帧 (每 5 帧取 1)
+划分: train=202 / val=26 / test=24
 
 各高度分布:
-  H1 (1.22m): train=90 / val=11 / test=11
-  H3 (1.50m): train=90 / val=11 / test=11
-  H6 (3.00m): train=90 / val=11 / test=11
+  H1 (1.22m): train=67 / val=9 / test=8
+  H3 (1.50m): train=67 / val=9 / test=8
+  H6 (3.00m): train=68 / val=8 / test=8
 ```
 
 2. **拒绝帧示例** (`--show-rejected N`):
@@ -1452,7 +1454,7 @@ python tools/dashcam/tusimple/collect.py \
   --heights H1 H2 H3 H4 H5 H6 \
   --map Town04 --weather ClearNoon \
   --pitch 4.0 --yaw 0.0 \
-  --max-frames 2000 --save-every 4 \
+  --max-frames 500 --save-every 4 \
   --output-base data/tusimple \
   --mono-jpeg-quality 95
 ```
@@ -1468,7 +1470,7 @@ python tools/dashcam/tusimple/run_full_collection.py --list
 # 启动批量采集 (136 session, 断点可恢复)
 python tools/dashcam/tusimple/run_full_collection.py \
   --output-base data/tusimple \
-  --max-frames 2000 --save-every 4 \
+  --max-frames 500 --save-every 4 \
   --num-npc 40 --no-display \
   --mono-jpeg-quality 95
 ```
