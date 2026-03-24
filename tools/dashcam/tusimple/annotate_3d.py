@@ -121,6 +121,7 @@ def annotate_session(
   onnx_path: str,
   heights_to_annotate: list[str] | None,
   use_gpu_preprocess: bool = True,
+  force: bool = False,
 ) -> dict:
   """Annotate all H0 frames in session_dir, write 3D labels to output_dir.
 
@@ -242,8 +243,8 @@ def annotate_session(
       if h0_data is None:
         continue
 
-      # Idempotency: skip if all heights already annotated
-      all_exist = all(
+      # Idempotency: skip if all heights already annotated (unless force)
+      all_exist = not force and all(
         (output_dir / tag / f'{frame_id}.json').exists()
         for tag in heights
       )
@@ -329,6 +330,8 @@ def main():
                       help='Heights to annotate (default: all in clip_info.json)')
   parser.add_argument('--no-gpu-preprocess', action='store_true',
                       help='Disable GPU OpenCL preprocessing, fall back to CPU')
+  parser.add_argument('--force', action='store_true',
+                      help='Force re-annotate existing frames')
   args = parser.parse_args()
 
   session_dir = Path(args.session_dir).resolve()
@@ -348,6 +351,7 @@ def main():
       onnx_path=args.onnx,
       heights_to_annotate=args.heights,
       use_gpu_preprocess=not args.no_gpu_preprocess,
+      force=args.force,
     )
     print(f"\n3D labels saved to: {output_dir}")
   except KeyboardInterrupt:

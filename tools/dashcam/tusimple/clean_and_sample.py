@@ -126,13 +126,13 @@ def expand_to_heights(sampled_ids: list[str], heights: list[str]) -> list[str]:
   return entries
 
 
-def split_entries(
-  entries: list[str],
+def split_frame_ids(
+  frame_ids: list[str],
   ratios: list[float],
   seed: int,
 ) -> tuple[list[str], list[str], list[str]]:
-  """全局随机划分 train/val/test。"""
-  shuffled = entries.copy()
+  """在帧级别随机划分 train/val/test (划分后再按高度展开)。"""
+  shuffled = frame_ids.copy()
   random.seed(seed)
   random.shuffle(shuffled)
 
@@ -193,10 +193,15 @@ def clean_and_sample(
   sampled_ids = time_sample(pass_ids, sample_every)
   print(f"  Step 2 时间抽样: {len(pass_ids)} → {len(sampled_ids)} (every {sample_every})")
 
-  # Step 3: 按高度展开 + 划分
-  entries = expand_to_heights(sampled_ids, heights)
-  train, val, test = split_entries(entries, split_ratio, seed)
-  print(f"  Step 3 划分: {len(entries)} entries → train={len(train)} val={len(val)} test={len(test)}")
+  # Step 3: 先帧级划分，再按高度展开 (保证每个 split 的 Hk 分布均衡)
+  train_ids, val_ids, test_ids = split_frame_ids(sampled_ids, split_ratio, seed)
+  train = sorted(expand_to_heights(train_ids, heights))
+  val = sorted(expand_to_heights(val_ids, heights))
+  test = sorted(expand_to_heights(test_ids, heights))
+  print(f"  Step 3 划分: {len(sampled_ids)} frames → "
+        f"train={len(train_ids)}×{len(heights)}={len(train)} "
+        f"val={len(val_ids)}×{len(heights)}={len(val)} "
+        f"test={len(test_ids)}×{len(heights)}={len(test)}")
 
   # Per-height stats
   per_height = {}

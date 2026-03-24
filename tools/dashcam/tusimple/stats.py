@@ -40,10 +40,18 @@ def discover_split_files(data_root: Path) -> dict[str, list[Path]]:
 
 
 def count_labels(path: Path) -> dict:
-  """统计一个 JSON Lines 文件的帧数和车道线数。"""
+  """统计一个 JSON Lines 文件的帧数、车道线数，以及按高度分组的帧数/车道线数。
+
+  Returns:
+    {
+      'frames': int, 'lanes': int, 'visible_pts': int,
+      'per_height': {tag: {'frames': int, 'lanes': int, 'visible_pts': int}, ...}
+    }
+  """
   n_frames = 0
-  n_lanes = 0        # 有 ≥1 个可见点的车道线数
-  n_visible_pts = 0  # 所有车道线的可见点总数
+  n_lanes = 0
+  n_visible_pts = 0
+  per_height: dict[str, dict[str, int]] = {}
   with open(path) as f:
     for line in f:
       line = line.strip()
@@ -51,12 +59,24 @@ def count_labels(path: Path) -> dict:
         continue
       rec = json.loads(line)
       n_frames += 1
+
+      # Extract height tag from raw_file, e.g. "H1/images/000004.jpg" → "H1"
+      raw_file = rec.get('raw_file', '')
+      tag = raw_file.split('/')[0] if '/' in raw_file else 'unknown'
+      if tag not in per_height:
+        per_height[tag] = {'frames': 0, 'lanes': 0, 'visible_pts': 0}
+      per_height[tag]['frames'] += 1
+
       for lane in rec.get('lanes', []):
         vis = sum(1 for x in lane if x != -2)
         if vis > 0:
           n_lanes += 1
           n_visible_pts += vis
-  return {'frames': n_frames, 'lanes': n_lanes, 'visible_pts': n_visible_pts}
+          per_height[tag]['lanes'] += 1
+          per_height[tag]['visible_pts'] += vis
+
+  return {'frames': n_frames, 'lanes': n_lanes, 'visible_pts': n_visible_pts,
+          'per_height': per_height}
 
 
 def main():
@@ -85,7 +105,7 @@ def main():
         f.write(str(p) + '\n')
     print(f"{split}_list.txt: {len(files)} 个文件")
 
-  # 2) 统计
+  # 2) 统计 — 总览
   print(f"\n{'split':<8} {'files':>6} {'frames':>8} {'lanes':>8} {'avg_lanes':>10} {'vis_pts':>10} {'avg_pts/lane':>13}")
   print('-' * 75)
 
@@ -93,11 +113,17 @@ def main():
   for split in SPLITS:
     files = split_files[split]
     total = {'frames': 0, 'lanes': 0, 'visible_pts': 0}
+    merged_heights: dict[str, dict[str, int]] = {}
     for p in files:
       c = count_labels(p)
       total['frames'] += c['frames']
       total['lanes'] += c['lanes']
       total['visible_pts'] += c['visible_pts']
+      for tag, h_stats in c['per_height'].items():
+        if tag not in merged_heights:
+          merged_heights[tag] = {'frames': 0, 'lanes': 0, 'visible_pts': 0}
+        for k in ['frames', 'lanes', 'visible_pts']:
+          merged_heights[tag][k] += h_stats[k]
 
     avg_lanes = total['lanes'] / max(total['frames'], 1)
     avg_pts = total['visible_pts'] / max(total['lanes'], 1)
@@ -112,7 +138,25 @@ def main():
       'avg_lanes_per_frame': round(avg_lanes, 2),
       'visible_pts': total['visible_pts'],
       'avg_pts_per_lane': round(avg_pts, 1),
+      'per_height': {tag: dict(h) for tag, h in sorted(merged_heights.items())},
     }
+
+  # 3) 统计 — 按高度
+  all_tags = sorted({tag for s in summary.values() for tag in s.get('per_height', {})})
+  if all_tags:
+    print(f"\n按高度统计:")
+    print(f"  {'split':<8} ", end='')
+    for tag in all_tags:
+      print(f"  {tag:>10}", end='')
+    print()
+    print('  ' + '-' * (10 + 12 * len(all_tags)))
+    for split in SPLITS:
+      ph = summary[split].get('per_height', {})
+      print(f"  {split:<8} ", end='')
+      for tag in all_tags:
+        n = ph.get(tag, {}).get('frames', 0)
+        print(f"  {n:>10}", end='')
+      print()
 
   # 写 summary.json
   summary_path = output_dir / 'summary.json'

@@ -146,6 +146,7 @@ def main():
           onnx_path=args.onnx,
           heights_to_annotate=args.heights,
           use_gpu_preprocess=not args.no_gpu_preprocess,
+          force=args.force,
         )
         elapsed = time.monotonic() - t_sess
         completed += 1
