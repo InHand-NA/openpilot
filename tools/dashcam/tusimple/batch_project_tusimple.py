@@ -107,6 +107,7 @@ def main():
           lane_prob_threshold=args.lane_prob_threshold,
           min_visible_pts=args.min_visible_pts,
           jpeg_quality=args.jpeg_quality,
+          force=args.force,
         )
         elapsed = time.monotonic() - t_sess
         completed += 1

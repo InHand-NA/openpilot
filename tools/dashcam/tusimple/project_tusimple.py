@@ -96,6 +96,7 @@ def project_session(
   lane_prob_threshold: float,
   min_visible_pts: int,
   jpeg_quality: int,
+  force: bool = False,
 ) -> dict:
   """Execute Phase 4 for one session. Returns stats dict."""
   clip_info_path = session_dir / 'clip_info.json'
@@ -165,9 +166,8 @@ def project_session(
     img_out_path = height_dir / f'{frame_id}.jpg'
     raw_file = f'{tag}/images/{frame_id}.jpg'
 
-    # Idempotency: skip if image already exists
-    if img_out_path.exists():
-      # Still need to add JSON line for merge
+    # Idempotency: skip if image and labels already exist (unless force)
+    if not force and img_out_path.exists():
       label_json_path = output_dir / tag / 'labels.json'
       if label_json_path.exists():
         stats['skipped_exists'] += 1
@@ -201,9 +201,9 @@ def project_session(
       min_visible_pts=min_visible_pts,
     )
 
-    # Check if all lanes are empty
-    all_invalid = all(all(x == -2 for x in lane) for lane in lanes)
-    if all_invalid:
+    # Filter out empty lanes (all -2) and skip frame if none remain
+    lanes = [lane for lane in lanes if any(x != -2 for x in lane)]
+    if not lanes:
       stats['skipped_all_invalid'] += 1
       continue
 
@@ -272,6 +272,8 @@ def main():
                       help='最少可见采样点 (default: 2)')
   parser.add_argument('--jpeg-quality', type=int, default=95,
                       help='JPEG 输出质量 (default: 95)')
+  parser.add_argument('--force', action='store_true',
+                      help='强制重新生成已存在的文件')
   args = parser.parse_args()
 
   session_dir = Path(args.session_dir).resolve()
@@ -294,6 +296,7 @@ def main():
       lane_prob_threshold=args.lane_prob_threshold,
       min_visible_pts=args.min_visible_pts,
       jpeg_quality=args.jpeg_quality,
+      force=args.force,
     )
     print(f"\nTuSimple output: {output_dir}")
   except KeyboardInterrupt:
