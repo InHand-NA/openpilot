@@ -124,11 +124,11 @@ def _save_progress(path: Path, progress: dict) -> None:
 
 
 def _count_existing_frames(session_dir: Path) -> int:
-  """Count H0/road_*.png files — used for completion check."""
+  """Count H0 main frames (exclude _prev.png) — used for completion check."""
   h0_dir = session_dir / 'H0'
   if not h0_dir.exists():
     return 0
-  return len(list(h0_dir.glob('road_*.png')))
+  return sum(1 for p in h0_dir.glob('road_*.png') if '_prev' not in p.name)
 
 
 # ── Main runner ──────────────────────────────────────────────────────────────
@@ -145,7 +145,6 @@ def run_full_collection(
   start_from: int,
   speed_range: tuple[float, float],
   speed_interval: tuple[float, float],
-  save_every: int = 4,
   mono_jpeg_quality: int | None = None,
   town: str = DEFAULT_TOWN,
 ) -> None:
@@ -187,8 +186,7 @@ def run_full_collection(
         f"change every {speed_interval[0]:.0f}~{speed_interval[1]:.0f}s")
   print(f"  Mono format: {'JPEG Q=' + str(mono_jpeg_quality) if mono_jpeg_quality else 'PNG'}")
   print(f"  Random ego spawn: YES")
-  if save_every > 1:
-    print(f"  save_every={save_every}: saving 1/{save_every} ticks (~{20 / save_every:.1f} FPS)")
+  print(f"  Save: 1 FPS paired (main + prev H0)")
   if start_from > 0:
     print(f"  Skipping first {start_from} sessions (--start-from)")
   print(f"{'='*70}\n")
@@ -267,7 +265,6 @@ def run_full_collection(
           high_quality=True,   # training data needs post-processing effects
           speed_range=speed_range,
           speed_interval=speed_interval,
-          save_every=save_every,
           mono_jpeg_quality=mono_jpeg_quality,
         )
         elapsed = time.monotonic() - t0
@@ -389,8 +386,6 @@ Carla crash recovery:
   parser.add_argument('--speed-interval', nargs=2, type=float, metavar=('MIN', 'MAX'),
                       default=[8.0, 20.0],
                       help='Interval between random speed changes (default: 8 20)')
-  parser.add_argument('--save-every', type=int, default=4, metavar='N',
-                      help='Save 1 frame out of every N ticks (default: 4)')
   parser.add_argument('--mono-jpeg-quality', type=int, default=None, metavar='Q',
                       help='Save mono frames as JPEG with given quality (0-100). '
                            'Default: PNG (lossless)')
@@ -431,7 +426,6 @@ Carla crash recovery:
     start_from=args.start_from,
     speed_range=tuple(args.speed_range),
     speed_interval=tuple(args.speed_interval),
-    save_every=args.save_every,
     mono_jpeg_quality=args.mono_jpeg_quality,
     town=args.town,
   )

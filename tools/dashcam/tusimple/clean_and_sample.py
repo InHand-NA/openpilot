@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""TuSimple Phase 3: 数据清洗与抽样 (per-session)。
+"""TuSimple Phase 3: per-session 数据清洗。
 
-对 Phase 2 输出的 3D 标注进行质量过滤和时间抽样。
-注意: 训练/验证/测试划分由 batch_clean_and_sample.py 在 session 级别完成。
+对 Phase 2 输出的 3D 标注进行质量过滤。
+采集工具已固定 1 FPS，无需再做时间抽样。
+训练/验证/测试划分由 batch_clean_and_sample.py 在 session 级别完成。
 
 输入: session_dir/3d_labels/H1/*.json  (Phase 2 输出)
 输出: session_dir/splits/
   ├── clean_log.txt      "<frame_id>, pass" 或 "<frame_id>, fail"
-  ├── sampled_log.txt    "<frame_id>"
+  ├── pass_frames.txt    通过质量过滤的 frame_id 列表
   └── stats.json
 
 用法:
   python tools/dashcam/tusimple/clean_and_sample.py \\
       data/tusimple-sample/Town04_ClearNoon_p4.0_y0.0/ \\
-      --min-ll-prob 0.5 --min-speed 1.0 --sample-every 5
+      --min-ll-prob 0.5 --min-speed 1.0
 """
 
 import argparse
@@ -28,7 +29,7 @@ R_INNER_IDX = 2
 
 
 # ---------------------------------------------------------------------------
-# Step 1: 质量过滤
+# 质量过滤
 # ---------------------------------------------------------------------------
 
 def quality_filter(
@@ -91,15 +92,6 @@ def quality_filter(
 
 
 # ---------------------------------------------------------------------------
-# Step 2: 时间抽样
-# ---------------------------------------------------------------------------
-
-def time_sample(pass_ids: list[str], sample_every: int) -> list[str]:
-  """每 sample_every 帧取 1 帧。"""
-  return [fid for i, fid in enumerate(pass_ids) if i % sample_every == 0]
-
-
-# ---------------------------------------------------------------------------
 # I/O helpers
 # ---------------------------------------------------------------------------
 
@@ -131,39 +123,31 @@ def expand_to_heights(frame_ids: list[str], heights: list[str]) -> list[str]:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def clean_and_sample(
+def clean_session(
   session_dir: Path,
   heights: list[str],
   min_ll_prob: float,
   min_speed: float,
-  sample_every: int,
   dry_run: bool = False,
 ) -> dict:
-  """Execute per-session clean + sample (no split). Returns stats dict."""
+  """Execute per-session quality filter. Returns stats dict."""
   label_dir = session_dir / '3d_labels'
   splits_dir = session_dir / 'splits'
 
-  # Step 1: 质量过滤
   pass_ids, fail_ids, reasons = quality_filter(label_dir, min_ll_prob, min_speed)
   total = len(pass_ids) + len(fail_ids)
   pass_rate = len(pass_ids) / max(total, 1)
 
-  print(f"  Step 1 质量过滤: {total} 帧 → {len(pass_ids)} pass ({pass_rate:.1%}), {len(fail_ids)} fail")
-
-  # Step 2: 时间抽样
-  sampled_ids = time_sample(pass_ids, sample_every)
-  print(f"  Step 2 时间抽样: {len(pass_ids)} → {len(sampled_ids)} (every {sample_every})")
+  print(f"  质量过滤: {total} 帧 → {len(pass_ids)} pass ({pass_rate:.1%}), {len(fail_ids)} fail")
 
   stats = {
     'total_frames': total,
     'quality_pass': len(pass_ids),
     'quality_pass_rate': pass_rate,
-    'sampled': len(sampled_ids),
     'heights': heights,
     'params': {
       'min_ll_prob': min_ll_prob,
       'min_speed': min_speed,
-      'sample_every': sample_every,
     },
   }
 
@@ -173,16 +157,16 @@ def clean_and_sample(
 
   splits_dir.mkdir(parents=True, exist_ok=True)
   write_clean_log(splits_dir / 'clean_log.txt', pass_ids, fail_ids)
-  write_lines(splits_dir / 'sampled_log.txt', sampled_ids)
+  write_lines(splits_dir / 'pass_frames.txt', pass_ids)
   with open(splits_dir / 'stats.json', 'w') as f:
     json.dump(stats, f, indent=2, ensure_ascii=False)
 
-  print(f"  输出: {splits_dir}  ({len(sampled_ids)} sampled frames)")
+  print(f"  输出: {splits_dir}  ({len(pass_ids)} pass frames)")
   return stats
 
 
 def main():
-  parser = argparse.ArgumentParser(description='TuSimple Phase 3: per-session 数据清洗与抽样')
+  parser = argparse.ArgumentParser(description='TuSimple Phase 3: per-session 数据清洗')
   parser.add_argument('session_dir', help='Session 目录 (含 3d_labels/)')
   parser.add_argument('--heights', nargs='+', default=None,
                       help='要处理的高度 (default: clip_info 中所有高度)')
@@ -190,8 +174,6 @@ def main():
                       help='内侧车道线最低概率 (default: 0.5)')
   parser.add_argument('--min-speed', type=float, default=1.0,
                       help='最低自车速度 m/s (default: 1.0)')
-  parser.add_argument('--sample-every', type=int, default=5,
-                      help='每 N 帧取 1 帧 (default: 5)')
   parser.add_argument('--dry-run', action='store_true',
                       help='仅预览统计，不写入文件')
   args = parser.parse_args()
@@ -223,16 +205,15 @@ def main():
 
   print(f"Session: {session_dir.name}")
   print(f"Heights: {heights}")
-  print(f"min_ll_prob={args.min_ll_prob}  min_speed={args.min_speed}  sample_every={args.sample_every}")
+  print(f"min_ll_prob={args.min_ll_prob}  min_speed={args.min_speed}")
   print()
 
   try:
-    clean_and_sample(
+    clean_session(
       session_dir=session_dir,
       heights=heights,
       min_ll_prob=args.min_ll_prob,
       min_speed=args.min_speed,
-      sample_every=args.sample_every,
       dry_run=args.dry_run,
     )
   except (FileNotFoundError, ValueError) as e:
