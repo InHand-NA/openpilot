@@ -18,6 +18,11 @@ if [[ "${HOST_UID}" -eq 0 && -n "${SUDO_UID:-}" ]]; then
   HOST_GID=${SUDO_GID:-${HOST_GID}}
 fi
 
+CONTAINER_NAME="carla-server-0916"
+
+docker stop $CONTAINER_NAME
+docker rm $CONTAINER_NAME
+
 # -RenderOffScreen 可视需要添加到最后以无窗口渲染
 docker run ${EXTRA_ARGS} \
   --runtime=nvidia \
@@ -27,4 +32,5 @@ docker run ${EXTRA_ARGS} \
   --env=NVIDIA_VISIBLE_DEVICES=all \
   --env=NVIDIA_DRIVER_CAPABILITIES=all \
   --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  --name=${CONTAINER_NAME} \
   "${CARLA_IMAGE}" bash CarlaUE4.sh  -nosound -RenderOffScreen -quality-level=Epic
