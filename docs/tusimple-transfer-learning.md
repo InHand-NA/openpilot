@@ -528,7 +528,7 @@ python tools/dashcam/tusimple/collect.py \
   --output-base data/tusimple \
   --num-npc 40 --spawn-point 16 --random-spawn \
   --speed-range 40 100 --speed-interval 8 20 \
-  --no-display --no-high-quality \
+  --no-display \
   --mono-jpeg-quality 95  # 可选: Mono 帧用 JPEG 节省磁盘
 ```
 
@@ -977,7 +977,7 @@ python tools/dashcam/tusimple/clean_and_sample.py \
 
 ### 4.7 `project_tusimple.py` — Phase 4: 2D 投影
 
-**职责**: 读取 Phase 3 的帧列表、Phase 2 的 3D 标注和 Phase 1 的 Mono 图像，执行 ROI 裁剪 + 3D→2D 投影，输出 TuSimple 2D 格式。Phase 4 **不做质量过滤**（已由 Phase 3 完成），仅处理投影层面的安全检查。
+**职责**: 读取 Phase 3 的sample_log帧列表、Phase 2 的 3D 标注和 Phase 1 的 Mono 图像，执行 ROI 裁剪 + 3D→2D 投影，输出 TuSimple 2D 格式。Phase 4 **不做质量过滤**（已由 Phase 3 完成），仅处理投影层面的安全检查。
 
 **输入**:
 - Phase 1 输出: `data/tusimple/<session>/H1~H6/` (Mono 图像, 1920×1080)
@@ -1000,7 +1000,7 @@ openpilot road_edge: [0]    |  —    |  —    | [1]
 ```
 
 对于每个槽位:
-1. 若 lane_line prob > `lane_prob_threshold` → 使用 lane_line
+1. 若 lane_line prob > `lane_prob_threshold`(默认值0.2) → 使用 lane_line
 2. 若 lane_line prob ≤ threshold 且该槽位有对应 road_edge (仅 L-out ← RE[0], R-out ← RE[1]) → 使用 road_edge
 3. 否则 → 该槽位所有 h_sample 填 -2 (不可见)
 
@@ -1044,7 +1044,7 @@ tusimple_img = cv2.resize(roi, (TUSIMPLE_W, TUSIMPLE_H))  # 缩放到 1280×720
 python tools/dashcam/tusimple/project_tusimple.py \
   data/tusimple/Town04_ClearNoon_p5.0_y0.0/ \
   --crop-hfov 70 \
-  --lane-prob-threshold 0.3 \
+  --lane-prob-threshold 0.2 \
   --min-visible-pts 2 \
   --output data/tusimple/Town04_ClearNoon_p5.0_y0.0/tusimple/
 ```
@@ -1053,7 +1053,7 @@ python tools/dashcam/tusimple/project_tusimple.py \
 - 不再需要 `--heights` 参数，帧列表已包含高度信息
 - 不做质量过滤（已在 Phase 3 完成），仅做投影层面安全检查
 - 固定输出 4 条车道线 (L-out, L-inn, R-inn, R-out)，低置信度 lane_line 由 road_edge 补位
-- `--lane-prob-threshold`: lane_line 使用/补位的置信度阈值 (默认 0.3)
+- `--lane-prob-threshold`: lane_line 使用/补位的置信度阈值 (默认 0.2)
 - 已处理的帧自动跳过（幂等性），支持断点恢复
 
 ### 4.8 可视化工具
