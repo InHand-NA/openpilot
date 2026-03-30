@@ -125,6 +125,7 @@ def collect_session(
   write_pool = ThreadPoolExecutor(max_workers=8)
   pending_writes: list = []
   meta_handle = None
+  mono_meta_handles: dict[str, object] = {}
 
   # Ring buffer: keep last TEMPORAL_SKIP+1 ticks of H0 images
   H0Buf = tuple[int, np.ndarray, np.ndarray]  # (tick, road_rgb, wide_rgb)
@@ -176,7 +177,6 @@ def collect_session(
     DRAIN_INTERVAL = 100
 
     meta_handle = open(h0_dir / 'metadata.jsonl', 'a')
-    mono_meta_handles: dict[str, object] = {}
     for slot in mono_slots:
       mono_meta_handles[slot.tag] = open(session_dir / slot.tag / 'metadata.jsonl', 'a')
 

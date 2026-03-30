@@ -322,7 +322,10 @@ def render_grid(session_dir: Path, frame_id: str, label_dir: Path,
   T_road = _build_cam_transform(K_ROAD, rpyCalib)
   T_wide = _build_cam_transform(K_WIDE, rpyCalib)
   T_mono = _build_cam_transform(K_MONO, rpyCalib)
-  anno_canonical = load_annotation(label_dir / 'H1', frame_id)
+  # Load canonical (H0) annotation; fall back to H1 for backward compat
+  anno_canonical = load_annotation(label_dir / 'H0', frame_id)
+  if anno_canonical is None:
+    anno_canonical = load_annotation(label_dir / 'H1', frame_id)
   heights_info = clip_info.get('heights', {})
 
   cells: list[np.ndarray] = []

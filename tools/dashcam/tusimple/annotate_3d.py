@@ -135,6 +135,7 @@ def annotate_session(
   print(f"  pitch={clip_info['camera']['pitch_deg']:.1f} deg  yaw={clip_info['camera']['yaw_deg']:.1f} deg  DEV={dev}")
 
   output_dir.mkdir(parents=True, exist_ok=True)
+  (output_dir / 'H0').mkdir(exist_ok=True)
   for tag in heights:
     (output_dir / tag).mkdir(exist_ok=True)
 
@@ -239,8 +240,13 @@ def annotate_session(
         'world_pose': m.get('world_pose', [0.0] * 6),
       }
 
+      # Write H0 canonical annotation (untransformed, at reference height)
+      h0_meta = dict(frame_meta)
+      h0_meta['camera_height'] = H0_HEIGHT
+      write_pool.submit(_write_annotation, output_dir / 'H0', frame_id, h0_meta, canonical)
+
       for tag, h_k in heights.items():
-        if tag == 'H1' and abs(h_k - H0_HEIGHT) < 0.01:
+        if abs(h_k - H0_HEIGHT) < 0.01:
           anno = canonical
         else:
           anno = transform_annotation(canonical, h1=H0_HEIGHT, h_k=h_k)
