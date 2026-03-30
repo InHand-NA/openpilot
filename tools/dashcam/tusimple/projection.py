@@ -104,7 +104,7 @@ def lanes_3d_to_tusimple(
   lane_prob_threshold: float = 0.2,
   min_visible_pts: int = 2,
   min_x_distance: float = 2.0,
-) -> list[list[int]]:
+) -> tuple[list[list[int]], list[str]]:
   """完整的 3D 车道线到 TuSimple 2D 格式转换。
 
   车道线选择策略 (TuSimple 固定 4 条):
@@ -113,31 +113,47 @@ def lanes_3d_to_tusimple(
     slot 2 (R-inn): lane[2] only
     slot 3 (R-out): lane[3] 优先, 低置信 → road_edge[1] 补位
 
+  车道线名称:
+    LL  = 左外车道线 (lane_lines[0])
+    L   = 左内车道线 (lane_lines[1], 当前车道左边界)
+    R   = 右内车道线 (lane_lines[2], 当前车道右边界)
+    RR  = 右外车道线 (lane_lines[3])
+    LRE = 左路沿 (road_edges[0], 作为 LL 的补位)
+    RRE = 右路沿 (road_edges[1], 作为 RR 的补位)
+
   Returns:
-    4 条车道线列表, 每条是 len(h_samples) 的整数列表
+    (lanes, lane_names):
+      lanes: 4 条车道线列表, 每条是 len(h_samples) 的整数列表
+      lane_names: 4 条车道线的名称列表
   """
   if h_samples is None:
     h_samples = TUSIMPLE_H_SAMPLES
 
-  # 构建 4 个槽位的 3D 源: (pts_3d, prob)
-  slots: list[tuple[np.ndarray, float]] = []
+  # 槽位名称: lane_lines 原始名 vs road_edge 补位名
+  SLOT_LANE_NAMES = ['LL', 'L', 'R', 'RR']
+  SLOT_FALLBACK_NAMES = ['LRE', None, None, 'RRE']
+
+  # 构建 4 个槽位的 3D 源: (pts_3d, prob, name)
+  slots: list[tuple[np.ndarray, float, str]] = []
   for i in range(4):
     prob = float(lane_lines_prob[i])
     if prob > lane_prob_threshold:
-      slots.append((lane_lines_3d[i], prob))
+      slots.append((lane_lines_3d[i], prob, SLOT_LANE_NAMES[i]))
     elif i == 0 and road_edges_3d.shape[0] > 0:
       # L-out 补位: road_edge[0]
-      slots.append((road_edges_3d[0], 1.0))
+      slots.append((road_edges_3d[0], 1.0, SLOT_FALLBACK_NAMES[i]))
     elif i == 3 and road_edges_3d.shape[0] > 1:
       # R-out 补位: road_edge[1]
-      slots.append((road_edges_3d[1], 1.0))
+      slots.append((road_edges_3d[1], 1.0, SLOT_FALLBACK_NAMES[i]))
     else:
-      slots.append((None, 0.0))
+      slots.append((None, 0.0, SLOT_LANE_NAMES[i]))
 
   lanes: list[list[int]] = []
-  for pts_3d, prob in slots:
+  lane_names: list[str] = []
+  for pts_3d, prob, name in slots:
     if pts_3d is None or prob <= 0:
       lanes.append([-2] * len(h_samples))
+      lane_names.append(name)
       continue
 
     # 过滤近场
@@ -145,6 +161,7 @@ def lanes_3d_to_tusimple(
     pts = pts_3d[mask]
     if pts.shape[0] < 2:
       lanes.append([-2] * len(h_samples))
+      lane_names.append(name)
       continue
 
     # 投影到 TuSimple 分辨率
@@ -155,6 +172,7 @@ def lanes_3d_to_tusimple(
     u, v = uv[valid, 0], uv[valid, 1]
     if len(v) < 2:
       lanes.append([-2] * len(h_samples))
+      lane_names.append(name)
       continue
 
     # 单调性裁断: 近→远, v 应从大(底)到小(顶) 单调递减
@@ -162,6 +180,7 @@ def lanes_3d_to_tusimple(
     u, v = u[:cutoff], v[:cutoff]
     if len(v) < 2:
       lanes.append([-2] * len(h_samples))
+      lane_names.append(name)
       continue
 
     # 重组为 uv 数组，调用 resample
@@ -174,5 +193,6 @@ def lanes_3d_to_tusimple(
       lanes.append([-2] * len(h_samples))
     else:
       lanes.append(lane_x)
+    lane_names.append(name)
 
-  return lanes
+  return lanes, lane_names

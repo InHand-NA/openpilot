@@ -40,7 +40,7 @@ MIN_DISK_FREE_GB = 20
 
 # ── Session list ─────────────────────────────────────────────────────────────
 
-FULL_HEIGHTS = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
+FULL_HEIGHTS = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'H7', 'H8', 'H9']
 DEFAULT_MAX_FRAMES = 500
 DEFAULT_TOWN = 'Town04'
 
@@ -86,14 +86,16 @@ def _make_session_tag(map_name: str, weather: str, pitch: float, yaw: float) -> 
   return f"{map_name}_{weather}_p{pitch:.1f}_y{yaw:.1f}"
 
 
-def _build_session_list(max_frames: int, town: str = DEFAULT_TOWN) -> list[dict]:
+def _build_session_list(max_frames: int, town: str = DEFAULT_TOWN,
+                        heights: list[str] | None = None) -> list[dict]:
+  active_heights = heights or FULL_HEIGHTS
   scenes = [(town, w) for w in WEATHERS]
   sessions = []
   for map_name, weather in scenes:
     for pitch, yaw, weight in PITCH_YAW_PAIRS:
       sessions.append({
         'tag': _make_session_tag(map_name, weather, pitch, yaw),
-        'heights': FULL_HEIGHTS,
+        'heights': active_heights,
         'map': map_name,
         'weather': weather,
         'pitch': pitch,
@@ -147,10 +149,12 @@ def run_full_collection(
   speed_interval: tuple[float, float],
   mono_jpeg_quality: int | None = None,
   town: str = DEFAULT_TOWN,
+  heights: list[str] | None = None,
 ) -> None:
   from openpilot.tools.dashcam.tusimple.collect import collect_session
 
-  sessions = _build_session_list(max_frames, town)
+  active_heights = heights or FULL_HEIGHTS
+  sessions = _build_session_list(max_frames, town, active_heights)
   n_total = len(sessions)
   progress_path = output_base / 'collection_progress.json'
   progress = _load_progress(progress_path)
@@ -179,7 +183,8 @@ def run_full_collection(
   failed = 0
 
   print(f"\n{'='*70}")
-  print(f"  TuSimple full collection: {n_total} sessions × {max_frames} base frames × {len(FULL_HEIGHTS)} heights")
+  print(f"  TuSimple full collection: {n_total} sessions × {max_frames} base frames × {len(active_heights)} heights")
+  print(f"  Heights: {' '.join(f'{h}({HEIGHT_DEFS[h]}m)' for h in active_heights)}")
   print(f"  Output: {output_base}")
   print(f"  Carla: {host}:{port}  NPC: {num_npc}  retries: {max_retries}  delay: {retry_delay}s")
   print(f"  Speed: {speed_range[0]:.0f}~{speed_range[1]:.0f} km/h  "
@@ -346,8 +351,8 @@ def main() -> None:
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog="""
 Sessions: 4 scenes × 34 pose pairs = 136 sessions total
-Heights per session: H1(1.22m) H2(1.30m) H3(1.50m) H4(2.00m) H5(2.50m) H6(3.00m)
-Cameras per session: H0(reference stereo) + H1~H6(mono) = 8 cameras
+Heights per session: H1(1.22m) H2(1.30m) H3(1.50m) H4(2.00m) H5(2.50m) H6(3.00m) H7(1.75m) H8(2.25m) H9(2.75m)
+Cameras per session: H0(reference stereo) + H1~H9(mono) = 11 cameras
 
 Resume: re-run the same command — completed sessions are skipped automatically,
 partial sessions continue from the last saved frame.
@@ -389,15 +394,25 @@ Carla crash recovery:
   parser.add_argument('--mono-jpeg-quality', type=int, default=None, metavar='Q',
                       help='Save mono frames as JPEG with given quality (0-100). '
                            'Default: PNG (lossless)')
+  parser.add_argument('--heights', nargs='+', default=None, metavar='H',
+                      help='Mono heights to collect (default: all H1~H9). '
+                           'Example: --heights H7 H8 H9')
   parser.add_argument('--list', action='store_true',
                       help='Print all sessions and exit (no collection)')
 
   args = parser.parse_args()
   output_base = Path(args.output_base)
 
+  # ── Validate --heights ─────────────────────────────────────────────────
+  if args.heights:
+    invalid = [h for h in args.heights if h not in HEIGHT_DEFS]
+    if invalid:
+      parser.error(f"Unknown heights: {invalid}. Valid: {sorted(HEIGHT_DEFS.keys())}")
+
   # ── --list mode ──────────────────────────────────────────────────────────
   if args.list:
-    sessions = _build_session_list(args.max_frames, args.town)
+    sessions = _build_session_list(args.max_frames, args.town, args.heights)
+    active_heights = args.heights or FULL_HEIGHTS
     n_unique = len(PITCH_YAW_PAIRS)
     n_weighted = sum(w for _, _, w in PITCH_YAW_PAIRS)
     print(f"TuSimple full collection: {len(sessions)} sessions  "
@@ -405,6 +420,7 @@ Carla crash recovery:
           f"{n_weighted} effective slots per weather)")
     print(f"  Town: {args.town}  Base frames: {args.max_frames}  "
           f"Nominal center (4°,0°): {args.max_frames * 2} (2×)")
+    print(f"  Heights: {' '.join(active_heights)}")
     for i, s in enumerate(sessions):
       existing = _count_existing_frames(output_base / s['tag'])
       status = 'DONE' if existing >= s['max_frames'] else f'{existing}/{s["max_frames"]}'
@@ -428,6 +444,7 @@ Carla crash recovery:
     speed_interval=tuple(args.speed_interval),
     mono_jpeg_quality=args.mono_jpeg_quality,
     town=args.town,
+    heights=args.heights,
   )
 
 

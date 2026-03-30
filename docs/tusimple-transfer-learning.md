@@ -1569,7 +1569,7 @@ python tools/dashcam/tusimple/viz_tusimple.py \
 
 ## 十、已知限制与后续工作
 
-1. **针孔 vs 鱼眼**: 当前使用 Carla 针孔模型近似 120° 鱼眼。如需更高保真度，可在后处理中添加合成鱼眼畸变
+1. **针孔 vs 鱼眼**: 当前使用 Carla 针孔模型近似 120° 鱼眼。部署时需对鱼眼相机做重映射 (remap) 以消除域差距，详见 [tusimple-fisheye-deployment.md](tusimple-fisheye-deployment.md)
 2. **标注来源**: 3D 标注来自 openpilot 预训练模型 (H0) 推理，非真实地面真值。标注精度受限于模型性能
 3. **弯道处理**: 大曲率弯道通过单调性裁断在折返点截断车道线，保证投影正确性。代价是弯道处车道线比直线时短
 4. **场景多样性**: 需要在多种地图、天气、pitch/yaw 组合下采集，才能获得鲁棒的训练数据

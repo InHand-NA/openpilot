@@ -16,7 +16,7 @@ H0_WIDE_FOV = 120            # degrees
 H0_NARROW_FOCAL = 2648.0
 H0_WIDE_FOCAL = 567.0
 
-# ── H1~H6: Mono single-eye camera (Carla pinhole rendering) ─────────────────
+# ── H1~H9: Mono single-eye camera (Carla pinhole rendering) ─────────────────
 MONO_W, MONO_H = 1920, 1080
 MONO_HFOV = 120  # degrees
 MONO_FOCAL = MONO_W / 2 / np.tan(np.radians(MONO_HFOV / 2))  # ≈554.256
@@ -106,10 +106,13 @@ HEIGHT_DEFS = {
   'H4': 2.00,
   'H5': 2.50,
   'H6': 3.00,   # truck cab
+  'H7': 1.75,   # tall sedan / compact SUV
+  'H8': 2.25,   # mid-size truck / van
+  'H9': 2.75,   # heavy truck cab
 }
 
 
 @dataclass
 class CameraSlotConfig:
-  tag: str       # 'H1', ..., 'H6'
+  tag: str       # 'H1', ..., 'H9'
   height: float  # meters above ground

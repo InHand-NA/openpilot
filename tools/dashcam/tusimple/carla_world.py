@@ -1,9 +1,9 @@
-"""TuSimple Carla world — H0 reference stereo + H1~H6 mono cameras.
+"""TuSimple Carla world — H0 reference stereo + H1~H9 mono cameras.
 
 H0 (openpilot narrow+wide at 1.22m) provides modeld 3D annotation baseline.
-H1~H6 (1920×1080, FOV=120°) at various heights provide TuSimple training images.
+H1~H9 (1920×1080, FOV=120°) at various heights provide TuSimple training images.
 
-All 8 cameras share the same pitch/yaw rotation; only height differs (H1~H6).
+All cameras share the same pitch/yaw rotation; only height differs (H1~H9).
 
 Usage:
   from openpilot.tools.dashcam.tusimple.config import CameraSlotConfig
@@ -38,10 +38,10 @@ from openpilot.tools.dashcam.tusimple.config import (
 
 
 class TuSimpleCarlaWorld:
-  """Carla world with H0 reference cameras + H1~H6 mono cameras.
+  """Carla world with H0 reference cameras + H1~H9 mono cameras.
 
   H0 (openpilot narrow+wide at 1.22m) provides modeld 3D annotation.
-  H1~H6 (1920×1080, FOV=120°) at various heights provide TuSimple training images.
+  H1~H9 (1920×1080, FOV=120°) at various heights provide TuSimple training images.
 
   Args:
     host: Carla server hostname
@@ -53,7 +53,7 @@ class TuSimpleCarlaWorld:
     camera_pitch_deg: camera pitch angle (deg, positive=nose down)
     camera_yaw_deg: camera yaw angle (deg)
     camera_forward_offset_m: forward offset from vehicle center
-    mono_heights: list of CameraSlotConfig for H1~H6 mono cameras
+    mono_heights: list of CameraSlotConfig for H1~H9 mono cameras
     num_npc: number of NPC vehicles
     high_quality: enable Carla post-processing effects
     speed_range: (min, max) target speed range in km/h
@@ -147,7 +147,7 @@ class TuSimpleCarlaWorld:
 
     # Camera image buffer: heterogeneous structure
     #   H0: {'road': (frame_id, rgb), 'wide': (frame_id, rgb)}
-    #   H1~H6: {'mono': (frame_id, rgb)}
+    #   H1~H9: {'mono': (frame_id, rgb)}
     self._latest: dict[str, dict[str, tuple[int, np.ndarray] | None]] = {
       'H0': {'road': None, 'wide': None},
       **{slot.tag: {'mono': None} for slot in self._mono_slots},
@@ -186,7 +186,7 @@ class TuSimpleCarlaWorld:
     )
     self._sensors.extend([h0_road, h0_wide])
 
-    # H1~H6 mono cameras at varying heights
+    # H1~H9 mono cameras at varying heights
     for slot in self._mono_slots:
       t = carla.Transform(
         carla.Location(x=camera_forward_offset_m, z=slot.height),

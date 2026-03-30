@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""TuSimple Phase 2 可视化：8 相机 3×3 网格 + 3D 标注。
+"""TuSimple Phase 2 可视化：11 相机 4×3 网格 + 3D 标注。
 
-布局 (3 列 × 3 行, 每格 640×360, 刚好填满 1920×1080):
-  ┌───────────┬───────────┬───────────┐
-  │ H0 road   │ H0 wide   │ H1 mono   │  row 0
-  │ canonical │ canonical │ 1.22m     │
-  ├───────────┼───────────┼───────────┤
-  │ H2 mono   │ H3 mono   │ H4 mono   │  row 1
-  │ 1.30m     │ 1.50m     │ 2.00m     │
-  ├───────────┼───────────┼───────────┤
-  │ H5 mono   │ H6 mono   │  [info]   │  row 2
-  │ 2.50m     │ 3.00m     │           │
-  └───────────┴───────────┴───────────┘
+布局 (4 列 × 3 行, 每格 480×360):
+  ┌─────────┬─────────┬─────────┬─────────┐
+  │ H0 road │ H0 wide │ H1 mono │ H2 mono │  row 0
+  ├─────────┼─────────┼─────────┼─────────┤
+  │ H3 mono │ H4 mono │ H5 mono │ H6 mono │  row 1
+  ├─────────┼─────────┼─────────┼─────────┤
+  │ H7 mono │ H8 mono │ H9 mono │ [info]  │  row 2
+  └─────────┴─────────┴─────────┴─────────┘
 
 H0 road/wide 使用 canonical 标注 (K_ROAD / K_WIDE)。
-H1~H6 mono 使用各自高度变换标注 (K_MONO)。
+H1~H9 mono 使用各自高度变换标注 (K_MONO)。
 
 绘制风格与 tools/dashcam/viz/inspect_annotated.py 保持一致：
   lane_lines  → 填充半透明绿色多边形 (64,255,0)  alpha=clip(prob,0,0.7)
@@ -46,7 +43,7 @@ import numpy as np
 
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
-from openpilot.tools.dashcam.tusimple.config import K_MONO
+from openpilot.tools.dashcam.tusimple.config import HEIGHT_DEFS, K_MONO
 from openpilot.tools.dashcam.tusimple.viz_collect import (
   resize_keep_ar,
   load_session_frames,
@@ -59,14 +56,13 @@ _dc = DEVICE_CAMERAS[('pc', 'unknown')]
 K_ROAD = _dc.fcam.intrinsics   # narrow, focal≈2648, 1928×1208
 K_WIDE = _dc.ecam.intrinsics   # wide,   focal≈567,  1928×1208
 
-# Grid: 3 columns × 3 rows  (9 slots, 8 cameras + 1 info)
-# 1920/3=640, 1080/3=360 → fits 1080p without scrolling
-GRID_COLS = 3
+# Grid: 4 columns × 3 rows  (12 slots: H0 road/wide + H1~H9 mono + info)
+GRID_COLS = 4
 GRID_ROWS = 3
-CELL_W = 640
+CELL_W = 480
 CELL_H = 360
-INFO_BAR_H = 0  # info drawn in the 9th cell instead
-MONO_TAGS = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
+INFO_BAR_H = 0  # info drawn in the last cell instead
+MONO_TAGS = sorted(HEIGHT_DEFS.keys())
 
 # Polygon clip margin (pixels beyond image bounds)
 CLIP_MARGIN = 500
@@ -345,7 +341,7 @@ def render_grid(session_dir: Path, frame_id: str, label_dir: Path,
     _draw_overlays(wide_img, anno_canonical, T_wide, show_lanes, show_edges)
   cells.append(_make_cell(wide_img, 'H0 wide (canonical)'))
 
-  # Cells 2~7: H1~H6 mono
+  # Cells 2~10: H1~H9 mono
   for tag in MONO_TAGS:
     h_val = heights_info.get(tag, '?')
     mono_img = _load_mono_image(session_dir, tag, frame_id, clip_info)
@@ -354,11 +350,11 @@ def render_grid(session_dir: Path, frame_id: str, label_dir: Path,
       _draw_overlays(mono_img, anno_hk, T_mono, show_lanes, show_edges)
     cells.append(_make_cell(mono_img, f'{tag} ({h_val}m)'))
 
-  # Cell 8: info panel
+  # Last cell: info panel
   cells.append(_make_info_cell(frame_id, clip_info, metadata,
                                anno_canonical, show_lanes, show_edges))
 
-  # Assemble 3×3
+  # Assemble grid
   rows = []
   for r in range(GRID_ROWS):
     s = r * GRID_COLS
@@ -414,7 +410,8 @@ def main():
   total = len(frame_ids)
 
   metadata = load_metadata(session_dir)
-  print(f"共 {total} 帧  8 cameras (H0 road/wide + H1~H6 mono)  {CELL_W*GRID_COLS}x{CELL_H*GRID_ROWS}")
+  n_mono = len(MONO_TAGS)
+  print(f"共 {total} 帧  {2 + n_mono} cameras (H0 road/wide + H1~H{n_mono} mono)  {CELL_W*GRID_COLS}x{CELL_H*GRID_ROWS}")
 
   # Batch output mode
   if args.output_dir:

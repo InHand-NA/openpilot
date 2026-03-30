@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TuSimple Phase 1 可视化：多相机网格视图。
 
-显示采集结果（H0 road/wide + H1~H6 mono），支持交互式帧浏览。
+显示采集结果（H0 road/wide + H1~H9 mono），支持交互式帧浏览。
 当存在 _prev.png 时自动切换为田字格布局，显示 main + prev 对比。
 
 无 prev 时布局:
@@ -41,6 +41,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+from openpilot.tools.dashcam.tusimple.config import HEIGHT_DEFS
 
 # OpenCV key codes (Linux GTK)
 KEY_RIGHT = 65363
@@ -174,7 +176,7 @@ def render_grid(frame_data: dict, frame_id: str, clip_info: dict,
     wide_panel = _make_h0_panel(frame_data['h0_wide'], 'H0 wide', h0_w, h0_h)
     h0_section = np.hstack([road_panel, wide_panel])
 
-  # Mono row: H1~H6
+  # Mono row: H1~H9
   n_mono = len(heights)
   mono_w = grid_w // max(n_mono, 1)
   mono_h = int(mono_w * 9 / 16) if n_mono > 0 else 120
@@ -247,7 +249,7 @@ def main():
   else:
     heights = sorted(clip_info.get('heights', {}).keys())
   if not heights:
-    heights = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
+    heights = sorted(HEIGHT_DEFS.keys())
 
   frame_ids = load_session_frames(session_dir)
   if not frame_ids:

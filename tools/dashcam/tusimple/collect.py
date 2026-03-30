@@ -12,7 +12,7 @@
   H0/road_{T}_prev.png     prev road (tick T-4)
   H0/wide_{T}_prev.png     prev wide (tick T-4)
   H1/{T}.jpg               mono H1 (main only)
-  H2/{T}.jpg ... H6/{T}.jpg
+  H2/{T}.jpg ... H9/{T}.jpg
 
 仅当 prev 帧存在于 ring buffer 中时才保存 (跳过 warmup 阶段不完整的帧)。
 
@@ -252,7 +252,7 @@ def collect_session(
         'world_pose': world_pose.tolist(),
       }) + '\n')
 
-      # Save H1~H6 mono (main only)
+      # Save H1~H9 mono (main only)
       for slot in mono_slots:
         mono_path = session_dir / slot.tag / f'{fid}{mono_ext}'
         pending_writes.append(write_pool.submit(
@@ -339,7 +339,7 @@ def main():
 
   parser.add_argument('--heights', nargs='+', choices=list(_HD.keys()),
                       default=list(_HD.keys()),
-                      help='Mono heights to collect (default: all H1~H6)')
+                      help='Mono heights to collect (default: all H1~H9)')
   parser.add_argument('--map', default='Town04', help='Carla map name')
   parser.add_argument('--weather', default='ClearNoon',
                       choices=['ClearNoon', 'ClearSunset', 'CloudyNoon', 'WetNoon', 'WetSunset',

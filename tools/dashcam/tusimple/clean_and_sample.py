@@ -5,7 +5,7 @@
 采集工具已固定 1 FPS，无需再做时间抽样。
 训练/验证/测试划分由 batch_clean_and_sample.py 在 session 级别完成。
 
-输入: session_dir/3d_labels/H1/*.json  (Phase 2 输出)
+输入: session_dir/3d_labels/H*/*.json  (Phase 2 输出)
 输出: session_dir/splits/
   ├── clean_log.txt      "<frame_id>, pass" 或 "<frame_id>, fail"
   ├── pass_frames.txt    通过质量过滤的 frame_id 列表
@@ -37,20 +37,27 @@ def quality_filter(
   min_ll_prob: float,
   min_speed: float,
 ) -> tuple[list[str], list[str], dict]:
-  """对 H1 canonical 标注做质量过滤。
+  """对任意高度的 canonical 标注做质量过滤。
+
+  自动选择 label_dir 下第一个存在的 H* 子目录作为基准
+  （所有高度共享同一份 3D 标注，质量指标相同）。
 
   Returns:
     pass_ids:  通过的 frame_id 列表 (sorted)
     fail_ids:  未通过的 frame_id 列表 (sorted)
     reasons:   {frame_id: reason_str} 失败原因
   """
-  h1_dir = label_dir / 'H1'
-  if not h1_dir.exists():
-    raise FileNotFoundError(f"H1 标注目录不存在: {h1_dir}")
+  ref_dir = None
+  for d in sorted(label_dir.iterdir()):
+    if d.is_dir() and d.name.startswith('H'):
+      ref_dir = d
+      break
+  if ref_dir is None:
+    raise FileNotFoundError(f"标注目录中无 H* 子目录: {label_dir}")
 
-  frame_files = sorted(h1_dir.glob('*.json'))
+  frame_files = sorted(ref_dir.glob('*.json'))
   if not frame_files:
-    raise ValueError(f"H1 标注为空: {h1_dir}")
+    raise ValueError(f"{ref_dir.name} 标注为空: {ref_dir}")
 
   all_frame_ids = sorted(p.stem for p in frame_files)
   first_frame_id = all_frame_ids[0] if all_frame_ids else None

@@ -2,7 +2,7 @@
 """TuSimple Phase 2: 3D annotation pipeline.
 
 Runs modeld inference on H0 reference stereo frames (narrow + wide) to produce
-canonical 3D lane/edge/lead annotations, then height-transforms them for H1~H6.
+canonical 3D lane/edge/lead annotations, then height-transforms them for H1~H9.
 
 支持两种采集模式:
   paired: 每个 main 帧自带 _prev.png → 直接加载，无需 buffer

@@ -5,14 +5,14 @@
 执行 ROI 裁剪 + 3D→2D 投影，输出 TuSimple JSON Lines + JPEG 图像。
 
 输入:
-  - session_dir/H1~H6/          (Mono 图像, 1920×1080)
-  - session_dir/3d_labels/H1~H6/ (3D 标注)
+  - session_dir/H1~H9/          (Mono 图像, 1920×1080)
+  - session_dir/3d_labels/H1~H9/ (3D 标注)
   - session_dir/splits/          (sampled_log.txt, train.txt, val.txt, test.txt)
 
 输出:
   session_dir/tusimple/
   ├── H1/images/*.jpg + labels.json
-  ├── H2/ ... H6/
+  ├── H2/ ... H9/
   ├── train.json   (合并所有高度)
   ├── val.json
   └── test.json
@@ -190,7 +190,7 @@ def project_session(
     lane_lines_prob = np.array(anno['lane_lines_prob'], dtype=np.float32)
     road_edges_3d = np.array(anno['road_edges'], dtype=np.float32)
 
-    lanes = lanes_3d_to_tusimple(
+    lanes, lane_names = lanes_3d_to_tusimple(
       lane_lines_3d=lane_lines_3d,
       lane_lines_prob=lane_lines_prob,
       road_edges_3d=road_edges_3d,
@@ -201,11 +201,15 @@ def project_session(
       min_visible_pts=min_visible_pts,
     )
 
-    # Filter out empty lanes (all -2) and skip frame if none remain
-    lanes = [lane for lane in lanes if any(x != -2 for x in lane)]
-    if not lanes:
+    # Filter out empty lanes (all -2), keep names in sync
+    valid = [(lane, name) for lane, name in zip(lanes, lane_names)
+             if any(x != -2 for x in lane)]
+    if not valid:
       stats['skipped_all_invalid'] += 1
       continue
+    lanes, lane_names = zip(*valid)
+    lanes = list(lanes)
+    lane_names = list(lane_names)
 
     # Save cropped JPEG
     height_dir.mkdir(parents=True, exist_ok=True)
@@ -216,6 +220,7 @@ def project_session(
     # Build TuSimple JSON line
     record = {
       'lanes': lanes,
+      'lane_names': lane_names,
       'h_samples': TUSIMPLE_H_SAMPLES,
       'raw_file': raw_file,
     }

@@ -30,10 +30,13 @@ from openpilot.tools.dashcam.tusimple.config import HEIGHT_DEFS
 
 
 def discover_sessions(data_root: Path) -> list[Path]:
-  """发现 data_root 下所有含 3d_labels/H1/ 的 session 目录。"""
+  """发现 data_root 下所有含 3d_labels/H*/ 的 session 目录。"""
   sessions = []
   for d in sorted(data_root.iterdir()):
-    if d.is_dir() and (d / '3d_labels' / 'H1').exists():
+    if not d.is_dir():
+      continue
+    label_dir = d / '3d_labels'
+    if label_dir.is_dir() and any(label_dir.glob('H*/')):
       sessions.append(d)
   return sessions
 
@@ -88,7 +91,7 @@ def main():
 
   sessions = discover_sessions(data_root)
   if not sessions:
-    print(f"未找到 session (需含 3d_labels/H1/): {data_root}")
+    print(f"未找到 session (需含 3d_labels/H*/): {data_root}")
     sys.exit(0)
 
   r_sum = sum(args.split_ratio)
