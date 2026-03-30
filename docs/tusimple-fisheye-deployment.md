@@ -47,6 +47,8 @@
 
 ### 2.1 角分辨率对比方法
 
+> **简化假设**：以下分析以理想等距 (equidistant) 模型为基础，假设鱼眼角分辨率在整个 FOV 内均匀分布。实际部署使用的 OpenCV fisheye 模块基于 Kannala-Brandt 模型（含 k1–k4 高阶畸变系数），其角分辨率分布与等距模型接近但存在偏差——高阶系数会使边缘分辨率略高于或低于等距理论值。具体部署时应使用实际标定参数验证边缘像素对应关系。等距模型的分析结果可作为合理的近似估计。
+
 对于目标针孔图像中角度 θ 处的一个像素，其对应的角张量为：
 
 ```
@@ -138,6 +140,8 @@ K_fisheye = np.array([...])  # 3×3 鱼眼内参
 D = np.array([k1, k2, k3, k4])  # OpenCV fisheye 畸变系数
 ```
 
+**关于鱼眼主点偏移**：标定得到的 K_fisheye 中主点 (cx, cy) 可能不等于图像中心 (960, 540)，偏移数十像素属于正常现象（镜头安装偏心、传感器对位误差）。**无需手动修正**——`cv2.fisheye.initUndistortRectifyMap` 会根据 K_fisheye 中的实际主点正确计算 remap 查找表。只需确保使用标定原始值，不要人为"归中"。
+
 #### Step 2: 计算目标虚拟针孔内参（关键：cy 偏移）
 
 训练时 crop 框不是以光轴为中心裁剪的，而是**刻意向下平移**，让地平线出现在图像顶部 30% 处，把 70% 的像素预算分配给路面：
@@ -214,17 +218,278 @@ frame_model = cv2.remap(frame_fisheye, map1, map2, cv2.INTER_LINEAR)
 
 单次 `cv2.remap` 将「鱼眼去畸变 + 裁剪 + 缩放」合并为一步双线性插值。
 
-### 3.3 为什么不用两步法
+### 3.3 一步法 vs 两步法
 
-**两步法**：鱼眼 → 1920×1080 去畸变针孔 → 裁剪缩放 640×360
+**一步法（方案 A，推荐）**：鱼眼 → 640×360 虚拟针孔（单次 remap）
+**两步法（方案 B，备选）**：鱼眼 → 1920×1080 去畸变针孔 → 裁剪缩放 640×360
 
-| 问题 | 说明 |
-|------|------|
-| 120° 针孔中间图不可行 | 针孔投影在 θ→90° 时 tan→∞，120° 边缘物理上无法表示 |
-| 两次插值损失 | 去畸变一次 + 裁剪缩放一次 = 两次精度损失 |
-| 浪费计算 | 生成整张 1920×1080 去畸变图，大部分区域被裁掉 |
+方案 A 相比方案 B 的优势：
 
-**一步 remap 法**：直接从鱼眼源像素映射到 640×360 目标像素，只做一次插值。
+| 比较维度 | 方案 A（一步法） | 方案 B（两步法） |
+|---------|----------------|----------------|
+| 插值次数 | 1 次 | 2 次（remap + resize），边缘损失约 0.5–1 px |
+| 计算量 | remap 640×360 = 23 万像素 | remap 1920×1080 = 207 万像素 + crop + resize |
+| 内存 | 无中间缓冲区 | 需分配 1920×1080 中间图 (~6 MB) |
+| 120° 边缘质量 | 不涉及（直接跳到 70°） | 边缘 θ=60° 处角分辨率仅中心的 25%，质量差（但会被裁掉） |
+
+**方案 A 是首选**。但方案 B 在特定场景下有独特价值——当需要完整 120° 去畸变图像用于可视化、多算法复用或调试对比时，两步法提供了一个与训练流程完全对称的中间产物。详见 Section 3.5。
+
+### 3.4 remap 质量验证
+
+remap 查找表计算完成后，必须在实际部署前进行定量验证，确保几何变换的正确性。
+
+#### 3.4.1 标定板重投影验证（推荐）
+
+使用棋盘格标定板作为已知几何参照：
+
+```python
+import cv2
+import numpy as np
+
+def validate_remap(frame_fisheye, map1, map2, K_model, pattern_size=(9, 6), square_size=0.025):
+    """使用棋盘格验证 remap 质量。
+
+    Args:
+        frame_fisheye: 鱼眼原图（含标定板）
+        map1, map2: 预计算的 remap 查找表
+        K_model: 目标虚拟针孔内参 (640×360)
+        pattern_size: 棋盘格内角点数 (cols, rows)
+        square_size: 棋盘格方格物理尺寸 (米)
+    Returns:
+        mean_error: 平均重投影误差 (像素)
+    """
+    # 1) remap 后检测角点
+    frame_model = cv2.remap(frame_fisheye, map1, map2, cv2.INTER_LINEAR)
+    gray = cv2.cvtColor(frame_model, cv2.COLOR_BGR2GRAY)
+    ret, corners = cv2.findChessboardCorners(gray, pattern_size)
+    if not ret:
+        print("ERROR: 角点检测失败，请确保标定板在 70° FOV 内且清晰可见")
+        return None
+
+    # 亚像素精化
+    corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1),
+                                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
+
+    # 2) 构造 3D 物理坐标
+    objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
+    objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2) * square_size
+
+    # 3) solvePnP 求解位姿，再反投影计算误差
+    dist_coeffs = np.zeros(4)  # remap 后的虚拟针孔图无畸变
+    ret, rvec, tvec = cv2.solvePnP(objp, corners, K_model, dist_coeffs)
+    reproj_pts, _ = cv2.projectPoints(objp, rvec, tvec, K_model, dist_coeffs)
+    errors = np.linalg.norm(corners.reshape(-1, 2) - reproj_pts.reshape(-1, 2), axis=1)
+
+    mean_error = errors.mean()
+    max_error = errors.max()
+    print(f"重投影误差: mean={mean_error:.3f}px, max={max_error:.3f}px")
+    return mean_error
+```
+
+**验收标准**：
+- 平均重投影误差 < 1.0 px（640×360 分辨率上）
+- 最大重投影误差 < 2.0 px
+- 超过此阈值说明标定参数或 remap 查找表有误，需排查
+
+#### 3.4.2 直线性定性验证
+
+remap 后的虚拟针孔图像中，3D 空间中的直线应映射为图像中的直线。验证方法：
+
+1. 将相机对准含有明显直线的场景（建筑物边缘、道路标线、标定板边缘）
+2. 在 remap 后的图像中沿这些直线取若干采样点
+3. 拟合直线，计算采样点到拟合线的最大偏差
+4. 偏差应 < 1 px；如边缘区域出现弯曲，说明鱼眼畸变系数不准确
+
+#### 3.4.3 验证时机
+
+| 时机 | 验证内容 | 方法 |
+|------|---------|------|
+| 首次标定完成 | K_fisheye、D 的正确性 | 标定板重投影 (3.4.1) |
+| remap 查找表生成后 | map1/map2 与 K_model 的一致性 | 标定板重投影 + 直线性 (3.4.1 + 3.4.2) |
+| 更换镜头或相机模组 | 新标定参数的有效性 | 完整验证流程 |
+| 环境温度极端变化时 | 热漂移影响评估（见 Section 8.6） | 标定板重投影，对比常温基准 |
+
+### 3.5 方案 B：两步法部署（备选）
+
+当算力不是瓶颈，且需要完整 120° 去畸变图像时，可使用两步法作为备选方案。该方案的中间产物是一张与 Carla 渲染完全同参数的 1920×1080 针孔图像，便于可视化调试和多算法复用。
+
+#### 3.5.1 总体流程
+
+```
+鱼眼原图 (1920×1080, fisheye, HFOV=120°)
+         │
+         │  Step 1: cv2.remap (预计算查找表)
+         ↓
+虚拟针孔图 (1920×1080, pinhole, HFOV=120°, f=554.3)  ← 与 Carla 渲染同参数
+         │
+         │  Step 2: crop (572, 370, 776, 436)
+         ↓
+裁剪区域 (776×436, HFOV=70°)
+         │
+         │  Step 3: cv2.resize
+         ↓
+模型输入 (640×360, HFOV=70°, 等效 f=457.1)
+         │
+         │  送入 TuSimple 模型
+         ↓
+      车道线检测结果
+```
+
+训练时的路径为 `Carla 针孔 1920×1080 → crop → resize 640×360`，方案 B 的部署路径与此**完全对称**——区别仅在于输入从 Carla 渲染变为鱼眼 remap。
+
+#### 3.5.2 中间图分辨率验证
+
+中间产物为 1920×1080、HFOV=120° 的虚拟针孔图。需验证其 70° 中心区域的分辨率是否充足。
+
+中间针孔参数：f_pinhole = 960 / tan(60°) ≈ 554.3 px/rad（= Carla 的 `MONO_FOCAL`）
+
+| θ (离轴角) | 中间针孔 px/rad | 鱼眼 px/rad | 比值 | 状态 |
+|-----------|----------------|------------|------|------|
+| 0° (中心) | 554.3 | 916.7 | **1.65×** | 下采样 |
+| 10° | 571.5 | 916.7 | 1.60× | 下采样 |
+| 20° | 627.7 | 916.7 | 1.46× | 下采样 |
+| 30° | 739.1 | 916.7 | 1.24× | 下采样 |
+| 35° (70° 边缘) | 826.1 | 916.7 | **1.11×** | 下采样 |
+| 60° (120° 边缘) | 2217.2 | 916.7 | **0.41×** | 严重上采样 |
+
+**关键结论**：
+
+- **70° 中心区域全域下采样**（最差处 1.11×），remap 质量有保证
+- 120° 边缘严重上采样（0.41×），但这部分会被 crop 裁掉，**不影响模型输入质量**
+- 后续 crop 776×436 → resize 640×360 是下采样（0.82×），不引入额外模糊
+
+综合两步的等效分辨率比值（70° 边缘）：1.11 × (776/640) = **1.35×**，与方案 A 的 1.35× 一致——最终模型输入质量相同，差异仅来自双重插值的微小损失。
+
+#### 3.5.3 具体实现
+
+##### Step 1: 计算中间虚拟针孔内参
+
+中间图需与 Carla 渲染的相机参数完全一致：
+
+```python
+import cv2
+import numpy as np
+from openpilot.tools.dashcam.tusimple.config import K_MONO, compute_crop_params
+
+# K_MONO 即 Carla 渲染相机的内参，直接复用
+# K_MONO = [[554.3, 0, 960.0],
+#           [0, 554.3, 540.0],    ← cy = 图像中心 (主点居中)
+#           [0, 0, 1]]
+K_pinhole = K_MONO.copy()
+```
+
+注意与方案 A 的 K_model 的区别：
+
+| | K_model（方案 A 目标） | K_pinhole（方案 B 中间图） |
+|--|----------------------|------------------------|
+| 分辨率 | 640×360 | 1920×1080 |
+| 焦距 f | 457.1 | 554.3 |
+| cx | 320.0 | 960.0 |
+| cy | **140.2**（含 crop 偏移） | **540.0**（图像中心） |
+| crop 偏移 | 编码在 cy 中 | 由后续 crop_rect 处理 |
+
+方案 A 将 crop 偏移"折叠"进了 K_model 的 cy；方案 B 则保持中间图主点居中，偏移由 crop_rect 实现。两者数学等效。
+
+##### Step 2: 预计算 remap 查找表（离线，一次性）
+
+```python
+# R: 旋转修正矩阵，含义与方案 A 相同（见 Section 7）
+R = np.eye(3)
+
+# 鱼眼 → 1920×1080 虚拟针孔 remap 表
+map1_full, map2_full = cv2.fisheye.initUndistortRectifyMap(
+    K=K_fisheye,          # 鱼眼标定内参
+    D=D,                  # 鱼眼畸变系数
+    R=R,                  # 旋转修正
+    P=K_pinhole,          # 目标: 1920×1080 针孔 (= Carla 相机)
+    size=(1920, 1080),    # 中间图分辨率
+    m1type=cv2.CV_16SC2,  # 定点格式
+)
+# 缓存 map1_full, map2_full 到文件
+```
+
+##### Step 3: 获取 crop 参数
+
+```python
+params = compute_crop_params()  # pitch=4°, crop_hfov=70°, horizon_ratio=0.3
+crop_rect = params['crop_rect']  # (572, 370, 776, 436)
+x, y, w, h = crop_rect
+```
+
+crop_rect 与 Carla 数据采集时使用的完全相同。这是方案 B 的核心优势——**裁剪参数直接复用训练配置，无需推导 K_model**。
+
+##### Step 4: 运行时每帧处理
+
+```python
+def process_frame_plan_b(frame_fisheye, map1_full, map2_full, crop_rect):
+    """方案 B: 两步法处理鱼眼帧。
+
+    Args:
+        frame_fisheye: 1920×1080 鱼眼原图 (BGR, uint8)
+        map1_full, map2_full: 预计算的 remap 查找表
+        crop_rect: (x, y, w, h) 裁剪区域
+    Returns:
+        frame_model: 640×360 模型输入
+        frame_pinhole: 1920×1080 中间去畸变图（可选，用于可视化）
+    """
+    x, y, w, h = crop_rect
+
+    # Step 1: 鱼眼 → 1920×1080 虚拟针孔
+    frame_pinhole = cv2.remap(frame_fisheye, map1_full, map2_full, cv2.INTER_LINEAR)
+
+    # Step 2: 裁剪 70° 中心区域
+    frame_crop = frame_pinhole[y:y+h, x:x+w]  # 776×436
+
+    # Step 3: 缩放到模型输入分辨率
+    frame_model = cv2.resize(frame_crop, (640, 360), interpolation=cv2.INTER_LINEAR)
+
+    return frame_model, frame_pinhole
+```
+
+如果不需要中间图，可以优化为只 remap 裁剪区域（见 Section 3.5.5 优化建议）。
+
+#### 3.5.4 方案对比
+
+| 维度 | 方案 A（一步法） | 方案 B（两步法） |
+|------|----------------|----------------|
+| **插值次数** | 1 次 | 2 次 |
+| **模型输入质量** | 基准 | 双重插值损失约 0.5–1 px（70° 边缘） |
+| **remap 像素数** | 23 万 (640×360) | 207 万 (1920×1080) |
+| **典型耗时 (x86 i7)** | ~0.5 ms | ~3.5 ms (remap ~2.5 ms + crop+resize ~1 ms) |
+| **典型耗时 (ARM A76)** | ~1.5 ms | ~10 ms |
+| **内存开销** | 查找表 ~1.8 MB | 查找表 ~16 MB + 中间图 ~6 MB |
+| **中间产物** | 无 | 1920×1080 去畸变针孔图 |
+| **cy 处理** | 编码在 K_model 中 | 由 crop_rect 处理（更直观） |
+| **与训练流程对称性** | 等效但路径不同 | **完全对称** |
+| **调试便利性** | 无法直接与 Carla 图像对比 | 中间图可直接与 Carla 渲染图叠加比较 |
+
+#### 3.5.5 适用场景与优化建议
+
+**推荐使用方案 B 的场景**：
+
+1. **开发调试阶段**：需要将 remap 中间图与 Carla 渲染图叠加对比，验证标定和 remap 的正确性
+2. **多算法复用**：除车道线检测外，还有其他算法（目标检测、自由空间等）需要使用同一帧去畸变图像，且各自有不同的 ROI 裁剪需求
+3. **可视化需求**：需要在完整 120° 视野的去畸变图上绘制检测结果，供人工审查
+4. **算力充裕的平台**：如 x86 开发机、带 GPU 的嵌入式平台，额外 3 ms 开销可忽略
+
+**优化建议**：
+
+如果不需要完整 1920×1080 中间图，可以只对裁剪区域计算 remap，减少无用像素的计算：
+
+```python
+# 优化: 只预计算 crop 区域对应的 remap 表
+# 原理: map1_full 中 crop 区域外的像素永远不会被使用
+map1_crop = map1_full[y:y+h, x:x+w].copy()
+map2_crop = map2_full[y:y+h, x:x+w].copy()
+
+# 运行时: remap 只输出 776×436
+frame_crop = cv2.remap(frame_fisheye, map1_crop, map2_crop, cv2.INTER_LINEAR)
+frame_model = cv2.resize(frame_crop, (640, 360), interpolation=cv2.INTER_LINEAR)
+```
+
+此优化使 remap 像素数从 207 万降到 34 万（776×436），耗时接近方案 A，但仍保留两次插值。适合"不需要中间图但希望使用 crop_rect 参数"的场景。
+
+> **注意**：上述 `map1_crop` 裁剪方式成立的前提是 `initUndistortRectifyMap` 生成的 map 中每个像素的值是源图坐标（指向鱼眼原图），与目标图中的位置无关。这对 `cv2.remap` 是成立的——map 的行列索引对应输出像素位置，map 值对应输入像素位置。裁剪 map 等价于只生成目标图的一个子区域。
 
 
 ## 4. 训练与部署的一致性
@@ -410,6 +675,143 @@ def draw_vanishing_point_guide(frame: np.ndarray) -> np.ndarray:
 | 消失点模糊/不存在 | 弯道或非直线道路 | 换一段直线道路校准 |
 
 
+### 5.7 自动消失点检测与量化输出
+
+Section 5.5 的人工目视校准依赖操作人员经验，适合安装调试阶段。为支持批量部署和开机自检（Section 8.5 方案 2），需要自动化的消失点检测与定量偏差输出。
+
+#### 5.7.1 检测算法
+
+基于直线道路场景下车道线汇聚特性，自动估计消失点位置：
+
+```python
+import cv2
+import numpy as np
+
+def detect_vanishing_point(frame: np.ndarray,
+                           roi_y_range=(60, 180),
+                           min_line_length=40) -> tuple[float, float] | None:
+    """自动检测 640×360 remap 图中的道路消失点。
+
+    方法: Canny 边缘 → HoughLinesP → 筛选近似平行于车道线方向的线段
+         → 两两求交点 → RANSAC 投票得到消失点。
+
+    Args:
+        frame: 640×360 BGR remap 图像
+        roi_y_range: 消失点搜索 y 范围 (排除天空和近处路面)
+        min_line_length: HoughLinesP 最小线段长度
+    Returns:
+        (vp_x, vp_y) 消失点坐标，检测失败返回 None
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+
+    # 只保留下半部分边缘 (车道线区域)
+    mask = np.zeros_like(edges)
+    mask[roi_y_range[0]:, :] = 255
+    edges = cv2.bitwise_and(edges, mask)
+
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50,
+                             minLineLength=min_line_length, maxLineGap=10)
+    if lines is None or len(lines) < 2:
+        return None
+
+    # 筛选: 保留倾斜角在 20°~80° 的线段 (排除近水平/近垂直噪声)
+    filtered = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+        if 20 < angle < 80:
+            filtered.append((x1, y1, x2, y2))
+
+    if len(filtered) < 2:
+        return None
+
+    # 两两求交点，RANSAC 投票
+    intersections = []
+    for i in range(len(filtered)):
+        for j in range(i + 1, len(filtered)):
+            pt = _line_intersection(filtered[i], filtered[j])
+            if pt is not None:
+                px, py = pt
+                # 只保留合理范围内的交点
+                if 100 < px < 540 and roi_y_range[0] < py < roi_y_range[1]:
+                    intersections.append(pt)
+
+    if len(intersections) < 3:
+        return None
+
+    # 取中位数作为鲁棒估计
+    pts = np.array(intersections)
+    vp_x = np.median(pts[:, 0])
+    vp_y = np.median(pts[:, 1])
+    return (float(vp_x), float(vp_y))
+
+
+def _line_intersection(l1, l2):
+    """两条线段的交点 (齐次坐标法)。"""
+    x1, y1, x2, y2 = l1
+    x3, y3, x4, y4 = l2
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-6:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    px = x1 + t * (x2 - x1)
+    py = y1 + t * (y2 - y1)
+    return (px, py)
+```
+
+#### 5.7.2 偏差量化与判定
+
+```python
+def quantify_calibration(vp_detected: tuple[float, float],
+                         f: float = 457.1,
+                         cx: float = 320.0,
+                         cy: float = 140.2) -> dict:
+    """将检测到的消失点转换为 pitch/yaw 偏差角度。
+
+    Returns:
+        字典含 pitch_deg, yaw_deg, pitch_status, yaw_status
+    """
+    vp_x, vp_y = vp_detected
+    pitch_deg = np.degrees(np.arctan((cy - vp_y) / f))
+    yaw_deg = np.degrees(np.arctan((vp_x - cx) / f))
+
+    # 判定状态
+    if 3.0 <= pitch_deg <= 5.0:
+        pitch_status = "OK (推荐范围内)"
+    elif 0.0 <= pitch_deg <= 7.0:
+        pitch_status = "WARN (训练覆盖范围内，但偏离推荐值)"
+    else:
+        pitch_status = "ERROR (超出训练覆盖范围)"
+
+    yaw_status = "OK" if abs(yaw_deg) < 3.0 else "WARN (yaw 偏差较大)"
+
+    return {
+        'pitch_deg': round(pitch_deg, 2),
+        'yaw_deg': round(yaw_deg, 2),
+        'pitch_status': pitch_status,
+        'yaw_status': yaw_status,
+    }
+```
+
+输出示例：
+```
+消失点检测: vp=(318.5, 109.1)
+pitch=3.87°  [OK (推荐范围内)]
+yaw=-0.19°   [OK]
+```
+
+#### 5.7.3 应用场景
+
+| 场景 | 调用方式 | 处理逻辑 |
+|------|---------|---------|
+| 安装校准 (Section 5.5) | 实时显示 + 定量输出 | 辅助人工调整，显示偏差数值 |
+| 开机自检 (Section 8.5 方案 2) | 启动后取前 N 帧直线道路的中位数 | pitch/yaw 超出训练范围则告警并记录日志 |
+| 定期巡检 | 后台每 M 帧检测一次 | 持续监控外参漂移，偏差超阈值则提示重新校准 |
+
+**局限性**：该方法要求场景中存在近似直线的车道线或道路边缘。弯道、无标线的道路上检测会失败，此时应降级为不输出判定结果，而非给出错误估计。
+
+
 ## 6. 像素值 Pipeline 一致性
 
 几何变换（remap）只是训练-部署一致性的一半，像素值域的对齐同样重要。
@@ -433,7 +835,39 @@ Carla 渲染图像与真实鱼眼相机在以下方面存在系统性差异：
 - **运动模糊**：Carla 默认无运动模糊，真实相机在急转弯时会出现
 - **ISP 差异**：真实相机的白平衡、锐化、降噪等 ISP 处理会改变纹理特征
 
-这些差异是 sim-to-real 域迁移的固有问题。当前方案通过 70° 裁剪减少了边缘畸变差异，但像素级域差距仍需在后续通过数据增强或真实数据微调来弥补。
+这些差异是 sim-to-real 域迁移的固有问题。当前方案通过 70° 裁剪减少了边缘畸变差异，但像素级域差距需要通过以下分阶段策略缓解：
+
+#### 阶段 1：训练时数据增强（零成本，立即可做）
+
+在训练 pipeline 中对 Carla 渲染图像施加随机增强，模拟真实相机特性：
+
+| 增强类型 | 实现方式 | 参数建议 | 模拟目标 |
+|---------|---------|---------|---------|
+| 亮度/对比度 | `torchvision.transforms.ColorJitter` | brightness=0.3, contrast=0.3 | ISP 自动曝光差异 |
+| 色调/饱和度 | `ColorJitter` | hue=0.05, saturation=0.3 | 白平衡差异 |
+| 高斯噪声 | 自定义 transform | sigma=0~15 (uint8 尺度) | 低光照传感器噪声 |
+| 运动模糊 | 随机方向线性核卷积 | kernel_size=3~7 | 急转弯/颠簸 |
+| 随机阴影 | 半透明多边形叠加 | alpha=0.3~0.6 | 树荫/建筑遮挡 |
+
+**注意**：增强只作用于输入图像，不改变标注标签。增强概率建议 50%（每帧独立），避免模型过拟合到增强模式。
+
+#### 阶段 2：真实数据微调（需数据采集）
+
+当具备真实鱼眼相机的采集条件时：
+
+- **最小数据量**：建议至少 2000 帧标注数据（覆盖晴天/阴天/傍晚三种光照条件），用于微调最后 2~3 层
+- **场景多样性**：至少覆盖 3 种道路类型（高速/城市/乡村）、2 种天气（晴/阴）、2 种时段（白天/傍晚）
+- **微调策略**：冻结 backbone，仅微调输出头，学习率设为 Carla 预训练时的 1/10
+- **混合训练**：建议 Carla 数据与真实数据按 1:1 混合，防止在真实小数据集上过拟合
+
+#### 阶段 3：部署初期置信度策略
+
+在仅有 Carla 训练模型、尚未经过真实数据微调时，部署应采用保守策略：
+
+- **仅启用告警功能**（LDW/FCW），不参与车辆控制
+- **输出附带不确定性**：利用模型 MDN 输出的 sigma 参数，sigma 过大时抑制告警
+- **设定触发阈值高于最终目标**：例如 LDW 偏离阈值暂设为 0.5m（最终 0.3m），降低误报率
+- **采集部署期间的推理结果**：作为阶段 2 微调的数据来源（主动学习 pipeline）
 
 ### 6.3 remap 插值方法一致性
 
