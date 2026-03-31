@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-CARLA_IMAGE="carlasim/carla:0.9.16"
-docker pull "${CARLA_IMAGE}"
+#CARLA_IMAGE="carlasim/carla:0.9.16"
+#docker pull "${CARLA_IMAGE}"
+CARLA_IMAGE="carla0916-addmaps:0.9.16"
 
 # 前台交互(-it) 或后台(-d)运行，可通过设置环境变量 DETACH 控制
 EXTRA_ARGS="-it"
@@ -32,5 +33,6 @@ docker run ${EXTRA_ARGS} \
   --env=NVIDIA_VISIBLE_DEVICES=all \
   --env=NVIDIA_DRIVER_CAPABILITIES=all \
   --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
+  --volume="/home/zyb/Downloads/AdditionalMaps_0.9.15.tar.gz:/workspace/Import/AdditionalMaps_0.9.15.tar.gz" \
   --name=${CONTAINER_NAME} \
   "${CARLA_IMAGE}" bash CarlaUE4.sh  -nosound -RenderOffScreen -quality-level=Epic
