@@ -59,6 +59,14 @@ PANEL_H = 400
 INFO_BAR_H = 60
 
 
+def _find_ref_height(label_dir: Path) -> str | None:
+  """找到 label_dir 下第一个存在的 H* 子目录名。"""
+  for d in sorted(label_dir.iterdir()):
+    if d.is_dir() and d.name.startswith('H'):
+      return d.name
+  return None
+
+
 def load_clean_log(path: Path) -> list[tuple[str, str]]:
   """Load clean_log.txt → [(frame_id, 'pass'|'fail'), ...]."""
   entries = []
@@ -74,10 +82,10 @@ def load_clean_log(path: Path) -> list[tuple[str, str]]:
 
 
 def render_frame(session_dir: Path, frame_id: str, status: str, reason: str,
-                 label_dir: Path, rpyCalib: np.ndarray, metadata: dict,
+                 label_dir: Path, ref_height: str, rpyCalib: np.ndarray, metadata: dict,
                  show_lanes: bool, show_edges: bool) -> np.ndarray:
   """Render H0 road + H0 wide with annotations and pass/fail info bar."""
-  anno = load_annotation(label_dir / 'H1', frame_id)
+  anno = load_annotation(label_dir / ref_height, frame_id)
   T_road = _build_cam_transform(K_ROAD, rpyCalib)
   T_wide = _build_cam_transform(K_WIDE, rpyCalib)
 
@@ -207,13 +215,15 @@ def main():
   else:
     min_ll_prob, min_speed = 0.5, 1.0
 
-  first_frame_id = all_entries[0][0] if all_entries else None
+  ref_height = _find_ref_height(label_dir)
+  if ref_height is None:
+    print(f"3d_labels 中无 H* 子目录: {label_dir}")
+    sys.exit(1)
+  print(f"标注参考高度: {ref_height}")
+
   for fid, status in all_entries:
     if status == 'fail':
-      if fid == first_frame_id:
-        reasons[fid] = 'first_frame'
-        continue
-      anno = load_annotation(label_dir / 'H1', fid)
+      anno = load_annotation(label_dir / ref_height, fid)
       if anno is None:
         reasons[fid] = 'no_annotation'
         continue
@@ -255,7 +265,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     for i, (fid, status) in enumerate(entries):
       img = render_frame(session_dir, fid, status, reasons.get(fid, ''),
-                         label_dir, rpyCalib, metadata, True, True)
+                         label_dir, ref_height, rpyCalib, metadata, True, True)
       cv2.imwrite(str(out_dir / f'clean_{status}_{fid}.png'), img)
       if (i + 1) % 50 == 0:
         print(f"  {i+1}/{len(entries)} saved")
@@ -279,7 +289,7 @@ def main():
   while True:
     fid, status = entries[idx]
     img = render_frame(session_dir, fid, status, reasons.get(fid, ''),
-                       label_dir, rpyCalib, metadata, show_lanes, show_edges)
+                       label_dir, ref_height, rpyCalib, metadata, show_lanes, show_edges)
 
     mode_str = filter_mode.upper()
     cv2.setWindowTitle(win_name,

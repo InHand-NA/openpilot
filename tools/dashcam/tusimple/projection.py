@@ -108,18 +108,17 @@ def lanes_3d_to_tusimple(
   """完整的 3D 车道线到 TuSimple 2D 格式转换。
 
   车道线选择策略 (TuSimple 固定 4 条):
-    slot 0 (L-out): lane[0] 优先, 低置信 → road_edge[0] 补位
-    slot 1 (L-inn): lane[1] only
-    slot 2 (R-inn): lane[2] only
-    slot 3 (R-out): lane[3] 优先, 低置信 → road_edge[1] 补位
+    每条 road_edge 最多补位一个槽位, 内侧线优先。
+    左侧: road_edge[0] 优先补 L-inn(slot 1), 否则补 L-out(slot 0)
+    右侧: road_edge[1] 优先补 R-inn(slot 2), 否则补 R-out(slot 3)
 
   车道线名称:
     LL  = 左外车道线 (lane_lines[0])
     L   = 左内车道线 (lane_lines[1], 当前车道左边界)
     R   = 右内车道线 (lane_lines[2], 当前车道右边界)
     RR  = 右外车道线 (lane_lines[3])
-    LRE = 左路沿 (road_edges[0], 作为 LL 的补位)
-    RRE = 右路沿 (road_edges[1], 作为 RR 的补位)
+    LRE = 左路沿 (road_edges[0], 补位 L 或 LL)
+    RRE = 右路沿 (road_edges[1], 补位 R 或 RR)
 
   Returns:
     (lanes, lane_names):
@@ -131,7 +130,26 @@ def lanes_3d_to_tusimple(
 
   # 槽位名称: lane_lines 原始名 vs road_edge 补位名
   SLOT_LANE_NAMES = ['LL', 'L', 'R', 'RR']
-  SLOT_FALLBACK_NAMES = ['LRE', None, None, 'RRE']
+
+  # Road edge 补位决策: 每条 road_edge 最多补一个槽位，内侧优先
+  # 左侧: road_edge[0] 优先补 L-inn(slot 1), 否则补 L-out(slot 0)
+  # 右侧: road_edge[1] 优先补 R-inn(slot 2), 否则补 R-out(slot 3)
+  left_re_slot = -1   # road_edge[0] 补位到哪个 slot, -1 表示未分配
+  right_re_slot = -1  # road_edge[1] 补位到哪个 slot
+  if road_edges_3d.shape[0] > 0:
+    l_in_prob = float(lane_lines_prob[1])
+    l_out_prob = float(lane_lines_prob[0])
+    if l_in_prob <= lane_prob_threshold:
+      left_re_slot = 1   # 补位 L-inn
+    elif l_out_prob <= lane_prob_threshold:
+      left_re_slot = 0   # 补位 L-out
+  if road_edges_3d.shape[0] > 1:
+    r_in_prob = float(lane_lines_prob[2])
+    r_out_prob = float(lane_lines_prob[3])
+    if r_in_prob <= lane_prob_threshold:
+      right_re_slot = 2  # 补位 R-inn
+    elif r_out_prob <= lane_prob_threshold:
+      right_re_slot = 3  # 补位 R-out
 
   # 构建 4 个槽位的 3D 源: (pts_3d, prob, name)
   slots: list[tuple[np.ndarray, float, str]] = []
@@ -139,12 +157,10 @@ def lanes_3d_to_tusimple(
     prob = float(lane_lines_prob[i])
     if prob > lane_prob_threshold:
       slots.append((lane_lines_3d[i], prob, SLOT_LANE_NAMES[i]))
-    elif i == 0 and road_edges_3d.shape[0] > 0:
-      # L-out 补位: road_edge[0]
-      slots.append((road_edges_3d[0], 1.0, SLOT_FALLBACK_NAMES[i]))
-    elif i == 3 and road_edges_3d.shape[0] > 1:
-      # R-out 补位: road_edge[1]
-      slots.append((road_edges_3d[1], 1.0, SLOT_FALLBACK_NAMES[i]))
+    elif i == left_re_slot:
+      slots.append((road_edges_3d[0], 1.0, 'LRE'))
+    elif i == right_re_slot:
+      slots.append((road_edges_3d[1], 1.0, 'RRE'))
     else:
       slots.append((None, 0.0, SLOT_LANE_NAMES[i]))
 

@@ -241,9 +241,9 @@ def annotate_session(
       }
 
       # Write H0 canonical annotation (untransformed, at reference height)
-      h0_meta = dict(frame_meta)
-      h0_meta['camera_height'] = H0_HEIGHT
-      write_pool.submit(_write_annotation, output_dir / 'H0', frame_id, h0_meta, canonical)
+      h0_tag_meta = dict(frame_meta)
+      h0_tag_meta['camera_height'] = H0_HEIGHT
+      write_pool.submit(_write_annotation, output_dir / 'H0', frame_id, h0_tag_meta, canonical)
 
       for tag, h_k in heights.items():
         if abs(h_k - H0_HEIGHT) < 0.01:

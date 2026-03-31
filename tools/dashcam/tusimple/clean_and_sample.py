@@ -59,9 +59,6 @@ def quality_filter(
   if not frame_files:
     raise ValueError(f"{ref_dir.name} 标注为空: {ref_dir}")
 
-  all_frame_ids = sorted(p.stem for p in frame_files)
-  first_frame_id = all_frame_ids[0] if all_frame_ids else None
-
   pass_ids: list[str] = []
   fail_ids: list[str] = []
   reasons: dict[str, str] = {}
@@ -72,15 +69,10 @@ def quality_filter(
     with open(fpath) as f:
       anno = json.load(f)
 
-    if frame_id == first_frame_id:
-      fail_ids.append(frame_id)
-      reasons[frame_id] = 'first_frame'
-      continue
-
     ll_prob = anno.get('lane_lines_prob', [0.0] * 4)
     l_inner = float(ll_prob[L_INNER_IDX])
     r_inner = float(ll_prob[R_INNER_IDX])
-    if not (l_inner > min_ll_prob and r_inner > min_ll_prob):
+    if (l_inner < min_ll_prob and r_inner < min_ll_prob):
       fail_ids.append(frame_id)
       reasons[frame_id] = f'll_prob L={l_inner:.3f} R={r_inner:.3f}'
       continue
