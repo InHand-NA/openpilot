@@ -884,12 +884,155 @@ p_camera = K_camera @ T_view←device @ R_device←calib @ K_model_inv @ p_model
 
 ---
 
-13. FAQ
-- "2.3 软件中的相机内参"中的相机内参是假设物理相机是理想的针孔相机，不考虑相机畸变？
-- camerad运行在ISP(高通 IFE中)？不是CPU/GPU？
-- 相机输出的帧率由谁控制？Sensor？camerad？
-- 相机图像的warp处理是否该ian了物体在图像中的长宽比？wrap前后，相机图像FOV是否改变？
-- 输入给神经网络模型图像是虚拟相机图像，这个图像是否统一了相机RPY姿态？
+## 13. FAQ
+
+### Q1: "2.3 软件中的相机内参"中的相机内参是假设物理相机是理想的针孔相机，不考虑相机畸变？
+
+**是的，openpilot 在整个图像处理流水线中使用的是纯针孔相机模型，不考虑镜头畸变。**
+
+从 `CameraConfig` 的定义可以看出，每个相机仅存储三个参数：`width`、`height`、`focal_length`（`camera.py:8-25`）。由此生成的内参矩阵 K 是标准的 3x3 针孔模型矩阵，没有径向畸变（radial distortion）、切向畸变（tangential distortion）等参数。
+
+在整个 `common/transformations/` 目录中，没有任何 `distort`/`undistort`/畸变校正相关的代码。warp 变换使用的是 3x3 单应性矩阵（homography），这只能表达投影变换，无法表达非线性的镜头畸变校正。
+
+openpilot 的开发者也意识到这是一个近似。Wide Camera 的内参定义旁有注释：
+
+```python
+_ar_ox_fisheye = CameraConfig(1928, 1208, 567.0)
+# focal length probably wrong? magnification is not consistent across frame
+```
+
+这说明 Wide Camera（广角/鱼眼镜头）的等效焦距在画面中心和边缘并不一致（这正是镜头畸变的表现），但 openpilot 仍然用单一焦距值来近似。
+
+**这种近似之所以可行，有几个原因**：
+1. **Road Camera**（f=8mm）是长焦镜头，畸变本身很小，针孔模型近似误差可忽略。
+2. **Wide Camera**（f=1.71mm）虽然畸变较大，但模型输入的 SBIG 虚拟相机焦距（455）与物理焦距（567）接近，warp 变换的缩放幅度不大（~1.25x），且模型主要关注画面中心区域，边缘畸变的影响被弱化。
+3. **模型通过训练学习了这种近似带来的残余畸变**——模型接收的就是"有畸变残余的虚拟针孔相机图像"，训练数据也同样如此，所以模型已经适应了这种输入特性。
+
+### Q2: camerad 运行在 ISP（高通 IFE）中？不是 CPU/GPU？
+
+**ISP 处理和 camerad 进程是分开的，各自负责不同的工作。**
+
+具体来说：
+
+- **ISP（IFE/BPS）是高通 SoC 中的专用硬件加速器**，独立于 CPU 和 GPU。图像的核心处理（黑电平校正、去拜耳、白平衡、色彩校正、伽马、YUV 转换等——即第 3 章所述的全部 ISP 流水线）都在这个专用硬件上执行，不消耗 CPU 或 GPU 资源。
+
+- **camerad 是运行在 CPU 上的用户态进程**（`system/camerad/`），它的职责是：
+  1. **配置** ISP 硬件：通过 V4L2/ioctl 接口设置 ISP 寄存器（IFE 模块参数、色彩矩阵、伽马 LUT 等），见 `spectra.cc:702-898`。
+  2. **配置**传感器：通过 I2C 写入传感器寄存器（曝光、增益、PLL 等），见 `ox03c10.cc:110-127`。
+  3. **事件循环**：通过 `poll()` + `VIDIOC_DQEVENT` 等待 ISP 硬件完成每帧处理（`camera_qcom2.cc:257-323`）。
+  4. **自动曝光（AE）**：在 CPU 上读取 Y 平面亮度、计算目标曝光参数（`camera_qcom2.cc:126-222`）。
+  5. **帧发送**：将 ISP 输出的 YUV 帧通过 VisionIPC 共享内存发送给下游进程（`camera_common.cc:45-61`）。
+
+所以数据流是：
+
+```
+传感器 → ISP 硬件 (IFE) → YUV NV12 (硬件输出到共享内存)
+                ↑ 配置/控制               ↓ 通知帧完成
+           camerad (CPU)              camerad (CPU)
+                                         ↓ VisionIPC 发送
+                                      modeld 等下游进程
+```
+
+camerad 本身不做任何像素级的图像处理，它只是 ISP 硬件的"管理者"。
+
+### Q3: 相机输出的帧率由谁控制？Sensor？camerad？
+
+**帧率由传感器硬件的寄存器配置决定，camerad 在初始化时通过 I2C 写入这些寄存器。**
+
+OX03C10 传感器的帧率由以下寄存器决定（`ox03c10_registers.h`）：
+
+```c
+// PLL 设置决定像素时钟频率
+{0x0303, 0x01},                      // pll1_prediv
+{0x0304, 0x01}, {0x0305, 0x2c},      // pll1_loopdiv = 300
+
+// 行时序（水平总像素数）
+{0x380c, 0x04}, {0x380d, 0x47},      // HTS = 0x447 = 1095
+
+// 帧时序（垂直总行数）
+{0x380e, 0x08}, {0x380f, 0x15},      // VTS = 0x815 = 2069
+```
+
+帧率 = 像素时钟 / (HTS × VTS)。寄存器注释提到基础配置为 `60fps_HDR4_LFR`（60fps HDR 低帧率模式），但实际 VTS 被调大了（从注释中的 `0x2ae` 改为 `0x815`），对应约 53.65ms 的帧周期。
+
+此外，传感器配置了 **FSIN（Frame Sync，帧同步）外部触发**模式（`ox03c10_registers.h:67-69`）：
+
+```c
+// FSIN (frame sync) with external pulses
+{0x3009, 0x2},
+{0x3015, 0x2},
+```
+
+这意味着传感器并非自由运行（free-running），而是等待外部同步脉冲来触发每帧的开始。comma 3X 硬件提供 **20 Hz** 的 FSIN 脉冲信号，所以三个相机被精确同步到 20 fps。
+
+从 cereal 服务注册表也能确认：
+
+```python
+# cereal/services.py
+"roadCameraState": (True, 20., 20),
+"wideRoadCameraState": (True, 20., 20),
+```
+
+**总结**：camerad 在启动时通过 I2C 配置传感器的 PLL、时序和 FSIN 模式，之后帧率由硬件 FSIN 脉冲驱动（20 Hz），camerad 只是被动等待帧事件。
+
+### Q4: 相机图像的 warp 处理是否改变了物体在图像中的长宽比？warp 前后，相机图像 FOV 是否改变？
+
+**长宽比**：在画面中心附近基本不变，边缘可能有轻微变化。
+
+warp 变换的核心矩阵是：
+
+```
+warp_matrix = K_camera @ T_view←device @ R_device←calib @ K_model_inv
+```
+
+由于物理相机和模型虚拟相机的内参矩阵 K 都是**各向同性的**（fx = fy），所以变换在 x 和 y 方向上的缩放比例相同。对于画面中心附近的物体，这等同于均匀缩放，**长宽比完全保持不变**。
+
+对于远离光轴的物体，由于标定旋转 R 的存在（以及透视投影本身的非线性），会引入轻微的透视变形，但这不是"长宽比改变"——而是正常的透视效果（近大远小）。
+
+**FOV（视场角）**：显著改变。warp 后的 FOV 完全由模型虚拟相机的内参决定，而非物理相机。
+
+计算水平半视场角 θ = arctan(cx / f)，可得：
+
+| 相机/模型 | 焦距 (px) | cx (px) | 水平 FOV |
+|-----------|-----------|---------|----------|
+| Road Camera 物理 | 2648 | 964 | 2 × arctan(964/2648) ≈ **40°** |
+| MED 模型虚拟 | 910 | 256 | 2 × arctan(256/910) ≈ **31°** |
+| Wide Camera 物理 | 567 | 964 | 2 × arctan(964/567) ≈ **119°** |
+| SBIG 模型虚拟 | 455 | 256 | 2 × arctan(256/455) ≈ **59°** |
+
+可以看出：
+- **Road Camera**: 物理 FOV ~40° → 模型 FOV ~31°，变窄了约 23%。模型只取了中心区域的精华部分。
+- **Wide Camera**: 物理 FOV ~119° → 模型 FOV ~59°，大幅缩窄。广角相机的边缘大畸变区域被裁掉，只保留中心约一半的视野。
+
+注意垂直方向上 FOV 的变化更大，因为模型的 cy 偏移很不对称（尤其是 MED 模型的 cy=47.6 远离图像中心 128），这意味着模型在垂直方向上主要关注地平线以下的道路区域。
+
+### Q5: 输入给神经网络模型的图像是虚拟相机图像，这个图像是否统一了相机 RPY 姿态？
+
+**是的，这正是 warp 变换的核心目的之一。**
+
+warp 矩阵中包含标定旋转：
+
+```python
+device_from_calib = rot_from_euler(device_from_calib_euler)  # rpyCalib → 3x3 旋转
+camera_from_calib = intrinsics @ view_frame_from_device_frame @ device_from_calib
+warp_matrix = camera_from_calib @ calib_from_model
+```
+
+`rpyCalib`（roll, pitch, yaw）描述的是设备坐标系相对于标定坐标系的旋转偏差。标定坐标系可以理解为一个**规范化的参考姿态**。当 warp 矩阵中纳入 `device_from_calib` 这个旋转后，变换的效果是：
+
+**将实际相机图像"纠正"到标定坐标系对应的标准视角下。**
+
+具体来说：
+- 不同车辆上的 comma 3X 安装角度不完全一样（可能有几度的 pitch/yaw 偏差）。
+- `calibrationd` 进程通过观测消失点等方法估算出这个安装偏差 `rpyCalib`。
+- warp 变换将这个偏差旋转掉，使得**无论相机实际安装在什么角度，模型看到的图像都像是从同一个标准姿态拍摄的**。
+
+这对模型泛化至关重要：
+1. **训练时**：所有训练数据都经过了相同的标定纠正，模型学到的是标准视角下的特征。
+2. **推理时**：每辆车的安装偏差被实时补偿，模型始终工作在熟悉的"标准视角"下。
+3. **效果**：模型不需要学习处理各种安装角度的变化，可以专注于理解道路场景。
+
+如果不做标定纠正（rpyCalib = [0,0,0]），相机 pitch 偏差几度就会导致地平线在图像中偏移几十个像素，这对车道线检测等任务会造成显著影响。
 
 
 *本文档基于 openpilot 源码分析生成，不包含 `tools/dashcam` 目录的代码。*
