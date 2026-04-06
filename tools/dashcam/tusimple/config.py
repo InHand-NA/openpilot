@@ -18,8 +18,8 @@ H0_WIDE_FOCAL = 567.0
 
 # ── H1~H9: Mono single-eye camera (Carla pinhole rendering) ─────────────────
 MONO_W, MONO_H = 1920, 1080
-MONO_HFOV = 120  # degrees
-MONO_FOCAL = MONO_W / 2 / np.tan(np.radians(MONO_HFOV / 2))  # ≈554.256
+MONO_HFOV = 90  # degrees
+MONO_FOCAL = MONO_W / 2 / np.tan(np.radians(MONO_HFOV / 2))  # =960.0
 
 K_MONO = np.array([
   [MONO_FOCAL, 0.0,        MONO_W / 2],
@@ -33,7 +33,7 @@ TUSIMPLE_W, TUSIMPLE_H = 1280, 720
 # TuSimple standard h_samples: v=160 to v=710, step 10
 TUSIMPLE_H_SAMPLES = list(range(160, 720, 10))  # 56 sample points
 
-# ── ROI crop parameters (120° → target FOV, improve far-field resolution) ────
+# ── ROI crop parameters (90° → target FOV, improve far-field resolution) ─────
 CROP_HFOV = 70        # degrees, effective HFOV after crop
 NOMINAL_PITCH = 4.0   # degrees, nominal mount pitch (fixes crop region)
 HORIZON_RATIO = 0.3   # horizon position in cropped image (0=top, 1=bottom)
@@ -46,7 +46,7 @@ def compute_crop_params(
 ) -> dict:
   """Compute ROI crop parameters and equivalent intrinsics.
 
-  Crops a center region of crop_hfov from 1920x1080 (HFOV=120°),
+  Crops a center region of crop_hfov from 1920x1080 (HFOV=90°),
   maintaining 16:9 aspect ratio, then scales to 1280x720.
 
   Uses fixed NOMINAL_PITCH to compute crop region — shared by training
@@ -93,8 +93,8 @@ def compute_crop_params(
   }
 
 # Fixed crop parameters (NOMINAL_PITCH=4°, CROP_HFOV=70°):
-#   crop_rect = (572, 370, 776, 436)
-#   K_crop = [[914.3, 0, 640.0], [0, 914.3, 280.4], [0, 0, 1]]
+#   crop_rect = (288, 246, 1344, 756)
+#   K_crop = [[914.3, 0, 640.0], [0, 914.3, 280.0], [0, 0, 1]]
 #   effective_focal = 914.3
 
 

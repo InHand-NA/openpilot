@@ -1,7 +1,7 @@
 """TuSimple Carla world — H0 reference stereo + H1~H9 mono cameras.
 
 H0 (openpilot narrow+wide at 1.22m) provides modeld 3D annotation baseline.
-H1~H9 (1920×1080, FOV=120°) at various heights provide TuSimple training images.
+H1~H9 (1920×1080, FOV=90°) at various heights provide TuSimple training images.
 
 All cameras share the same pitch/yaw rotation; only height differs (H1~H9).
 
@@ -41,7 +41,7 @@ class TuSimpleCarlaWorld:
   """Carla world with H0 reference cameras + H1~H9 mono cameras.
 
   H0 (openpilot narrow+wide at 1.22m) provides modeld 3D annotation.
-  H1~H9 (1920×1080, FOV=120°) at various heights provide TuSimple training images.
+  H1~H9 (1920×1080, FOV=90°) at various heights provide TuSimple training images.
 
   Args:
     host: Carla server hostname

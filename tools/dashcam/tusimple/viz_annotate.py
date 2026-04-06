@@ -43,7 +43,7 @@ import numpy as np
 
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
-from openpilot.tools.dashcam.tusimple.config import HEIGHT_DEFS, K_MONO
+from openpilot.tools.dashcam.tusimple.config import HEIGHT_DEFS, MONO_W, MONO_H, K_MONO
 from openpilot.tools.dashcam.tusimple.viz_collect import (
   resize_keep_ar,
   load_session_frames,
@@ -321,7 +321,17 @@ def render_grid(session_dir: Path, frame_id: str, label_dir: Path,
   """Render 3×3 grid (1920×1080): 8 cameras + 1 info panel."""
   T_road = _build_cam_transform(K_ROAD, rpyCalib)
   T_wide = _build_cam_transform(K_WIDE, rpyCalib)
-  T_mono = _build_cam_transform(K_MONO, rpyCalib)
+  # Read actual mono focal from clip_info (handles both 120° and 90° data)
+  mono_focal = clip_info.get('mono_camera', {}).get('focal')
+  if mono_focal is not None:
+    K_mono_actual = np.array([
+      [mono_focal, 0.0,        MONO_W / 2],
+      [0.0,        mono_focal, MONO_H / 2],
+      [0.0,        0.0,        1.0],
+    ])
+  else:
+    K_mono_actual = K_MONO
+  T_mono = _build_cam_transform(K_mono_actual, rpyCalib)
   # Load canonical (H0) annotation; fall back to H1 for backward compat
   anno_canonical = load_annotation(label_dir / 'H0', frame_id)
   if anno_canonical is None:
